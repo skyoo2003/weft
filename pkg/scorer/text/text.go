@@ -1,0 +1,95 @@
+// Package text scores documents with BM25 over the index's inverted index.
+//
+// It is one of four interchangeable scorers. Nothing outside this package knows
+// it computes BM25, and this package knows nothing about the other scorers or
+// about fusion.
+package text
+
+import (
+	"context"
+	"math"
+
+	"github.com/skyoo2003/weft/pkg/engine"
+)
+
+// BM25 parameters, fixed at the conventional defaults.
+//
+// ponytail: constants, not knobs. Milestone 4 is where there is a quality
+// metric to tune them against; a config struct before then is a setting nobody
+// can evaluate.
+const (
+	K1 = 1.2
+	B  = 0.75
+)
+
+// Scorer ranks documents by BM25 over Query.Text.
+type Scorer struct {
+	ix *engine.Index
+}
+
+// New returns a text scorer reading ix.
+func New(ix *engine.Index) *Scorer { return &Scorer{ix: ix} }
+
+// Name implements engine.Scorer.
+func (s *Scorer) Name() string { return "text" }
+
+// Candidates implements engine.Scorer.
+//
+// The scoring is standard BM25 with the log(1 + ...) IDF form:
+//
+//	IDF(q)   = ln(1 + (N - n(q) + 0.5) / (n(q) + 0.5))
+//	score(D) = Σ IDF(q) · f(q,D)·(K1+1) / (f(q,D) + K1·(1 - B + B·|D|/avgdl))
+//
+// That IDF form is chosen over the classic ln((N - n + 0.5)/(n + 0.5)) because
+// the classic one goes negative for a term appearing in more than half the
+// corpus, which lets a common term subtract from a document's score. Here the
+// argument to ln is always > 1, so IDF is always > 0.
+func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
+	if k <= 0 {
+		return nil, nil
+	}
+	terms := engine.Tokenize(q.Text)
+	if len(terms) == 0 {
+		return nil, nil
+	}
+	n := float64(s.ix.Len())
+	if n == 0 {
+		return nil, nil
+	}
+	avgdl := s.ix.AvgDocLen()
+
+	// Duplicate query terms are summed twice, which is the formula taken
+	// literally: the sum is over occurrences in Q, not over the distinct set.
+	acc := make(map[engine.DocID]float64)
+	for _, term := range terms {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		posts := s.ix.Lookup(term)
+		if len(posts) == 0 {
+			continue // n(q) = 0: a term in no document contributes nothing.
+		}
+		nq := float64(len(posts))
+		idf := math.Log(1 + (n-nq+0.5)/(nq+0.5))
+
+		for _, p := range posts {
+			f := float64(p.Freq)
+			// avgdl == 0 means every document is empty, so there is nothing to
+			// normalize against; norm stays 1 rather than dividing by zero.
+			norm := 1.0
+			if avgdl > 0 {
+				norm = 1 - B + B*float64(s.ix.DocLen(p.Doc))/avgdl
+			}
+			acc[p.Doc] += idf * f * (K1 + 1) / (f + K1*norm)
+		}
+	}
+	if len(acc) == 0 {
+		return nil, nil
+	}
+
+	cands := make([]engine.Candidate, 0, len(acc))
+	for doc, score := range acc {
+		cands = append(cands, engine.Candidate{Doc: doc, Score: score})
+	}
+	return engine.TopK(cands, k), nil
+}

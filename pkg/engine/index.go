@@ -1,0 +1,154 @@
+package engine
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"unicode"
+)
+
+// Sentinel errors from Add. Library code here never panics.
+var (
+	ErrEmptyKey     = errors.New("engine: document key is empty")
+	ErrDuplicateKey = errors.New("engine: duplicate document key")
+)
+
+// Posting is one document's occurrence count for one term.
+type Posting struct {
+	Doc  DocID
+	Freq int
+}
+
+// Index is the single shared store. Add is the only writer; scorers only ever
+// read, and none of them keeps a private copy of the corpus. That is the
+// property milestone 1 is testing — a scorer that needed its own store would
+// mean the index is not actually scorer-neutral.
+type Index struct {
+	// ponytail: one index-wide RWMutex. Shard or copy-on-write only if write
+	// throughput ever shows up as a problem; milestone 1 has one writer.
+	mu sync.RWMutex
+
+	docs  []Document       // indexed by DocID
+	byKey map[string]DocID // Document.Key -> DocID
+
+	postings map[string][]Posting // term -> postings, ascending DocID
+	docLen   []int                // token count per DocID, for BM25 normalization
+	totalLen int
+}
+
+// New returns an empty index.
+func New() *Index {
+	return &Index{
+		byKey:    make(map[string]DocID),
+		postings: make(map[string][]Posting),
+	}
+}
+
+// Tokenize lowercases and splits on everything that is not a letter or digit.
+//
+// It lives in engine rather than in scorer/text because Add has to tokenize to
+// build the postings, and engine importing scorer/text would wreck the whole
+// dependency story. Morphological analysis is out of scope (PRD), and CJK runs
+// stay glued into one token here — a known wrong answer that milestone 1 does
+// not need to be right about.
+func Tokenize(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+// Add stores d and returns its assigned DocID.
+//
+// Links are not resolved here: a document may reference a Key that has not been
+// added yet, or never will be. Resolution happens at traversal time.
+func (ix *Index) Add(d Document) (DocID, error) {
+	if d.Key == "" {
+		return 0, ErrEmptyKey
+	}
+
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+
+	if _, dup := ix.byKey[d.Key]; dup {
+		return 0, fmt.Errorf("add %q: %w", d.Key, ErrDuplicateKey)
+	}
+
+	id := DocID(len(ix.docs))
+	ix.docs = append(ix.docs, d)
+	ix.byKey[d.Key] = id
+
+	toks := Tokenize(d.Text)
+	freq := make(map[string]int, len(toks))
+	for _, t := range toks {
+		freq[t]++
+	}
+	// IDs only ever increase, so appending keeps every posting list sorted by
+	// DocID for free.
+	for t, f := range freq {
+		ix.postings[t] = append(ix.postings[t], Posting{Doc: id, Freq: f})
+	}
+
+	ix.docLen = append(ix.docLen, len(toks))
+	ix.totalLen += len(toks)
+
+	return id, nil
+}
+
+// Len is the number of documents, which is also one past the highest DocID.
+func (ix *Index) Len() int {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return len(ix.docs)
+}
+
+// Doc returns the document with the given id. The bool is false for an id that
+// was never assigned.
+func (ix *Index) Doc(id DocID) (Document, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	if int(id) >= len(ix.docs) {
+		return Document{}, false
+	}
+	return ix.docs[id], true
+}
+
+// Resolve maps a caller-supplied Key to its DocID. The bool is false for a Key
+// that was never added — which is exactly how dangling Links are detected.
+func (ix *Index) Resolve(key string) (DocID, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	id, ok := ix.byKey[key]
+	return id, ok
+}
+
+// Lookup returns the postings for term, ascending by DocID, or nil if no
+// document contains it. The result aliases index state and must not be
+// modified.
+func (ix *Index) Lookup(term string) []Posting {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return ix.postings[term]
+}
+
+// DocLen is the token count of a document, or 0 for an unknown id.
+func (ix *Index) DocLen(id DocID) int {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	if int(id) >= len(ix.docLen) {
+		return 0
+	}
+	return ix.docLen[id]
+}
+
+// AvgDocLen is the mean token count across the corpus, and 0 for an empty
+// corpus or a corpus of empty documents. Callers doing BM25 length
+// normalization must treat 0 as "no normalization" rather than dividing by it.
+func (ix *Index) AvgDocLen() float64 {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	if len(ix.docs) == 0 {
+		return 0
+	}
+	return float64(ix.totalLen) / float64(len(ix.docs))
+}
