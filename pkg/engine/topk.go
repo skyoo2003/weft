@@ -12,6 +12,9 @@ import "sort"
 // ponytail: full sort, O(n log n). A bounded container/heap is O(n log k) and
 // worth it once a scorer produces candidate sets far larger than k — none does
 // in milestone 1, and one shared selection path beats four hand-rolled ones.
+// Do not upgrade before the cursor interface is settled (docs/FINDINGS.md
+// section 3.1): early termination maintains a threshold rather than a k-sized
+// heap, so building the heap first means writing selection twice.
 func TopK(cands []Candidate, k int) []Candidate {
 	if k <= 0 || len(cands) == 0 {
 		return nil
