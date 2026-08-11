@@ -3,6 +3,8 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -12,6 +14,13 @@ import (
 var (
 	ErrEmptyKey     = errors.New("engine: document key is empty")
 	ErrDuplicateKey = errors.New("engine: duplicate document key")
+
+	// ErrNonFiniteVector rejects NaN and infinite vector components at the
+	// point they enter the index. A non-finite component makes a cosine score
+	// NaN, and NaN breaks the ordering TopK relies on: a NaN-scored document
+	// can sort above a document scoring 0.9, and fusion then turns that into a
+	// plausible-looking result. Failing here means it cannot happen at all.
+	ErrNonFiniteVector = errors.New("engine: vector has a non-finite component")
 )
 
 // Posting is one document's occurrence count for one term.
@@ -66,6 +75,18 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	if d.Key == "" {
 		return 0, ErrEmptyKey
 	}
+	for i, c := range d.Vector {
+		if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0, fmt.Errorf("add %q: vector component %d is %v: %w", d.Key, i, c, ErrNonFiniteVector)
+		}
+	}
+
+	// Store copies of the slice-backed fields. Appending d would copy only the
+	// slice headers, leaving the index pointing at the caller's arrays: reusing
+	// a scratch buffer across Add calls would then silently rewrite documents
+	// already indexed, and mutating one concurrently would race past ix.mu.
+	d.Vector = slices.Clone(d.Vector)
+	d.Links = slices.Clone(d.Links)
 
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -104,6 +125,10 @@ func (ix *Index) Len() int {
 
 // Doc returns the document with the given id. The bool is false for an id that
 // was never assigned.
+//
+// The returned Vector and Links alias index state and must not be modified,
+// the same contract as Lookup. Copying them here would allocate once per
+// document per query in the scorers that scan the whole corpus.
 func (ix *Index) Doc(id DocID) (Document, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
@@ -147,6 +172,25 @@ func (ix *Index) DocLen(id DocID) int {
 func (ix *Index) AvgDocLen() float64 {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
+	return ix.avgDocLen()
+}
+
+// Stats returns the corpus size and mean token count as one value, read under a
+// single lock so the two cannot come from different moments.
+//
+// BM25 needs both, and reading them through separate calls lets a concurrent
+// Add land in between. Postings fetched afterwards can still be newer than the
+// returned count, so a scorer must also tolerate seeing more postings for a
+// term than there are documents — see the clamp in scorer/text. Making the
+// whole read a true snapshot is milestone 2 work (docs/FINDINGS.md section 4.4).
+func (ix *Index) Stats() (docs int, avgDocLen float64) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return len(ix.docs), ix.avgDocLen()
+}
+
+// avgDocLen requires ix.mu to be held.
+func (ix *Index) avgDocLen() float64 {
 	if len(ix.docs) == 0 {
 		return 0
 	}

@@ -17,11 +17,13 @@
 package engine_test
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -173,6 +175,127 @@ func TestNeitherEngineNorFusionImportsAScorer(t *testing.T) {
 	}
 }
 
+// TestEngineAPISurfaceIsUnchanged measures the part of a new scorer's cost the
+// import check cannot see.
+//
+// The import check proves engine and fusion never name a scorer package. It does
+// not prove that adding a scorer required no engine change, and that distinction
+// matters: a scorer needing new input data has to read it from engine.Document,
+// because scorers are not allowed their own store (docs/FINDINGS.md section 2.2).
+// Document.Time exists solely for the recency scorer and was written before that
+// scorer existed, which flattered the original "zero lines changed" figure.
+//
+// This golden file fails when engine's exported surface changes, so a new field
+// on Document becomes a deliberate edit with a visible cost instead of passing
+// unnoticed. Refresh with:
+//
+//	WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/
+func TestEngineAPISurfaceIsUnchanged(t *testing.T) {
+	got := strings.Join(exportedAPI(t, "."), "\n") + "\n"
+	golden := filepath.Join("testdata", "engine_api.txt")
+
+	if os.Getenv("WEFT_UPDATE_GOLDEN") != "" {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		t.Logf("updated %s", golden)
+		return
+	}
+
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v — regenerate with WEFT_UPDATE_GOLDEN=1", golden, err)
+	}
+	if got != string(want) {
+		t.Errorf("engine's exported API changed.\n--- recorded\n%s\n--- current\n%s\n"+
+			"A new scorer needing a new Document field is a real engine cost. Record it in "+
+			"docs/FINDINGS.md, then refresh with WEFT_UPDATE_GOLDEN=1.", want, got)
+	}
+}
+
+// exportedAPI lists dir's exported declarations one per line, sorted. Struct
+// fields are included because that is where a new scorer's input arrives.
+func exportedAPI(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	var api []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("ParseFile(%s): %v", name, err)
+		}
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if !d.Name.IsExported() {
+					continue
+				}
+				if d.Recv == nil {
+					api = append(api, "func "+d.Name.Name)
+				} else if recv := receiverName(d.Recv); ast.IsExported(recv) {
+					api = append(api, "method "+recv+"."+d.Name.Name)
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					switch s := spec.(type) {
+					case *ast.TypeSpec:
+						if !s.Name.IsExported() {
+							continue
+						}
+						api = append(api, "type "+s.Name.Name)
+						st, ok := s.Type.(*ast.StructType)
+						if !ok {
+							continue
+						}
+						for _, fld := range st.Fields.List {
+							for _, fn := range fld.Names {
+								if fn.IsExported() {
+									api = append(api, "field "+s.Name.Name+"."+fn.Name)
+								}
+							}
+						}
+					case *ast.ValueSpec:
+						for _, n := range s.Names {
+							if n.IsExported() {
+								api = append(api, d.Tok.String()+" "+n.Name)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	sort.Strings(api)
+	return api
+}
+
+// receiverName returns the bare type name of a method receiver.
+func receiverName(fl *ast.FieldList) string {
+	if fl == nil || len(fl.List) == 0 {
+		return ""
+	}
+	switch t := fl.List[0].Type.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			return id.Name
+		}
+	}
+	return ""
+}
+
 // ---------------------------------------------------------------------------
 // Assertion 3: fusion is ignorant of scorers, according to the go tool.
 // ---------------------------------------------------------------------------
@@ -226,6 +349,11 @@ func goList(t *testing.T, args ...string) []string {
 	t.Helper()
 	cmd := exec.Command("go", append([]string{"list"}, args...)...)
 	cmd.Dir = ".."
+	// GOWORK=off because `go list -m all` in workspace mode reports every
+	// workspace root module. Without this, checking out weft beneath a parent
+	// go.work fails the dependency assertion even though weft still has no
+	// external dependencies.
+	cmd.Env = append(os.Environ(), "GOWORK=off")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("go list %v: %v", args, err)

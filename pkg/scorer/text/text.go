@@ -52,11 +52,13 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 	if len(terms) == 0 {
 		return nil, nil
 	}
-	n := float64(s.ix.Len())
-	if n == 0 {
+	// One call, one lock: N and avgdl must describe the same moment or the
+	// normalization term is computed against a corpus size that never existed.
+	docs, avgdl := s.ix.Stats()
+	if docs == 0 {
 		return nil, nil
 	}
-	avgdl := s.ix.AvgDocLen()
+	n := float64(docs)
 
 	// Duplicate query terms are summed twice, which is the formula taken
 	// literally: the sum is over occurrences in Q, not over the distinct set.
@@ -69,7 +71,13 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		if len(posts) == 0 {
 			continue // n(q) = 0: a term in no document contributes nothing.
 		}
-		nq := float64(len(posts))
+		// Postings are fetched after Stats, so a concurrent Add can leave more
+		// postings for a term than there were documents. Unclamped that makes
+		// N - n(q) negative, which drives the log below 1 and the IDF negative —
+		// exactly what the ln(1 + ...) form was chosen to rule out. Clamping
+		// keeps IDF > 0 always; a true snapshot is milestone 2 work
+		// (docs/FINDINGS.md section 4.4).
+		nq := math.Min(float64(len(posts)), n)
 		idf := math.Log(1 + (n-nq+0.5)/(nq+0.5))
 
 		for _, p := range posts {

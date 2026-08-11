@@ -14,7 +14,7 @@ test:
 # The milestone 1 pass/fail line: fusion is invariant to scorer count, a fourth
 # scorer costs under 100 lines, and fusion cannot see any scorer.
 arch:
-	go test -v -run 'TestAddingAFourthScorer|TestAnyNumberOfScorers|TestFourthScorerIsUnderOneHundredLines|TestNeitherEngineNorFusion|TestGoListDeps|TestNoExternalDependencies' ./pkg/engine/
+	go test -v -run 'TestAddingAFourthScorer|TestAnyNumberOfScorers|TestFourthScorerIsUnderOneHundredLines|TestEngineAPISurface|TestNeitherEngineNorFusion|TestGoListDeps|TestNoExternalDependencies' ./pkg/engine/
 
 # The two architecture properties cheap enough to check by hand.
 deps:

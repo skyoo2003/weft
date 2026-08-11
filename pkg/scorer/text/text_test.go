@@ -2,6 +2,8 @@ package text
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -160,6 +162,59 @@ func TestScorerIgnoresNonTextQueryFields(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("Candidates = %+v, want none", got)
+	}
+}
+
+func TestConcurrentAddNeverProducesNonPositiveScores(t *testing.T) {
+	// Stats and Lookup take the read lock separately, so postings can be newer
+	// than the document count. Unclamped that makes N - n(q) negative and the
+	// IDF negative, inverting the ranking. Run this under -race.
+	ix := engine.New()
+	for i := range 20 {
+		if _, err := ix.Add(engine.Document{Key: fmt.Sprintf("seed%d", i), Text: "go"}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+
+	// The writer is bounded and the reader stops with it, so total work stays
+	// linear. An unbounded writer would make every query scan a longer posting
+	// list than the last.
+	const writes = 300
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(done)
+		for i := range writes {
+			// Errors are irrelevant here; the writer only has to keep the
+			// corpus growing while queries run.
+			_, _ = ix.Add(engine.Document{Key: fmt.Sprintf("more%d", i), Text: "go"})
+		}
+	}()
+
+	s := New(ix)
+	queries := 0
+	for {
+		select {
+		case <-done:
+			wg.Wait()
+			if queries == 0 {
+				t.Fatal("the writer finished before any query ran")
+			}
+			return
+		default:
+		}
+		cands, err := s.Candidates(t.Context(), engine.Query{Text: "go"}, 10)
+		if err != nil {
+			t.Fatalf("Candidates: %v", err)
+		}
+		for _, c := range cands {
+			if c.Score <= 0 {
+				t.Fatalf("doc %d scored %v during a concurrent Add — IDF went non-positive", c.Doc, c.Score)
+			}
+		}
+		queries++
 	}
 }
 

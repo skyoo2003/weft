@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -173,6 +174,72 @@ func TestTopK(t *testing.T) {
 func TestSearchRejectsNilFuser(t *testing.T) {
 	if _, err := Search(t.Context(), Query{}, 5, nil); !errors.Is(err, ErrNoFuser) {
 		t.Fatalf("Search with nil Fuser err = %v, want ErrNoFuser", err)
+	}
+}
+
+func TestAddRejectsNonFiniteVectors(t *testing.T) {
+	// A non-finite component makes cosine scores NaN, and NaN sorts arbitrarily
+	// in TopK, so fusion would report a NaN document above a genuine match.
+	for _, tc := range []struct {
+		name string
+		vec  []float32
+	}{
+		{"NaN", []float32{1, float32(math.NaN())}},
+		{"positive infinity", []float32{float32(math.Inf(1)), 0}},
+		{"negative infinity", []float32{0, float32(math.Inf(-1))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ix := New()
+			_, err := ix.Add(Document{Key: "a", Vector: tc.vec})
+			if !errors.Is(err, ErrNonFiniteVector) {
+				t.Fatalf("err = %v, want ErrNonFiniteVector", err)
+			}
+			if ix.Len() != 0 {
+				t.Fatal("rejected document was stored anyway")
+			}
+		})
+	}
+}
+
+func TestAddCopiesSliceFields(t *testing.T) {
+	// A caller reusing one scratch buffer across Add calls must not rewrite
+	// documents that are already indexed.
+	ix := New()
+	vec := []float32{1, 0}
+	links := []string{"b"}
+	mustAdd(t, ix, Document{Key: "a", Vector: vec, Links: links})
+
+	vec[0] = 9
+	links[0] = "hijacked"
+
+	d, ok := ix.Doc(0)
+	if !ok {
+		t.Fatal("Doc(0) missing")
+	}
+	if d.Vector[0] != 1 {
+		t.Errorf("Vector[0] = %v, want 1 — the index aliases the caller's array", d.Vector[0])
+	}
+	if d.Links[0] != "b" {
+		t.Errorf("Links[0] = %q, want \"b\" — the index aliases the caller's array", d.Links[0])
+	}
+}
+
+func TestStatsIsConsistentWithLenAndAvgDocLen(t *testing.T) {
+	ix := New()
+	if docs, avg := ix.Stats(); docs != 0 || avg != 0 {
+		t.Fatalf("Stats() on empty index = %d, %v; want 0, 0", docs, avg)
+	}
+
+	mustAdd(t, ix, Document{Key: "a", Text: "one two three four"})
+	mustAdd(t, ix, Document{Key: "b", Text: "one two"})
+
+	docs, avg := ix.Stats()
+	if docs != 2 || avg != 3 {
+		t.Fatalf("Stats() = %d, %v; want 2, 3", docs, avg)
+	}
+	if docs != ix.Len() || avg != ix.AvgDocLen() {
+		t.Fatalf("Stats() = %d, %v disagrees with Len() = %d, AvgDocLen() = %v",
+			docs, avg, ix.Len(), ix.AvgDocLen())
 	}
 }
 

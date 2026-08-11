@@ -143,4 +143,26 @@ func TestCancelledContext(t *testing.T) {
 	}
 }
 
+func TestNonFiniteQueryVectorIsAnError(t *testing.T) {
+	// engine.Add rejects non-finite document vectors, so the query is the only
+	// way one can reach scoring. Returning an empty result would hide a caller
+	// bug; returning NaN scores would let TopK order them arbitrarily.
+	ix := index(t, []float32{1, 0})
+	for _, tc := range []struct {
+		name string
+		q    []float32
+	}{
+		{"NaN", []float32{float32(math.NaN()), 0}},
+		{"positive infinity", []float32{float32(math.Inf(1)), 0}},
+		{"negative infinity", []float32{0, float32(math.Inf(-1))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(ix).Candidates(t.Context(), engine.Query{Vector: tc.q}, 10)
+			if !errors.Is(err, engine.ErrNonFiniteVector) {
+				t.Fatalf("err = %v, want engine.ErrNonFiniteVector", err)
+			}
+		})
+	}
+}
+
 var _ engine.Scorer = (*Scorer)(nil)

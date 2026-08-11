@@ -39,6 +39,14 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		return nil, nil
 	}
 	qNorm := norm(q.Vector)
+	if math.IsNaN(qNorm) || math.IsInf(qNorm, 0) {
+		// A NaN or infinite component would make every cosine score NaN, and
+		// NaN scores sort arbitrarily — a NaN document can land above one
+		// scoring 0.9, which fusion then reports as a plausible result. This is
+		// a caller bug, so it is an error rather than an empty result.
+		// engine.Add rejects such vectors, so only the query can carry one.
+		return nil, fmt.Errorf("query vector: %w", engine.ErrNonFiniteVector)
+	}
 	if qNorm == 0 {
 		// A zero query vector has no direction. No opinion, and no division by
 		// zero below.

@@ -26,9 +26,16 @@ engine.Search(ctx, q, 5, fusion.Fuse, four...)   // + recency
 
 Compiling alone proved insufficient — a scorer returning nothing passes it too. The corpus therefore holds a document (`lonely`) that matches no query term, carries no vector and is linked from nowhere, so only recency sees it. Three scorers must not surface it; four must.
 
-**Assertion 2 — a new scorer is cheap.** `pkg/scorer/recency` is 71 implementation lines against a 100-line budget, zero lines changed in `engine/` or `fusion/`.
+**Assertion 2 — a new scorer is cheap.** `pkg/scorer/recency` is 71 implementation lines against a 100-line budget, and `fusion/` needed no change at all.
 
-"Zero lines changed" is asserted through the import graph, not a diff: no non-test file in `engine/` or `fusion/` imports `scorer/*`, checked with `go/parser`. A diff needs a baseline commit and stops being reproducible; the import check needs nothing, holds for every future scorer, and does not trip on the words "text" or "vector" in comments. The budget counts implementation files only — counting tests would reward untested scorers.
+The engine side is not zero, and an earlier version of this document claimed it was. `Document.Time` exists only for the recency scorer and was written before that scorer existed, so the figure was flattered by pre-provisioning the field. Stated generally: a scorer needing new input data has to read it from `engine.Document`, because scorers may not keep their own store (§2.2). **The engine cost of a new input type is one field on `Document`.** A scorer reusing existing fields costs nothing there.
+
+Two checks measure different things, and neither substitutes for the other:
+
+- `engine/` and `fusion/` import no `scorer/*` package, checked with `go/parser`. This proves package-level ignorance and holds for every future scorer without needing a baseline commit, and it does not trip on the words "text" or "vector" in comments. It cannot detect a new `Document` field.
+- `engine`'s exported API is recorded in `pkg/engine/testdata/engine_api.txt`. Adding a field to `Document` fails that test, so the engine cost of a new scorer is a visible edit rather than a silent one. Refresh with `WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/`.
+
+The line budget counts implementation files only — counting tests would reward untested scorers.
 
 **Assertion 3 — fusion cannot see scorers.**
 
