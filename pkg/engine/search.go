@@ -25,6 +25,17 @@ type Fuser func(streams [][]Candidate, k int) []Candidate
 // Name(). Adding a fifth scorer means passing a fifth argument at the call
 // site, and nothing in this function changes. If a future scorer forces an edit
 // here, that edit is the milestone 1 hypothesis failing.
+//
+// Precondition: every scorer must read the same Index. DocID is dense and
+// index-relative, so scorers built against different indexes return IDs from
+// namespaces that both start at 0; fusion would read the collision as two
+// scorers agreeing on one document, and the winning IDs would resolve against
+// neither corpus. This is unchecked on purpose. Checking it means asking a
+// scorer which index it reads, which is a method on the Scorer interface — the
+// one change that breaks every existing implementation, and one that a scorer
+// computing purely from Query could not answer at all. The general fix is for
+// DocID to carry its namespace, which milestone 2 needs regardless
+// (docs/FINDINGS.md sections 3.4 and 4.3).
 func Search(ctx context.Context, q Query, k int, fuse Fuser, scorers ...Scorer) ([]Candidate, error) {
 	if fuse == nil {
 		return nil, ErrNoFuser

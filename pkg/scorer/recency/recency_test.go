@@ -146,4 +146,57 @@ func TestNewUsesTheWallClock(t *testing.T) {
 	}
 }
 
+func TestTheOldestRepresentableTimestampIsNotBrandNew(t *testing.T) {
+	// Unix seconds span far more than int64 can hold, so subtracting them in
+	// int64 wraps. A wrapped negative age is then clamped to zero by the
+	// future-timestamp guard, which scores the oldest possible document 1.0 and
+	// puts it above a document from yesterday — a rank inversion, not a tie.
+	ix := engine.New()
+	for i, ts := range []time.Time{
+		time.Unix(math.MinInt64, 0),
+		refNow.Add(-24 * time.Hour),
+	} {
+		if _, err := ix.Add(engine.Document{Key: fmt.Sprintf("d%d", i), Time: ts}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+	got, err := NewAt(ix, refNow).Candidates(t.Context(), engine.Query{}, 10)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(got) != 2 || got[0].Doc != 1 {
+		t.Fatalf("Candidates = %+v, want the day-old doc 1 ranked first", got)
+	}
+	if !(got[1].Score > 0) || got[1].Score >= got[0].Score {
+		t.Fatalf("oldest doc scored %v against the day-old %v, want a smaller positive score",
+			got[1].Score, got[0].Score)
+	}
+}
+
+// cancelAfter reports itself cancelled only once Err has been called n times.
+// Duplicated from the other scorers for the reason given there.
+type cancelAfter struct {
+	context.Context
+	n int
+}
+
+func (c *cancelAfter) Err() error {
+	if c.n > 0 {
+		c.n--
+		return nil
+	}
+	return context.Canceled
+}
+
+func TestCancellationArrivingAfterTheLastDocumentIsObserved(t *testing.T) {
+	// One document, so n = 1 spends the free call on the only per-document check
+	// and cancellation lands on the check guarding TopK. Without that check the
+	// scorer sorted the whole corpus and reported success past the deadline.
+	ctx := &cancelAfter{Context: t.Context(), n: 1}
+	got, err := NewAt(index(t, 0), refNow).Candidates(ctx, engine.Query{}, 10)
+	if err == nil {
+		t.Fatalf("Candidates returned %+v and no error after cancellation before the sort", got)
+	}
+}
+
 var _ engine.Scorer = (*Scorer)(nil)

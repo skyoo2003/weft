@@ -258,5 +258,21 @@ func TestConcurrentAddNeverProducesNonPositiveScores(t *testing.T) {
 	}
 }
 
+func TestCancellationArrivingAfterTheLastPostingIsObserved(t *testing.T) {
+	// One term over a one-document corpus, so the calls are countable: one for
+	// the per-term check and one for the i == 0 poll. Cancellation lands on the
+	// third, the check guarding TopK — the window between the last posting and
+	// the sort, which no earlier check covers.
+	ix := engine.New()
+	if _, err := ix.Add(engine.Document{Key: "a", Text: "go"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	ctx := &cancelAfter{Context: t.Context(), n: 2}
+	got, err := New(ix).Candidates(ctx, engine.Query{Text: "go"}, 10)
+	if err == nil {
+		t.Fatalf("Candidates returned %+v and no error after cancellation before the sort", got)
+	}
+}
+
 // Compile-time proof that this satisfies the interface fusion never sees.
 var _ engine.Scorer = (*Scorer)(nil)

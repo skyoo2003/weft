@@ -165,4 +165,78 @@ func TestNonFiniteQueryVectorIsAnError(t *testing.T) {
 	}
 }
 
+// wide is a query vector long enough to cross the 1024-component poll interval
+// more than once. All ones, so its norm is finite and non-zero.
+func wide(n int) []float32 {
+	v := make([]float32, n)
+	for i := range v {
+		v[i] = 1
+	}
+	return v
+}
+
+func TestCancellationIsObservedOnAnEmptyCorpus(t *testing.T) {
+	// An empty corpus never enters the document loop, so the per-document check
+	// never runs even once: the old code scanned the whole caller-supplied query
+	// vector to compute its norm and then returned success on an
+	// already-cancelled context. This pins the observable contract only — the
+	// poll in dot and the check before TopK each catch it on their own, so
+	// either alone keeps this passing. The two tests below pin them separately.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := New(engine.New()).Candidates(ctx, engine.Query{Vector: wide(3000)}, 10)
+	if err == nil {
+		t.Fatal("Candidates on an empty corpus returned no error after cancellation")
+	}
+}
+
+// cancelAfter reports itself cancelled only once Err has been called n times,
+// which is what makes "cancellation is observed at all" distinguishable from
+// "cancellation is observed in time". Duplicated from the text and graph
+// scorers rather than shared: one test helper is not worth a package every
+// scorer would then have to import.
+type cancelAfter struct {
+	context.Context
+	n int
+}
+
+func (c *cancelAfter) Err() error {
+	if c.n > 0 {
+		c.n--
+		return nil
+	}
+	return context.Canceled
+}
+
+func TestCancellationIsObservedInsideTheVectorScan(t *testing.T) {
+	// One document, both vectors 3000 wide. The free calls go to the three polls
+	// of the query norm and the single per-document check, so cancellation lands
+	// on the first poll of the document norm — inside a scan, which is where the
+	// old code had no check between one document and the next.
+	//
+	// The old code called Err exactly once here, at the loop head, and then
+	// returned a successful result: with a single document that check is the
+	// only one there is.
+	ix := index(t, wide(3000))
+	ctx := &cancelAfter{Context: t.Context(), n: 4}
+	got, err := New(ix).Candidates(ctx, engine.Query{Vector: wide(3000)}, 10)
+	if err == nil {
+		t.Fatalf("Candidates returned %+v and no error after mid-scan cancellation", got)
+	}
+}
+
+func TestCancellationArrivingAfterTheLastDocumentIsObserved(t *testing.T) {
+	// Vectors narrow enough to poll once each, so the call count is countable:
+	// one for the query norm, one for the per-document check, one each for the
+	// document norm and the dot product. Cancellation therefore lands on the
+	// fifth call, the check guarding TopK — the window between the last document
+	// and the sort, which no earlier check covers.
+	ix := index(t, []float32{1, 0})
+	ctx := &cancelAfter{Context: t.Context(), n: 4}
+	got, err := New(ix).Candidates(ctx, engine.Query{Vector: []float32{1, 0}}, 10)
+	if err == nil {
+		t.Fatalf("Candidates returned %+v and no error after cancellation before the sort", got)
+	}
+}
+
 var _ engine.Scorer = (*Scorer)(nil)

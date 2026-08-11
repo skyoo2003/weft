@@ -38,7 +38,10 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 	if k <= 0 || len(q.Vector) == 0 {
 		return nil, nil
 	}
-	qNorm := norm(q.Vector)
+	qNorm, err := norm(ctx, q.Vector)
+	if err != nil {
+		return nil, err
+	}
 	if math.IsNaN(qNorm) || math.IsInf(qNorm, 0) {
 		// A NaN or infinite component would make every cosine score NaN, and
 		// NaN scores sort arbitrarily — a NaN document can land above one
@@ -68,28 +71,57 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 			return nil, fmt.Errorf("doc %q has %d dims, query has %d: %w",
 				d.Key, len(d.Vector), len(q.Vector), ErrDimMismatch)
 		}
-		dNorm := norm(d.Vector)
+		dNorm, err := norm(ctx, d.Vector)
+		if err != nil {
+			return nil, err
+		}
 		if dNorm == 0 {
 			continue // Zero document vector: no direction, and no 0/0.
+		}
+		sum, err := dot(ctx, q.Vector, d.Vector)
+		if err != nil {
+			return nil, err
 		}
 		// Cosine is in [-1,1]; negatives are kept and sort to the bottom rather
 		// than being clamped, because fusion consumes rank, not magnitude.
 		cands = append(cands, engine.Candidate{
 			Doc:   id,
-			Score: dot(q.Vector, d.Vector) / (qNorm * dNorm),
+			Score: sum / (qNorm * dNorm),
 		})
+	}
+
+	// TopK sorts, so a cancellation arriving after the last document would
+	// otherwise still pay for an O(n log n) sort of results nobody will read,
+	// and then report success past the deadline.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return engine.TopK(cands, k), nil
 }
 
 // dot accumulates in float64 even though the inputs are float32, so long
 // vectors do not lose precision to repeated float32 rounding.
-func dot(a, b []float32) float64 {
+//
+// It takes a ctx because the width of a vector is caller-supplied and this is
+// the scorer's dominant cost: the per-document check in Candidates leaves O(d)
+// work between polls, and the query norm runs before that loop starts, so
+// without a poll here an already-cancelled context still pays for a full scan.
+// Every 1024 components, matching the posting and link scans in the other
+// scorers.
+func dot(ctx context.Context, a, b []float32) (float64, error) {
 	var sum float64
 	for i := range a {
+		if i&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+		}
 		sum += float64(a[i]) * float64(b[i])
 	}
-	return sum
+	return sum, nil
 }
 
-func norm(v []float32) float64 { return math.Sqrt(dot(v, v)) }
+func norm(ctx context.Context, v []float32) (float64, error) {
+	sum, err := dot(ctx, v, v)
+	return math.Sqrt(sum), err
+}

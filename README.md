@@ -81,7 +81,7 @@ results, err := engine.Search(ctx, q, 10, fusion.Fuse, scorers...)
 `make arch` verifies this mechanically:
 
 - **Fusion is invariant to scorer count** — three and four scorers use the same call expression; compiling is the proof.
-- **A new scorer is cheap** — `scorer/recency` is 91 implementation lines against a 100-line budget, and `fusion/` needs no change. Whatever a scorer costs `engine` shows up in `pkg/engine/testdata/engine_api.txt`, which records signatures and member types, not just names ([FINDINGS §1](docs/FINDINGS.md)).
+- **A new scorer is cheap** — `scorer/recency` is 93 implementation lines against a 100-line budget, and `fusion/` needs no change. Whatever a scorer costs `engine` shows up in `pkg/engine/testdata/engine_api.txt`, which records signatures and member types, not just names ([FINDINGS §1](docs/FINDINGS.md)).
 - **Fusion cannot see scorers** — `go list -deps ./pkg/fusion` names no `scorer/*` package.
 
 The third assertion carries the weight. `Fuse` never reads `Candidate.Score`, only rank: BM25 is unbounded, cosine is `[-1,1]`, graph proximity is `(0,1]`, so comparing scores across scorers would need per-scorer normalization — and knowing how to normalize means knowing which scorer produced the score.
@@ -117,7 +117,7 @@ make run        # interactive demo
 make example    # minimal example
 ```
 
-897 implementation lines, 1,895 test lines, **zero external dependencies**. Go 1.26+.
+964 implementation lines, 2,079 test lines, **zero external dependencies**. Go 1.26+.
 
 ## Limitations
 
@@ -126,6 +126,7 @@ make example    # minimal example
 | No persistence | In memory only. Milestone 2. |
 | No early termination | The top-k candidate interface forecloses WAND-style skipping. Cost and extension path: [FINDINGS §3.1](docs/FINDINGS.md). |
 | Graph seeds unverified | Double counting is fixed; whether `SeedN = 5` and "top n from text" are good choices needs measurement. Milestone 4. |
+| Scorers must share one index | `DocID` is index-relative, so scorers built against different indexes fuse unrelated documents. A precondition on `Search`, not a check: [FINDINGS §3.4](docs/FINDINGS.md). |
 | No CJK tokenization | Whitespace and punctuation splitting only, so CJK runs collapse into one token. |
 | No embedding generation | Vectors are supplied by the caller. |
 | No query language | Queries are built through the Go API. |

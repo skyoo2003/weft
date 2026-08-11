@@ -346,6 +346,25 @@ func TestCancellationIsObservedInsideTheLinkScan(t *testing.T) {
 	}
 }
 
+func TestCancellationArrivingAfterTheLastNodeIsObserved(t *testing.T) {
+	// An explicit seed with one link, so the calls are countable: one per-dequeue
+	// check for the seed, one i == 0 poll over its single link, and one more
+	// per-dequeue check for the node that link reached. Cancellation lands on the
+	// fourth, the check guarding TopK — the window between the last node and the
+	// sort, which no earlier check covers.
+	ix := engine.New()
+	for _, d := range []engine.Document{{Key: "a", Links: []string{"b"}}, {Key: "b"}} {
+		if _, err := ix.Add(d); err != nil {
+			t.Fatalf("Add(%q): %v", d.Key, err)
+		}
+	}
+	ctx := &cancelAfter{Context: t.Context(), n: 3}
+	got, err := New(ix, nil).Candidates(ctx, engine.Query{Seeds: []string{"a"}}, 10)
+	if err == nil {
+		t.Fatalf("Candidates returned %+v and no error after cancellation before the sort", got)
+	}
+}
+
 var (
 	_ engine.Scorer = New(nil, nil)
 	_ engine.Scorer = NewIncludingSeeds(nil, nil)

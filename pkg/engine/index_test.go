@@ -264,6 +264,28 @@ func TestStatsIsConsistentWithLenAndAvgDocLen(t *testing.T) {
 	}
 }
 
+func TestTheZeroValueIndexWorks(t *testing.T) {
+	// Index is exported and its zero value was never documented as invalid, so
+	// `var ix engine.Index` is a reasonable thing for a caller to write. Add used
+	// to get past the duplicate check on a nil map and then panic assigning into
+	// it, contradicting the no-panic promise on the sentinel errors above.
+	var ix Index
+	if got := ix.Len(); got != 0 {
+		t.Fatalf("zero-value Len() = %d, want 0", got)
+	}
+	mustAdd(t, &ix, Document{Key: "a", Text: "one two"})
+
+	if _, err := ix.Add(Document{Key: "a"}); !errors.Is(err, ErrDuplicateKey) {
+		t.Fatalf("duplicate Add err = %v, want ErrDuplicateKey", err)
+	}
+	if id, ok := ix.Resolve("a"); !ok || id != 0 {
+		t.Fatalf("Resolve(%q) = %d, %v; want 0, true", "a", id, ok)
+	}
+	if got := ix.Lookup("one"); len(got) != 1 || got[0].Doc != 0 {
+		t.Fatalf("Lookup(%q) = %+v, want one posting for doc 0", "one", got)
+	}
+}
+
 func mustAdd(t *testing.T, ix *Index, d Document) DocID {
 	t.Helper()
 	id, err := ix.Add(d)

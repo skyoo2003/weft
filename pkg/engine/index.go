@@ -33,6 +33,10 @@ type Posting struct {
 // read, and none of them keeps a private copy of the corpus. That is the
 // property milestone 1 is testing — a scorer that needed its own store would
 // mean the index is not actually scorer-neutral.
+//
+// The zero value is an empty index ready to use; New is the same thing with a
+// pointer already in hand. Do not copy an Index after first use — it holds a
+// mutex.
 type Index struct {
 	// ponytail: one index-wide RWMutex. Shard or copy-on-write only if write
 	// throughput ever shows up as a problem; milestone 1 has one writer.
@@ -90,6 +94,16 @@ func (ix *Index) Add(d Document) (DocID, error) {
 
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
+
+	// A zero-value Index is usable, the same way a bytes.Buffer is. Every read
+	// path already works on nil maps and slices, so Add is the only place that
+	// needs them to exist; without this, `var ix engine.Index` would pass the
+	// duplicate lookup below and then panic assigning into a nil map, which
+	// contradicts what this package promises above about never panicking.
+	if ix.byKey == nil {
+		ix.byKey = make(map[string]DocID)
+		ix.postings = make(map[string][]Posting)
+	}
 
 	if _, dup := ix.byKey[d.Key]; dup {
 		return 0, fmt.Errorf("add %q: %w", d.Key, ErrDuplicateKey)

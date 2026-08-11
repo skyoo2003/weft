@@ -4,14 +4,14 @@
 
 | Package | Implementation | Tests |
 |---|---|---|
-| `pkg/engine` | 370 | 826 |
+| `pkg/engine` | 403 | 848 |
 | `pkg/fusion` | 54 | 138 |
-| `pkg/scorer/text` | 119 | 262 |
-| `pkg/scorer/vector` | 95 | 168 |
-| `pkg/scorer/graph` | 168 | 352 |
-| `pkg/scorer/recency` | **91** | 149 |
+| `pkg/scorer/text` | 119 | 278 |
+| `pkg/scorer/vector` | 127 | 242 |
+| `pkg/scorer/graph` | 168 | 371 |
+| `pkg/scorer/recency` | **93** | 202 |
 
-897 implementation lines, 1,895 test lines, zero external dependencies.
+964 implementation lines, 2,079 test lines, zero external dependencies.
 
 ---
 
@@ -26,7 +26,7 @@ engine.Search(ctx, q, 5, fusion.Fuse, four...)   // + recency
 
 Compiling alone proved insufficient — a scorer returning nothing passes it too. The corpus therefore holds a document (`lonely`) that matches no query term, carries no vector and is linked from nowhere, so only recency sees it. Three scorers must not surface it; four must.
 
-**Assertion 2 — a new scorer is cheap.** `pkg/scorer/recency` is 91 implementation lines against a 100-line budget, and `fusion/` needed no change at all.
+**Assertion 2 — a new scorer is cheap.** `pkg/scorer/recency` is 93 implementation lines against a 100-line budget, and `fusion/` needed no change at all.
 
 The engine side is not zero, and an earlier version of this document claimed it was. `Document.Time` exists only for the recency scorer and was written before that scorer existed, so the figure was flattered by pre-provisioning the field. Stated generally: a scorer needing new input data has to read it from `engine.Document`, because scorers may not keep their own store (§2.2). **The engine cost of a new input type is one field on `Document`.** A scorer reusing existing fields costs nothing there.
 
@@ -125,6 +125,20 @@ The contribution gap between rank 1 and rank 2 is `1/61 - 1/62 ≈ 0.00026`, so 
 
 A heap is `O(n log k)` against `O(n log n)` and pays off only when candidate sets far exceed `k`, which nothing here measures. One shared deterministic selection path beats four hand-rolled ones; the upgrade path is marked in a `ponytail:` comment.
 
+### 3.4 A DocID is meaningful only inside the index that assigned it
+
+`Index.Add` hands out dense IDs from 0, so two indexes give the same `DocID` to different documents and the value carries nothing that says which index it came from. `Search` therefore requires every scorer to read one index. Given scorers built against two, RRF reads the collision as two scorers agreeing on one document, and the winning IDs resolve against neither corpus — a silent wrong answer, not an error.
+
+This is a documented precondition rather than a check, because every way to check it costs more than it returns:
+
+| Enforcement | What it costs |
+|---|---|
+| `Index()` on `Scorer` | Breaks every existing implementation, and a scorer computing purely from `Query` has no answer to give. |
+| Optional `interface{ Index() *Index }` | Capability-not-type, so it fits §3.1's shape, but it only sees scorers that opt in and misses the nested case: `graph.New(ix1, seedOverIx2)` holds its seed privately, so that mix never reaches `Search`. |
+| Index identity on `Candidate` | Widens the type every scorer and every `Fuser` touches, and makes fusion compare something other than rank. |
+
+The general fix is for `DocID` to carry its namespace, which milestone 2 needs anyway: §4.3 has deletion and segment merge breaking the same density assumption from the other direction.
+
 ---
 
 ## 4. Carried into milestone 2
@@ -145,6 +159,6 @@ A heap is `O(n log k)` against `O(n log n)` and pays off only when candidate set
 | Is `RRF k = 60` right for this domain? | Cited default, never measured here (§3.2). |
 | Are `SeedN = 5` and "top n from text" good seeds? | Double counting is fixed (§2.3); seed quality is separate and unmeasured. |
 | PageRank instead of BFS distance? | BFS was the simplest real proximity. A replacement candidate if quality falls short. |
-| Is harmonic decay the right shape for recency? | `1/(1 + age/HalfLife)` replaced `2^(-age/HalfLife)`, which underflowed to zero past ~88 years and let insertion order stand in for recency. Both orderings are identical wherever the exponential is representable, so the swap is rank-neutral and the fused demo output did not move — which also means nothing here measures which tail is better. Age is computed from the timestamps rather than with `Sub` for the same reason: a `time.Duration` saturates at ±292 years, which is the same tie one era further out. |
+| Is harmonic decay the right shape for recency? | `1/(1 + age/HalfLife)` replaced `2^(-age/HalfLife)`, which underflowed to zero past ~88 years and let insertion order stand in for recency. Both orderings are identical wherever the exponential is representable, so the swap is rank-neutral and the fused demo output did not move — which also means nothing here measures which tail is better. Age is computed from the timestamps rather than with `Sub` for the same reason: a `time.Duration` saturates at ±292 years, which is the same tie one era further out. Each operand is then widened to `float64` before the subtraction, since Unix seconds span more than `int64` and a wrapped difference reads as a future date, which scores the oldest possible document 1.0. |
 | Does CJK tokenization matter? | `engine.Tokenize` collapses CJK runs into one token — a known wrong answer milestone 1 did not need to be right about. Same pressure point as §2.2. |
 | Is multi-month solo development sustainable? | Milestone 1 finished well under estimate because of the in-memory and standard-library-only constraints. That says milestone 1 was easy and nothing more; persistence and segment merge are the real test. |

@@ -11,6 +11,14 @@ import "time"
 // DocID is the index-internal identity of a document, assigned by Index.Add in
 // insertion order. It is a dense small integer so scorers can use it to index
 // into slices.
+//
+// A DocID means nothing outside the Index that assigned it. Two indexes both
+// start at 0, so the same DocID names a different document in each, and the
+// value carries nothing that says which index it came from. Anything that
+// compares DocIDs — TopK, any Fuser — is therefore correct only when every
+// stream came from one index. Search states this as a precondition; making it
+// checkable is milestone 2 work, alongside the segment identity that deletion
+// and merge need anyway.
 type DocID uint32
 
 // Document is what a caller hands to Index.Add. Every field feeds a different

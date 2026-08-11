@@ -41,17 +41,13 @@ func (s *Scorer) Name() string { return "recency" }
 // document one half-life old scores 0.5 and nothing ever reaches zero or goes
 // negative. At two half-lives the score is 1/3, not 0.25.
 //
-// The literal reading of "half-life" is 2^(-age/HalfLife), and it is wrong here:
-// that underflows float64 to exactly zero at about 88 years, so every document
-// older than that ties at zero and TopK falls back to ordering them by DocID.
-// A century-old document would then outrank a decade-old one for having been
-// indexed first. 1/(1+x) has no such floor: it stays strictly ordered for any
-// age the timestamps can express.
-//
-// The swap costs nothing in rank terms: both forms decrease strictly with age,
-// so they order identically wherever the exponential is representable, and
-// fusion reads rank rather than score. Which decay shape actually ranks better
-// is a milestone 4 question — see docs/FINDINGS.md section 5.
+// The literal 2^(-age/HalfLife) is wrong here: it underflows to exactly zero at
+// about 88 years, and a corpus of ties is ordered by DocID, so an ancient
+// document would outrank a recent one for having been indexed first. Every
+// arithmetic choice below defends the same property — the score must stay
+// strictly decreasing in age for every age a timestamp can express. The swap is
+// rank-neutral where both forms are representable; docs/FINDINGS.md section 5
+// has the rest.
 func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
 	if k <= 0 {
 		return nil, nil
@@ -69,13 +65,13 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		if !ok || d.Time.IsZero() {
 			continue // No timestamp: no opinion, same as a missing vector.
 		}
-		// Age in seconds, taken from the timestamps rather than from now.Sub. A
-		// time.Duration is int64 nanoseconds and saturates at ±292 years, so Sub
-		// hands every document older than that the same age, the same score and a
-		// TopK tie broken by DocID — the exact failure the decay curve above
-		// exists to avoid, only moved further out. Seconds plus the nanosecond
-		// remainder is exact to the nanosecond out to about 285 million years.
-		age := float64(now.Unix()-d.Time.Unix()) +
+		// Age in seconds, computed in float64 throughout. Two int64 forms are
+		// wrong: now.Sub saturates at ±292 years and ties everything past it,
+		// and subtracting Unix seconds before widening wraps for a sufficiently
+		// old timestamp, whereupon the guard below reads the negative as a future
+		// date and scores the oldest document brand new. Widening first cannot
+		// overflow and is exact to the nanosecond for about 285 million years.
+		age := (float64(now.Unix()) - float64(d.Time.Unix())) +
 			float64(now.Nanosecond()-d.Time.Nanosecond())/1e9
 		if age < 0 {
 			// A future timestamp caps at brand new rather than scoring above 1,
@@ -86,6 +82,12 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 			Doc:   id,
 			Score: 1 / (1 + age/HalfLife.Seconds()),
 		})
+	}
+
+	// Without this, a cancellation arriving after the last document still pays
+	// for TopK's O(n log n) sort and then reports success past the deadline.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return engine.TopK(cands, k), nil
 }
