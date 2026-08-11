@@ -17,15 +17,13 @@ func Fuse(streams [][]Candidate, k int) []Candidate
 
 ## Why
 
-Hybrid search engines started with one signal and bolted the rest on: a vector index beside an inverted index, then fusion ranking above both. Fusion ends up a special case — a dedicated code path joins two signals, and a third means rewriting that path. This is why graph proximity is not a first-class ranking signal in any engine.
+Hybrid search engines started with one signal and bolted the rest on, so fusion ends up a special case: a dedicated code path joins two signals, and a third means rewriting it. That is why graph proximity is not a first-class ranking signal in any engine. weft inverts the order — fusion is the default operation and scorers plug into it, so the fourth scorer costs what the first did.
 
-weft inverts the order. Fusion is the default operation and scorers plug into it, so the fourth scorer costs what the first did.
-
-If you need text + vector hybrid search today, [bleve](https://github.com/blevesearch/bleve) already has BM25, ANN and RRF. weft rests on an architectural hypothesis, not a market gap. [`docs/FINDINGS.md`](docs/FINDINGS.md) records how far that hypothesis is verified.
+If you need text + vector hybrid search today, [bleve](https://github.com/blevesearch/bleve) already has BM25, ANN and RRF. weft rests on an architectural hypothesis, not a market gap; [`docs/FINDINGS.md`](docs/FINDINGS.md) records how far it is verified.
 
 ## Status
 
-Milestone 1 passed. **Not usable in production:** the index is entirely in memory and is lost on restart.
+Milestone 1 passed. **Not usable in production:** the index is in memory only and is lost on restart.
 
 | # | Milestone | State |
 |---|---|---|
@@ -43,8 +41,6 @@ go run ./cmd/weft
 ```
 
 ```
-weft — 8 documents, 4 scorers. Query syntax: TEXT [@ v1,v2,v3]. Ctrl-D to quit.
-
 query> ranking fusion
   1. rrf        0.03226  text:2  vector:-  graph:-  recency:2
   2. hnsw       0.03200  text:-  vector:-  graph:2  recency:3
@@ -53,32 +49,24 @@ query> ranking fusion
   5. tfidf      0.01639  text:1  vector:-  graph:-  recency:-
 ```
 
-The right-hand columns are each scorer's rank *before* fusion.
+Trailing columns are each scorer's rank *before* fusion.
 
-- `tfidf` is first in text but fifth after fusion: no other scorer agreed. One scorer's confidence does not beat consensus.
-- `hnsw`, `bm25` and `ivf` are invisible to text. Graph traversal found them.
-- `vector:-` everywhere means the query carried no vector. A scorer with no opinion neither distorts the result nor costs anything. Append `@ 0,1,0` and the vector scorer joins.
-- `graph:-` on `rrf` and `tfidf` means those two were the traversal seeds, which are excluded from results ([`docs/FINDINGS.md`](docs/FINDINGS.md) §2).
+- `tfidf` leads text but lands fifth: no other scorer agreed. One scorer's confidence does not beat consensus.
+- `hnsw`, `bm25` and `ivf` are invisible to text — graph traversal found them.
+- `-` means no opinion, which costs nothing. `vector:-` is everywhere because the query had no vector; append `@ 0,1,0` and the vector scorer joins. `graph:-` on `rrf` and `tfidf` marks them as traversal seeds, which are excluded ([FINDINGS §2.3](docs/FINDINGS.md)).
 
-Minimal library usage: [`examples/basic`](examples/basic/main.go). Godoc example: `Example` in `pkg/engine`.
+Minimal embedding: [`examples/basic`](examples/basic/main.go). Godoc example: `Example` in `pkg/engine`.
 
 ## Adding a scorer
 
-Implement `engine.Scorer`. Nothing in `engine/` or `fusion/` changes.
+Implement `engine.Scorer`; nothing in `engine/` or `fusion/` changes.
 
 ```go
-package popularity
-
-type Scorer struct{ ix *engine.Index }
-
-func New(ix *engine.Index) *Scorer { return &Scorer{ix: ix} }
-func (s *Scorer) Name() string     { return "popularity" }
+func (s *Scorer) Name() string { return "popularity" }
 
 func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
     cands := make([]engine.Candidate, 0, s.ix.Len())
-    for i := range s.ix.Len() {
-        // Score however you like. Any scale — fusion reads rank, not score.
-    }
+    // Score however you like. Any scale — fusion reads rank, not score.
     return engine.TopK(cands, k), nil
 }
 ```
@@ -93,10 +81,10 @@ results, err := engine.Search(ctx, q, 10, fusion.Fuse, scorers...)
 `make arch` verifies this mechanically:
 
 - **Fusion is invariant to scorer count** — three and four scorers use the same call expression; compiling is the proof.
-- **A new scorer is cheap** — `scorer/recency` is 71 implementation lines against a 100-line budget, with zero lines changed in `engine/` or `fusion/`.
+- **A new scorer is cheap** — `scorer/recency` is 71 implementation lines against a 100-line budget, zero lines changed in `engine/` or `fusion/`.
 - **Fusion cannot see scorers** — `go list -deps ./pkg/fusion` names no `scorer/*` package.
 
-The third assertion is the load-bearing one. `Fuse` never reads `Candidate.Score`, only rank: BM25 is unbounded, cosine is `[-1,1]`, graph proximity is `(0,1]`, so comparing scores across scorers would require per-scorer normalization — and knowing how to normalize means knowing which scorer produced the score.
+The third assertion carries the weight. `Fuse` never reads `Candidate.Score`, only rank: BM25 is unbounded, cosine is `[-1,1]`, graph proximity is `(0,1]`, so comparing scores across scorers would need per-scorer normalization — and knowing how to normalize means knowing which scorer produced the score.
 
 ## Layout
 
@@ -129,19 +117,19 @@ make run        # interactive demo
 make example    # minimal example
 ```
 
-777 implementation lines, 1,426 test lines, 228 lines of demo and example code, **zero external dependencies**. Go 1.26+.
+777 implementation lines, 1,426 test lines, **zero external dependencies**. Go 1.26+.
 
 ## Limitations
 
 | Limitation | Detail |
 |---|---|
-| No persistence | Entirely in memory. Milestone 2. |
-| No early termination | The top-k candidate interface forecloses WAND-style skipping. Cost and extension path: [`docs/FINDINGS.md`](docs/FINDINGS.md) §3. |
-| Graph seed selection unverified | Double counting is fixed, but whether `SeedN = 5` and "top n from text" are good choices needs measurement. Milestone 4. |
+| No persistence | In memory only. Milestone 2. |
+| No early termination | The top-k candidate interface forecloses WAND-style skipping. Cost and extension path: [FINDINGS §3.1](docs/FINDINGS.md). |
+| Graph seeds unverified | Double counting is fixed; whether `SeedN = 5` and "top n from text" are good choices needs measurement. Milestone 4. |
 | No CJK tokenization | Whitespace and punctuation splitting only, so CJK runs collapse into one token. |
 | No embedding generation | Vectors are supplied by the caller. |
 | No query language | Queries are built through the Go API. |
 
 ## License
 
-[Apache License 2.0](LICENSE). Third-party notices: [NOTICE](NOTICE) — there are none, weft has zero external dependencies.
+[Apache License 2.0](LICENSE). Third-party notices: [NOTICE](NOTICE) — there are none.
