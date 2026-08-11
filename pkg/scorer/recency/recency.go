@@ -45,8 +45,8 @@ func (s *Scorer) Name() string { return "recency" }
 // that underflows float64 to exactly zero at about 88 years, so every document
 // older than that ties at zero and TopK falls back to ordering them by DocID.
 // A century-old document would then outrank a decade-old one for having been
-// indexed first. 1/(1+x) bottoms out at 2.8e-4 over the whole representable
-// time.Duration range and stays ordered.
+// indexed first. 1/(1+x) has no such floor: it stays strictly ordered for any
+// age the timestamps can express.
 //
 // The swap costs nothing in rank terms: both forms decrease strictly with age,
 // so they order identically wherever the exponential is representable, and
@@ -69,7 +69,14 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		if !ok || d.Time.IsZero() {
 			continue // No timestamp: no opinion, same as a missing vector.
 		}
-		age := now.Sub(d.Time)
+		// Age in seconds, taken from the timestamps rather than from now.Sub. A
+		// time.Duration is int64 nanoseconds and saturates at ±292 years, so Sub
+		// hands every document older than that the same age, the same score and a
+		// TopK tie broken by DocID — the exact failure the decay curve above
+		// exists to avoid, only moved further out. Seconds plus the nanosecond
+		// remainder is exact to the nanosecond out to about 285 million years.
+		age := float64(now.Unix()-d.Time.Unix()) +
+			float64(now.Nanosecond()-d.Time.Nanosecond())/1e9
 		if age < 0 {
 			// A future timestamp caps at brand new rather than scoring above 1,
 			// so a wrong clock cannot buy a document an unbeatable rank.
@@ -77,7 +84,7 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		}
 		cands = append(cands, engine.Candidate{
 			Doc:   id,
-			Score: 1 / (1 + age.Hours()/HalfLife.Hours()),
+			Score: 1 / (1 + age/HalfLife.Seconds()),
 		})
 	}
 	return engine.TopK(cands, k), nil

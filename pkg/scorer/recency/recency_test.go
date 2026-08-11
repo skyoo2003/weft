@@ -2,6 +2,7 @@ package recency
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -42,18 +43,29 @@ func TestHalfLifeHalvesTheScore(t *testing.T) {
 	}
 }
 
-func TestCenturiesOldDocumentsStayOrdered(t *testing.T) {
-	// The literal 2^(-age/HalfLife) underflows to exactly zero past about 88
-	// years. Every document beyond that scores 0, TopK breaks the tie on DocID,
-	// and insertion order silently replaces recency. These three are indexed
-	// oldest first, so a tie hands them back in exactly the wrong order.
-	const year = 365.25 * 24 * time.Hour
-	ix := index(t, 200*year, 100*year, 90*year)
+func TestVeryOldDocumentsStayOrdered(t *testing.T) {
+	// Two separate ways an old document loses its ordering, in one fixture:
+	//
+	//   past ~88 years   2^(-age/HalfLife) underflows float64 to exactly zero
+	//   past ~292 years  now.Sub saturates at the maximum time.Duration
+	//
+	// Either one gives a whole era the same score, and TopK then breaks the tie
+	// on DocID. These are indexed oldest first, so a tie hands them back in
+	// exactly the wrong order. 1000 and 400 years are past saturation, 200 and
+	// 90 past underflow. Ages go through AddDate because 1000 years is not
+	// expressible as a time.Duration in the first place.
+	ix := engine.New()
+	for i, years := range []int{1000, 400, 200, 90} {
+		doc := engine.Document{Key: fmt.Sprintf("d%d", i), Time: refNow.AddDate(-years, 0, 0)}
+		if _, err := ix.Add(doc); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
 	cands, err := NewAt(ix, refNow).Candidates(t.Context(), engine.Query{}, 10)
 	if err != nil {
 		t.Fatalf("Candidates: %v", err)
 	}
-	want := []engine.DocID{2, 1, 0} // newest first, the reverse of insertion order
+	want := []engine.DocID{3, 2, 1, 0} // newest first, the reverse of insertion order
 	if len(cands) != len(want) {
 		t.Fatalf("got %d candidates, want %d", len(cands), len(want))
 	}

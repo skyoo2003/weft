@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -303,6 +304,45 @@ func TestCancelledContext(t *testing.T) {
 	ix := index(t, node{"a", []string{"b"}}, node{"b", nil})
 	if _, err := New(ix, nil).Candidates(ctx, engine.Query{Seeds: []string{"a"}}, 10); err == nil {
 		t.Fatal("Candidates on a cancelled context returned no error")
+	}
+}
+
+// cancelAfter reports itself cancelled only once Err has been called n times.
+// A plain cancelled context is caught by the per-node check before the link
+// loop starts, so it cannot distinguish "cancellation is observed" from
+// "cancellation is observed in time".
+type cancelAfter struct {
+	context.Context
+	n int
+}
+
+func (c *cancelAfter) Err() error {
+	if c.n > 0 {
+		c.n--
+		return nil
+	}
+	return context.Canceled
+}
+
+func TestCancellationIsObservedInsideTheLinkScan(t *testing.T) {
+	// One seed whose links are both numerous and dangling: nothing is enqueued,
+	// so the queue ends after a single node and the per-node check never runs a
+	// second time. n = 2 spends the free calls on that check and the i == 0
+	// poll, putting the cancellation on the i == 1024 poll — inside the scan,
+	// which is the only place the old code had no check at all.
+	links := make([]string, 3000)
+	for i := range links {
+		links[i] = fmt.Sprintf("nowhere%d", i)
+	}
+	ix := index(t, node{"a", links})
+
+	ctx := &cancelAfter{Context: t.Context(), n: 2}
+	got, err := New(ix, nil).Candidates(ctx, engine.Query{Seeds: []string{"a"}}, 10)
+	if err == nil {
+		t.Fatalf("Candidates returned %d results and no error after mid-scan cancellation", len(got))
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Candidates error = %v, want context.Canceled", err)
 	}
 }
 

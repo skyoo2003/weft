@@ -100,7 +100,16 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		if !ok {
 			continue
 		}
-		for _, key := range doc.Links {
+		for i, key := range doc.Links {
+			// The per-node check above runs once per dequeue, which is not enough
+			// for a high-degree document: Links is caller-supplied and unbounded,
+			// and if the links are dangling nothing is enqueued, so the queue ends
+			// and the outer check never runs again. Poll every 1024 links.
+			if i&1023 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			next, ok := s.ix.Resolve(key)
 			if !ok {
 				continue // Dangling link: a Key that was never added.
@@ -111,6 +120,12 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 			dist[next] = hops + 1
 			queue = append(queue, next)
 		}
+	}
+
+	// TopK sorts, so a cancellation arriving after the last poll would otherwise
+	// still pay for an O(n log n) sort of results nobody will read.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Unreachable documents are simply absent from dist, so they never appear.
