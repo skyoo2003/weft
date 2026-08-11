@@ -14,7 +14,8 @@ coverage.*
 go.work
 go.work.sum
 
-# Editor and OS noise
+# Local tooling, editor, and OS noise
+.claude/
 .DS_Store
 *.swp
 .idea/

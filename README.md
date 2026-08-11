@@ -23,7 +23,7 @@ func Fuse(streams [][]Candidate, k int) []Candidate
 
 weft는 순서를 뒤집는다: **융합을 기본 동작으로 놓고 신호를 그 위에 꽂는다.** 네 번째 신호를 추가하는 비용이 첫 번째와 같아진다.
 
-**정직하게**: 텍스트+벡터 하이브리드만 필요하다면 [bleve](https://github.com/blevesearch/bleve)를 쓰는 게 맞다. 이미 BM25·ANN·RRF를 내장한다. weft는 시장 공백이 아니라 **아키텍처 가설** 위에 서 있다. 자세한 내용은 [`.claude/prds/weft.prd.md`](.claude/prds/weft.prd.md).
+**정직하게**: 텍스트+벡터 하이브리드만 필요하다면 [bleve](https://github.com/blevesearch/bleve)를 쓰는 게 맞다. 이미 BM25·ANN·RRF를 내장한다. weft는 시장 공백이 아니라 **아키텍처 가설** 위에 서 있다. 그 가설이 어디까지 검증됐고 무엇이 아직 미검증인지는 [`docs/FINDINGS.md`](docs/FINDINGS.md)에 정직하게 적어뒀다.
 
 ## 상태
 
