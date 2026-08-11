@@ -81,7 +81,7 @@ results, err := engine.Search(ctx, q, 10, fusion.Fuse, scorers...)
 `make arch` verifies this mechanically:
 
 - **Fusion is invariant to scorer count** — three and four scorers use the same call expression; compiling is the proof.
-- **A new scorer is cheap** — `scorer/recency` is 71 implementation lines against a 100-line budget, and `fusion/` needs no change. A scorer needing a new input field costs one field on `engine.Document`, which `pkg/engine/testdata/engine_api.txt` makes visible ([FINDINGS §1](docs/FINDINGS.md)).
+- **A new scorer is cheap** — `scorer/recency` is 84 implementation lines against a 100-line budget, and `fusion/` needs no change. Whatever a scorer costs `engine` shows up in `pkg/engine/testdata/engine_api.txt`, which records signatures and member types, not just names ([FINDINGS §1](docs/FINDINGS.md)).
 - **Fusion cannot see scorers** — `go list -deps ./pkg/fusion` names no `scorer/*` package.
 
 The third assertion carries the weight. `Fuse` never reads `Candidate.Score`, only rank: BM25 is unbounded, cosine is `[-1,1]`, graph proximity is `(0,1]`, so comparing scores across scorers would need per-scorer normalization — and knowing how to normalize means knowing which scorer produced the score.
@@ -98,7 +98,7 @@ pkg/
     text/          BM25, ln(1+…) IDF form
     vector/        brute-force cosine
     graph/         seed BFS, 1/(1+hops)
-    recency/       2^(-age/HalfLife)
+    recency/       1/(1+age/HalfLife)
 docs/
   FINDINGS.md      milestone 1 results, known costs, open questions
   DECISIONS.md     decisions expensive to reverse
@@ -117,7 +117,7 @@ make run        # interactive demo
 make example    # minimal example
 ```
 
-777 implementation lines, 1,426 test lines, **zero external dependencies**. Go 1.26+.
+875 implementation lines, 1,842 test lines, **zero external dependencies**. Go 1.26+.
 
 ## Limitations
 

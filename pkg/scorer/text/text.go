@@ -80,7 +80,18 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		nq := math.Min(float64(len(posts)), n)
 		idf := math.Log(1 + (n-nq+0.5)/(nq+0.5))
 
-		for _, p := range posts {
+		for i, p := range posts {
+			// Cancellation has to be observable inside this loop, not just once per
+			// term. A single-term query over a common term is both the largest
+			// posting list and the only case with no further per-term check, so
+			// without this the scorer finishes the whole scan and returns results
+			// after the caller has given up. Polling every 1024 postings keeps
+			// ctx.Err's lock off the per-posting path.
+			if i&1023 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			f := float64(p.Freq)
 			// avgdl == 0 means every document is empty, so there is nothing to
 			// normalize against; norm stays 1 rather than dividing by zero.
@@ -93,6 +104,11 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 	}
 	if len(acc) == 0 {
 		return nil, nil
+	}
+	// TopK sorts, so a cancellation arriving after the last poll would otherwise
+	// still pay for an O(n log n) sort of results nobody will read.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	cands := make([]engine.Candidate, 0, len(acc))

@@ -1,35 +1,37 @@
-field Candidate.Doc
-field Candidate.Score
-field Document.Key
-field Document.Links
-field Document.Text
-field Document.Time
-field Document.Vector
-field Posting.Doc
-field Posting.Freq
-field Query.Seeds
-field Query.Text
-field Query.Vector
-func New
-func Search
-func Tokenize
-func TopK
-method Index.Add
-method Index.AvgDocLen
-method Index.Doc
-method Index.DocLen
-method Index.Len
-method Index.Lookup
-method Index.Resolve
-method Index.Stats
-type Candidate
-type DocID
-type Document
-type Fuser
-type Index
-type Posting
-type Query
-type Scorer
+field Candidate.Doc DocID
+field Candidate.Score float64
+field Document.Key string
+field Document.Links []string
+field Document.Text string
+field Document.Time time.Time
+field Document.Vector []float32
+field Posting.Doc DocID
+field Posting.Freq int
+field Query.Seeds []string
+field Query.Text string
+field Query.Vector []float32
+func New() *Index
+func Search(ctx context.Context, q Query, k int, fuse Fuser, scorers ...Scorer) ([]Candidate, error)
+func Tokenize(s string) []string
+func TopK(cands []Candidate, k int) []Candidate
+method Index.Add(d Document) (DocID, error)
+method Index.AvgDocLen() float64
+method Index.Doc(id DocID) (Document, bool)
+method Index.DocLen(id DocID) int
+method Index.Len() int
+method Index.Lookup(term string) []Posting
+method Index.Resolve(key string) (DocID, bool)
+method Index.Stats() (docs int, avgDocLen float64)
+method Scorer.Candidates(ctx context.Context, q Query, k int) ([]Candidate, error)
+method Scorer.Name() string
+type Candidate struct
+type DocID uint32
+type Document struct
+type Fuser func(streams [][]Candidate, k int) []Candidate
+type Index struct
+type Posting struct
+type Query struct
+type Scorer interface
 var ErrDuplicateKey
 var ErrEmptyKey
 var ErrNoFuser

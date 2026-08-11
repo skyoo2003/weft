@@ -10,13 +10,14 @@ package recency
 
 import (
 	"context"
-	"math"
 	"time"
 
 	"github.com/skyoo2003/weft/pkg/engine"
 )
 
-// HalfLife is how long a document takes to lose half its score.
+// HalfLife is how long a document takes to lose half its score. Once — the
+// decay is harmonic, not exponential, so see Candidates before assuming it
+// halves again.
 const HalfLife = 30 * 24 * time.Hour
 
 // Scorer ranks documents by exponential decay of age.
@@ -36,9 +37,21 @@ func NewAt(ix *engine.Index, now time.Time) *Scorer {
 // Name implements engine.Scorer.
 func (s *Scorer) Name() string { return "recency" }
 
-// Candidates implements engine.Scorer, scoring 2^(-age/HalfLife) so a document
-// one half-life old scores 0.5, two half-lives 0.25, and nothing ever reaches
-// zero or goes negative.
+// Candidates implements engine.Scorer, scoring 1/(1 + age/HalfLife) so a
+// document one half-life old scores 0.5 and nothing ever reaches zero or goes
+// negative. At two half-lives the score is 1/3, not 0.25.
+//
+// The literal reading of "half-life" is 2^(-age/HalfLife), and it is wrong here:
+// that underflows float64 to exactly zero at about 88 years, so every document
+// older than that ties at zero and TopK falls back to ordering them by DocID.
+// A century-old document would then outrank a decade-old one for having been
+// indexed first. 1/(1+x) bottoms out at 2.8e-4 over the whole representable
+// time.Duration range and stays ordered.
+//
+// The swap costs nothing in rank terms: both forms decrease strictly with age,
+// so they order identically wherever the exponential is representable, and
+// fusion reads rank rather than score. Which decay shape actually ranks better
+// is a milestone 4 question — see docs/FINDINGS.md section 5.
 func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
 	if k <= 0 {
 		return nil, nil
@@ -64,7 +77,7 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		}
 		cands = append(cands, engine.Candidate{
 			Doc:   id,
-			Score: math.Exp2(-age.Hours() / HalfLife.Hours()),
+			Score: 1 / (1 + age.Hours()/HalfLife.Hours()),
 		})
 	}
 	return engine.TopK(cands, k), nil

@@ -141,6 +141,27 @@ func TestResolveAndDoc(t *testing.T) {
 	}
 }
 
+func TestHugeDocIDsAreOutOfRangeNotAPanic(t *testing.T) {
+	// DocID is uint32 and the bounds are compared in uint64. Under the earlier
+	// int(id) comparison these ids wrapped negative on a 32-bit build, passed the
+	// guard, and panicked on the slice access.
+	//
+	// This cannot fail on a 64-bit build, where int is wide enough that the old
+	// comparison was already correct: it guards a 32-bit target rather than
+	// reproducing the fault here.
+	ix := New()
+	mustAdd(t, ix, Document{Key: "only", Text: "x"})
+
+	for _, id := range []DocID{1 << 31, 1<<31 + 1, math.MaxUint32} {
+		if _, ok := ix.Doc(id); ok {
+			t.Errorf("Doc(%d) reported ok for an unassigned id", id)
+		}
+		if got := ix.DocLen(id); got != 0 {
+			t.Errorf("DocLen(%d) = %d, want 0", id, got)
+		}
+	}
+}
+
 func TestTopK(t *testing.T) {
 	tests := []struct {
 		name string

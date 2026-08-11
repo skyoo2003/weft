@@ -129,10 +129,15 @@ func (ix *Index) Len() int {
 // The returned Vector and Links alias index state and must not be modified,
 // the same contract as Lookup. Copying them here would allocate once per
 // document per query in the scorers that scan the whole corpus.
+//
+// The bound is compared in uint64, not int. DocID is uint32, so on a 32-bit
+// build int(id) wraps negative for an id at or above 1<<31: the guard would pass
+// and the slice access would panic, exactly where this is documented to return
+// false instead.
 func (ix *Index) Doc(id DocID) (Document, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	if int(id) >= len(ix.docs) {
+	if uint64(id) >= uint64(len(ix.docs)) {
 		return Document{}, false
 	}
 	return ix.docs[id], true
@@ -156,11 +161,12 @@ func (ix *Index) Lookup(term string) []Posting {
 	return ix.postings[term]
 }
 
-// DocLen is the token count of a document, or 0 for an unknown id.
+// DocLen is the token count of a document, or 0 for an unknown id. The bound is
+// compared in uint64 for the reason given on Doc.
 func (ix *Index) DocLen(id DocID) int {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	if int(id) >= len(ix.docLen) {
+	if uint64(id) >= uint64(len(ix.docLen)) {
 		return 0
 	}
 	return ix.docLen[id]

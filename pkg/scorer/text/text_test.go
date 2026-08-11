@@ -2,6 +2,7 @@ package text
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -150,6 +151,45 @@ func TestCandidatesHonoursCancelledContext(t *testing.T) {
 	cancel()
 	if _, err := New(index(t, "go")).Candidates(ctx, engine.Query{Text: "go"}, 10); err == nil {
 		t.Fatal("Candidates on a cancelled context returned no error")
+	}
+}
+
+// cancelAfter reports itself cancelled only once Err has been called n times.
+// A plain cancelled context is caught by the per-term check before the posting
+// loop starts, so it cannot distinguish "cancellation is observed" from
+// "cancellation is observed in time".
+type cancelAfter struct {
+	context.Context
+	n int
+}
+
+func (c *cancelAfter) Err() error {
+	if c.n > 0 {
+		c.n--
+		return nil
+	}
+	return context.Canceled
+}
+
+func TestCancellationIsObservedInsideThePostingScan(t *testing.T) {
+	// One term, one posting list longer than the poll interval. n = 2 spends the
+	// free calls on the per-term check and the i == 0 poll, so the cancellation
+	// lands on the i == 1024 poll — inside the scan, which is the only place the
+	// old code had no check at all.
+	ix := engine.New()
+	for i := range 3000 {
+		if _, err := ix.Add(engine.Document{Key: fmt.Sprintf("d%d", i), Text: "go"}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+
+	ctx := &cancelAfter{Context: t.Context(), n: 2}
+	got, err := New(ix).Candidates(ctx, engine.Query{Text: "go"}, 10)
+	if err == nil {
+		t.Fatalf("Candidates returned %d results and no error after mid-scan cancellation", len(got))
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Candidates error = %v, want context.Canceled", err)
 	}
 }
 

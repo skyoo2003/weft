@@ -4,14 +4,14 @@
 
 | Package | Implementation | Tests |
 |---|---|---|
-| `pkg/engine` | 317 | 557 |
+| `pkg/engine` | 370 | 825 |
 | `pkg/fusion` | 54 | 138 |
-| `pkg/scorer/text` | 95 | 167 |
-| `pkg/scorer/vector` | 87 | 146 |
+| `pkg/scorer/text` | 119 | 262 |
+| `pkg/scorer/vector` | 95 | 168 |
 | `pkg/scorer/graph` | 153 | 312 |
-| `pkg/scorer/recency` | **71** | 106 |
+| `pkg/scorer/recency` | **84** | 137 |
 
-777 implementation lines, 1,426 test lines, zero external dependencies.
+875 implementation lines, 1,842 test lines, zero external dependencies.
 
 ---
 
@@ -26,14 +26,14 @@ engine.Search(ctx, q, 5, fusion.Fuse, four...)   // + recency
 
 Compiling alone proved insufficient — a scorer returning nothing passes it too. The corpus therefore holds a document (`lonely`) that matches no query term, carries no vector and is linked from nowhere, so only recency sees it. Three scorers must not surface it; four must.
 
-**Assertion 2 — a new scorer is cheap.** `pkg/scorer/recency` is 71 implementation lines against a 100-line budget, and `fusion/` needed no change at all.
+**Assertion 2 — a new scorer is cheap.** `pkg/scorer/recency` is 84 implementation lines against a 100-line budget, and `fusion/` needed no change at all.
 
 The engine side is not zero, and an earlier version of this document claimed it was. `Document.Time` exists only for the recency scorer and was written before that scorer existed, so the figure was flattered by pre-provisioning the field. Stated generally: a scorer needing new input data has to read it from `engine.Document`, because scorers may not keep their own store (§2.2). **The engine cost of a new input type is one field on `Document`.** A scorer reusing existing fields costs nothing there.
 
 Two checks measure different things, and neither substitutes for the other:
 
 - `engine/` and `fusion/` import no `scorer/*` package, checked with `go/parser`. This proves package-level ignorance and holds for every future scorer without needing a baseline commit, and it does not trip on the words "text" or "vector" in comments. It cannot detect a new `Document` field.
-- `engine`'s exported API is recorded in `pkg/engine/testdata/engine_api.txt`. Adding a field to `Document` fails that test, so the engine cost of a new scorer is a visible edit rather than a silent one. Refresh with `WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/`.
+- `engine`'s exported API is recorded in `pkg/engine/testdata/engine_api.txt`, signatures and member types included. That covers all three ways a scorer can widen the shared contract — a field on `Document`, a method on the `Scorer` interface, a parameter on `Search` or `Fuser` — so the engine cost of a new scorer is a visible edit rather than a silent one. Names alone were not enough: an interface method is the most expensive change a scorer can force, since every existing scorer stops compiling. Refresh with `WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/`.
 
 The line budget counts implementation files only — counting tests would reward untested scorers.
 
@@ -145,5 +145,6 @@ A heap is `O(n log k)` against `O(n log n)` and pays off only when candidate set
 | Is `RRF k = 60` right for this domain? | Cited default, never measured here (§3.2). |
 | Are `SeedN = 5` and "top n from text" good seeds? | Double counting is fixed (§2.3); seed quality is separate and unmeasured. |
 | PageRank instead of BFS distance? | BFS was the simplest real proximity. A replacement candidate if quality falls short. |
+| Is harmonic decay the right shape for recency? | `1/(1 + age/HalfLife)` replaced `2^(-age/HalfLife)`, which underflowed to zero past ~88 years and let insertion order stand in for recency. Both orderings are identical wherever the exponential is representable, so the swap is rank-neutral and the fused demo output did not move — which also means nothing here measures which tail is better. |
 | Does CJK tokenization matter? | `engine.Tokenize` collapses CJK runs into one token — a known wrong answer milestone 1 did not need to be right about. Same pressure point as §2.2. |
 | Is multi-month solo development sustainable? | Milestone 1 finished well under estimate because of the in-memory and standard-library-only constraints. That says milestone 1 was easy and nothing more; persistence and segment merge are the real test. |

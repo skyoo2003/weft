@@ -5,8 +5,9 @@
 //
 //  1. Fusion is invariant to scorer count — the call shape for four scorers is
 //     the shape for three.
-//  2. The fourth scorer was cheap — under 100 lines, and zero lines changed in
-//     engine/ or fusion/.
+//  2. The fourth scorer was cheap — under 100 lines, no change to fusion/, and
+//     whatever it cost engine/ recorded in a golden API file rather than
+//     asserted to be nothing.
 //  3. Fusion is ignorant of scorers — enforced by the import graph, not by
 //     anyone reading the code carefully.
 //
@@ -20,6 +21,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -162,9 +164,10 @@ func TestFourthScorerIsUnderOneHundredLines(t *testing.T) {
 }
 
 func TestNeitherEngineNorFusionImportsAScorer(t *testing.T) {
-	// This is the mechanical stand-in for "the diff to engine/ and fusion/ was
-	// zero lines". A diff needs a baseline commit; this needs nothing, and it
-	// keeps holding for every future scorer. It reads the import graph, so the
+	// This proves package-level ignorance, not a zero diff: engine and fusion
+	// never name a scorer, for every future scorer, without needing a baseline
+	// commit. What it cannot see — a widened Document or Scorer — is
+	// TestEngineAPISurfaceIsUnchanged's job. It reads the import graph, so the
 	// words "text" and "vector" appearing in engine's comments do not trip it.
 	for _, dir := range []string{".", filepath.Join("..", "fusion")} {
 		for _, imp := range importsOf(t, dir) {
@@ -185,9 +188,12 @@ func TestNeitherEngineNorFusionImportsAScorer(t *testing.T) {
 // Document.Time exists solely for the recency scorer and was written before that
 // scorer existed, which flattered the original "zero lines changed" figure.
 //
-// This golden file fails when engine's exported surface changes, so a new field
-// on Document becomes a deliberate edit with a visible cost instead of passing
-// unnoticed. Refresh with:
+// This golden file fails when engine's exported surface changes, so the engine
+// cost of a new scorer becomes a deliberate edit instead of passing unnoticed.
+// It records signatures and member types, not just names, so the three ways a
+// scorer can quietly widen the shared contract are all covered: a field on
+// Document, a method on the Scorer interface, and a parameter on Search or
+// Fuser. Refresh with:
 //
 //	WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/
 func TestEngineAPISurfaceIsUnchanged(t *testing.T) {
@@ -216,8 +222,9 @@ func TestEngineAPISurfaceIsUnchanged(t *testing.T) {
 	}
 }
 
-// exportedAPI lists dir's exported declarations one per line, sorted. Struct
-// fields are included because that is where a new scorer's input arrives.
+// exportedAPI lists dir's exported declarations one per line, sorted, with
+// member and signature types included — see typeAPI for why names alone are not
+// enough.
 func exportedAPI(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -242,9 +249,9 @@ func exportedAPI(t *testing.T, dir string) []string {
 					continue
 				}
 				if d.Recv == nil {
-					api = append(api, "func "+d.Name.Name)
+					api = append(api, "func "+d.Name.Name+signature(d.Type))
 				} else if recv := receiverName(d.Recv); ast.IsExported(recv) {
-					api = append(api, "method "+recv+"."+d.Name.Name)
+					api = append(api, "method "+recv+"."+d.Name.Name+signature(d.Type))
 				}
 			case *ast.GenDecl:
 				for _, spec := range d.Specs {
@@ -253,18 +260,7 @@ func exportedAPI(t *testing.T, dir string) []string {
 						if !s.Name.IsExported() {
 							continue
 						}
-						api = append(api, "type "+s.Name.Name)
-						st, ok := s.Type.(*ast.StructType)
-						if !ok {
-							continue
-						}
-						for _, fld := range st.Fields.List {
-							for _, fn := range fld.Names {
-								if fn.IsExported() {
-									api = append(api, "field "+s.Name.Name+"."+fn.Name)
-								}
-							}
-						}
+						api = append(api, typeAPI(s.Name.Name, s.Type)...)
 					case *ast.ValueSpec:
 						for _, n := range s.Names {
 							if n.IsExported() {
@@ -278,6 +274,63 @@ func exportedAPI(t *testing.T, dir string) []string {
 	}
 	sort.Strings(api)
 	return api
+}
+
+// typeAPI renders one exported type: the declaration, then the members that make
+// up its contract. Member types are recorded alongside member names, because
+// retyping Document.Vector or adding a parameter to Fuser changes what engine
+// promises without changing a single name.
+func typeAPI(name string, expr ast.Expr) []string {
+	switch t := expr.(type) {
+	case *ast.StructType:
+		out := []string{"type " + name + " struct"}
+		for _, fld := range t.Fields.List {
+			if len(fld.Names) == 0 {
+				// Embedded: contributes a whole surface of its own, so it cannot
+				// be skipped for having no name.
+				out = append(out, "embeds "+name+"."+types.ExprString(fld.Type))
+				continue
+			}
+			for _, f := range fld.Names {
+				if f.IsExported() {
+					out = append(out, "field "+name+"."+f.Name+" "+types.ExprString(fld.Type))
+				}
+			}
+		}
+		return out
+
+	case *ast.InterfaceType:
+		// A method added to engine.Scorer is the most expensive change a new
+		// scorer can force on engine: every existing scorer stops compiling.
+		// Recording method signatures is what makes that cost visible, and
+		// recording embedded interfaces covers the Streamer extension sketched in
+		// docs/FINDINGS.md section 3.1.
+		out := []string{"type " + name + " interface"}
+		for _, m := range t.Methods.List {
+			ft, ok := m.Type.(*ast.FuncType)
+			if !ok {
+				out = append(out, "embeds "+name+"."+types.ExprString(m.Type))
+				continue
+			}
+			for _, n := range m.Names {
+				if n.IsExported() {
+					out = append(out, "method "+name+"."+n.Name+signature(ft))
+				}
+			}
+		}
+		return out
+
+	default:
+		// A defined type or a func type: DocID's width and Fuser's signature are
+		// both part of the contract.
+		return []string{"type " + name + " " + types.ExprString(expr)}
+	}
+}
+
+// signature renders a function's parameters and results, dropping the leading
+// "func" keyword so the line reads "func Search(...) (...)".
+func signature(ft *ast.FuncType) string {
+	return strings.TrimPrefix(types.ExprString(ft), "func")
 }
 
 // receiverName returns the bare type name of a method receiver.
