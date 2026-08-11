@@ -52,7 +52,7 @@ func scores(t *testing.T, s *Scorer, q engine.Query, k int) map[engine.DocID]flo
 }
 
 // ---------------------------------------------------------------------------
-// Seed handling — docs/FINDINGS.md section 3.1
+// Seed handling — docs/FINDINGS.md section 2.3
 // ---------------------------------------------------------------------------
 
 func TestSeedsAreExcludedFromResults(t *testing.T) {

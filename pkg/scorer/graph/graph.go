@@ -61,7 +61,7 @@ func (s *Scorer) Name() string { return "graph" }
 //
 // Score is 1/(1+hops): one hop out scores 0.5, two hops 1/3. Seeds sit at zero
 // hops and would score 1.0, but they are dropped unless the scorer was built
-// with NewIncludingSeeds — see New for why, and docs/FINDINGS.md section 3.1 for
+// with NewIncludingSeeds — see New for why, and docs/FINDINGS.md section 2.3 for
 // how the two variants differ in practice.
 func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
 	if k <= 0 {

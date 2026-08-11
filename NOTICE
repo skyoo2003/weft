@@ -19,9 +19,8 @@ THIRD-PARTY NOTICES
 
 weft has no third-party dependencies.
 
-This is a project constraint rather than a coincidence: "standard library only,
-zero external dependencies" is one of the PRD's success metrics, and a test
-enforces it.
+This is a project constraint rather than a coincidence: standard library only,
+zero external dependencies, enforced by a test rather than asserted.
 
     $ go list -m all
     github.com/skyoo2003/weft

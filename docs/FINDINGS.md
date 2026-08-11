@@ -1,11 +1,10 @@
-# FINDINGS — 마일스톤 1: 신호 무관 융합
+# Milestone 1 — Scorer-agnostic fusion
 
-**판정: 아키텍처 가설 통과 (단언 3/3).**
-근거는 `pkg/engine/architecture_test.go`. 이 문서는 그 결과와, 테스트가 잡아내지 못하는 비용을 기록한다.
+**Verdict: the architecture hypothesis holds. 3/3 assertions pass.**
 
-측정: 라이브러리 구현 777줄, 테스트 1,426줄, 외부 의존성 0개, 6개 패키지 전부 통과.
+Evidence lives in `pkg/engine/architecture_test.go`. This document records the result, what the design turned out to force, what it costs, and what remains unmeasured.
 
-| 패키지 | 구현 | 테스트 |
+| Package | Implementation | Tests |
 |---|---|---|
 | `pkg/engine` | 317 | 557 |
 | `pkg/fusion` | 54 | 138 |
@@ -14,54 +13,100 @@
 | `pkg/scorer/graph` | 153 | 312 |
 | `pkg/scorer/recency` | **71** | 106 |
 
+777 implementation lines, 1,426 test lines, zero external dependencies.
+
 ---
 
-## 1. 아키텍처 가설 판정
+## 1. Result
 
-### 단언 1 — 융합 불변 ✅
-3신호와 4신호를 **같은 호출식**으로 호출한다. 컴파일이 증명이다.
+### Assertion 1 — fusion is invariant to scorer count ✅
+
+Three and four scorers use the same call expression. Compiling is the proof.
 
 ```go
 engine.Search(ctx, q, 5, fusion.Fuse, three...)  // text, vector, graph
 engine.Search(ctx, q, 5, fusion.Fuse, four...)   // + recency
 ```
 
-컴파일만으로는 부족하다는 점을 도중에 발견했다. 아무것도 반환하지 않는 no-op 신호를 추가해도 이 단언은 통과한다. 그래서 **recency만 볼 수 있는 문서**(`lonely` — 쿼리 텀 불일치, 벡터 없음, 어느 문서도 링크하지 않음)를 코퍼스에 넣고, 3신호에서는 결과에 없고 4신호에서는 있음을 함께 단언했다. 4번째 신호가 실제로 융합에 도달한다는 뜻이다.
+Compiling alone turned out to be insufficient: a scorer that returns nothing passes it too. The test corpus therefore contains a document (`lonely`) that matches no query term, carries no vector, and is linked from nowhere, so only recency can see it. Three scorers must not surface it; four must.
 
-### 단언 2 — 추가 비용 ✅
-`pkg/scorer/recency` 구현 **71줄** (예산 100). `engine/`·`fusion/` 변경 **0줄**.
+### Assertion 2 — a new scorer is cheap ✅
 
-"diff 0줄"은 기준 커밋이 필요해 재현 가능한 단언이 못 된다. 대신 **import 그래프**로 바꿨다: `engine/`·`fusion/`의 비테스트 파일 중 어느 것도 `scorer/*`를 import하지 않는다(`go/parser`로 검사). 기준 커밋이 필요 없고, 앞으로 추가되는 모든 신호에 대해 계속 성립한다. 주석에 "vector 신호가 읽는다" 같은 문구가 있어도 걸리지 않는다 — 텍스트가 아니라 import를 본다.
+`pkg/scorer/recency` is 71 implementation lines against a 100-line budget, with zero lines changed in `engine/` or `fusion/`.
 
-라인 예산은 **구현 파일만** 센다. 테스트를 예산에 넣으면 테스트를 안 쓴 신호가 유리해진다.
+"Zero lines changed" is asserted through the import graph rather than a diff: no non-test file in `engine/` or `fusion/` imports `scorer/*`, checked with `go/parser`. A diff needs a baseline commit and stops being reproducible; the import check needs nothing, holds for every future scorer, and does not trip on the words "text" or "vector" appearing in comments.
 
-### 단언 3 — 신호 무지 ✅
+The line budget counts implementation files only. Counting tests against it would reward untested scorers.
+
+### Assertion 3 — fusion cannot see scorers ✅
+
 ```
-go list -deps ./pkg/fusion   → weft 패키지는 engine 하나뿐
-go list -deps ./pkg/engine   → weft 패키지 0개 (완전한 leaf)
-go list -m all               → 자기 모듈만 (외부 의존성 0)
+go list -deps ./pkg/fusion   → engine, and no other weft package
+go list -deps ./pkg/engine   → no weft package at all
+go list -m all               → this module only
 ```
-`fusion.Fuse`는 `Candidate.Score`를 **한 번도 읽지 않는다**. 순위만 쓴다. `pkg/fusion/rrf_test.go`의 `TestScoresAreNeverRead`가 이를 고정한다: 1순위 문서에 0.0001, 2순위에 999999를 주고 순서가 유지되는지 본다.
+
+`fusion.Fuse` never reads `Candidate.Score`, only rank. `TestScoresAreNeverRead` pins this by placing `0.0001` on the rank-1 document and `999999` on rank-2 and asserting the order survives.
 
 ---
 
-## 2. 인터페이스 선택의 비용 — 마일스톤 5가 알아야 할 것
+## 2. Constraints the architecture imposed
 
-계획대로 **상위 k개 후보 목록**을 골랐다.
+These were not design choices. Each is something the hypothesis forced, discovered by trying to violate it.
+
+### 2.1 Dependency direction is fixed, which makes `engine` ignorant of fusion too
+
+`fusion` imports `engine` for `Candidate`, so `engine` importing `fusion` is a compile-time cycle. `engine.Search` therefore takes a `Fuser` function parameter.
+
+Consequence beyond the fix: `engine` knows neither the scorers nor the fusion strategy. Replacing RRF with a weighted score sum changes nothing in `engine/`.
+
+### 2.2 The tokenizer must live in `engine`
+
+`Index.Add` tokenizes at index time to build postings. A tokenizer in `scorer/text` would make `engine` import `scorer/text`, breaking assertion 3 immediately. Hence `engine.Tokenize`.
+
+Stated generally: "one write entry point" plus "no scorer keeps its own store" together determine where the tokenizer lives. Multilingual or morphological tokenizers will press on this — they cannot all live in `engine`. The likely answer is injecting the tokenizer into `Add`, the same shape as `Fuser`.
+
+### 2.3 Seeds must be excluded from graph results
+
+Scoring `1/(1+hops)` puts seeds at 1.0, i.e. top. With seeds drawn from the text scorer, the graph stream's head becomes a copy of the text stream's head, and RRF counts one piece of evidence as two independent votes — effectively double weight for the seed scorer.
+
+Measured on the `cmd/weft` corpus, query `ranking fusion`:
+
+| | Graph stream | Overlap with text stream |
+|---|---|---|
+| Seeds included | tfidf, rrf, bm25, hnsw, ivf | top 2 identical to text's top 2, same order |
+| Seeds excluded | bm25, hnsw, ivf | none |
+
+The clearest single effect is `tfidf`, which was rank 1 in text and rank 1 in graph, so it collected two votes for one piece of evidence:
+
+```
+included   tfidf  0.03279 (2nd)   ← 1/61 + 1/61
+excluded   tfidf  0.01639 (5th)   ← 1/61, exactly halved
+```
+
+`bm25`, `hnsw` and `ivf` are documents text never found, so after exclusion the graph scorer contributes only new information.
+
+`graph.New` excludes seeds. `graph.NewIncludingSeeds` retains the literal behaviour, because measuring whether graph proximity helps requires running both variants over one query set — otherwise an improvement cannot be attributed.
+
+### 2.4 The seed source is an interface, so scorers compose without naming each other
+
+`graph.New(ix, seed engine.Scorer)`. The graph scorer does not know its seed is the text scorer, so `scorer/graph` does not import `scorer/text`, and its tests seed traversal from a stub. Scorer-agnosticism holds between scorers, not only at the fusion layer.
+
+---
+
+## 3. Known costs
+
+### 3.1 The top-k interface forecloses early termination
 
 ```go
 Candidates(ctx context.Context, q Query, k int) ([]Candidate, error)
 ```
 
-**대가: WAND류 조기 종료가 구조적으로 불가능하다.** 신호는 k개를 반환하기 전에 자기 후보를 전부 평가해야 한다. 텍스트 신호는 매칭 포스팅 전체를 순회하고, 벡터 신호는 전체 스캔한다.
+A scorer must evaluate all its candidates before returning k. The text scorer walks every matching posting; the vector scorer scans the whole corpus.
 
-이유는 단순히 "구현을 안 했다"가 아니다. WAND는 두 가지를 요구한다:
-1. 텀별 **상한 점수**(max score)를 융합이 조회할 수 있어야 한다
-2. 융합의 **현재 임계값**이 신호로 흘러들어가, 신호가 그보다 낮은 블록을 건너뛸 수 있어야 한다
+This is not a missing optimization but a direction-of-information problem. WAND-style skipping requires two things: fusion able to look up a per-term score ceiling, and fusion's current threshold reaching the scorer so it can skip blocks below it. No path exists for a threshold to flow inward — the scorer computes everything internally and only then hands results to fusion.
 
-지금 인터페이스에는 임계값이 신호로 흐르는 경로가 없다. 신호가 내부에서 통째로 계산해 반환한 뒤에야 융합이 개입한다. **이건 최적화 누락이 아니라 정보 흐름 방향의 문제다.**
-
-**마일스톤 5 권고 — 확장 인터페이스, 교체 아님:**
+**Extension, not replacement:**
 
 ```go
 type Streamer interface {
@@ -70,93 +115,44 @@ type Streamer interface {
 }
 
 type Cursor interface {
-    Advance(minDoc DocID) (Candidate, bool) // 정렬된 doc id 순회, 스킵 가능
-    MaxScore() float64                      // 남은 상한
+    Advance(minDoc DocID) (Candidate, bool) // ordered doc id walk, skippable
+    MaxScore() float64                      // remaining ceiling
 }
 ```
 
-융합이 `if s, ok := sig.(Streamer); ok` 로 분기하게 된다. **이때 가설이 깨지는가?** 깨지지 않는다 — 융합이 아는 것은 신호의 *종류*(text/vector/graph)가 아니라 *능력*(스트리밍 가능 여부)이다. 이 구분을 지금 기록해두는 이유는, 마일스톤 5에서 "융합에 분기가 생겼으니 가설 실패"라는 잘못된 결론을 막기 위해서다. 실패 조건은 여전히 `switch scorer.Name()`이다.
+Fusion would branch on `if s, ok := sc.(Streamer); ok`. That does not break the hypothesis: fusion learns a *capability* (streamable), not a *type* (text/vector/graph). The failure condition is still `switch scorer.Name()`. Recording the distinction now avoids concluding "fusion has a branch, the hypothesis failed" later.
 
-**비용의 크기는 아직 측정 불가.** 인메모리 소형 코퍼스에서는 전체 스캔이 공짜다. 처음 아픈 지점은 마일스톤 3(메모리 초과 코퍼스)이다.
+The size of the cost is unmeasurable today — full scans are free on a small in-memory corpus. It first hurts at milestone 3, on corpora larger than memory.
 
----
+### 3.2 RRF damping is stronger than expected
 
-## 3. 예상하지 못한 발견
+The contribution gap between rank 1 and rank 2 is `1/61 - 1/62 ≈ 0.00026`. For one of four scorers to reverse an order it must outweigh the other three agreeing. Adding recency changed scores but not order, which is why assertion 1 could not be written as "the order changes" and uses the `lonely` document instead.
 
-### 3.1 ✅ 그래프 신호가 시드 신호를 에코했다 — 시드를 결과에서 제외해 해결
+`k = 60` is a cited default, unverified on this corpus.
 
-**발견 당시.** 점수가 `1/(1+hops)`이므로 **시드 자신이 1.0**, 즉 최상위였다. 시드를 텍스트 상위 n개에서 뽑으면 그래프 신호의 상위가 텍스트 신호의 상위와 같아지고, RRF는 이를 두 표로 세므로 **사실상 텍스트에 가중치 2배**를 줬다. 마일스톤 4가 "그래프 신호의 nDCG 기여"를 측정할 때 개선이 나와도 그것이 그래프의 기여인지 텍스트 이중 계산인지 구분할 수 없는 상태였다.
+### 3.3 `engine.TopK` sorts rather than using a bounded heap
 
-**해결.** `graph.New`가 시드를 결과에서 제외한다. **시드는 발견이 아니다** — 시드 신호가 내놨든 `Query.Seeds`로 지정됐든, 그것을 내놓은 쪽이 이미 순위를 매겼다. 그래프 신호는 순회로 *찾아낸* 것만 내놓는다. 이중 계산이 우회 가능한 함정이 아니라 **구조적으로 불가능**해졌다.
-
-리터럴 변형 `graph.NewIncludingSeeds`는 남겨뒀다. 이 절이 원래 요구한 A/B — 마일스톤 4가 두 변형을 같은 쿼리셋으로 돌려보는 것 — 를 하려면 양쪽이 다 있어야 하기 때문이다.
-
-**측정** — `cmd/weft` 데모 코퍼스(문서 8개), 쿼리 `ranking fusion`:
-
-| | 그래프 스트림 | 텍스트 스트림과 겹침 |
-|---|---|---|
-| 제외 전 | tfidf, rrf, bm25, hnsw, ivf | **상위 2개가 텍스트 상위 2개와 완전히 동일** |
-| 제외 후 | bm25, hnsw, ivf | **0개** |
-
-에코가 이론적 우려가 아니었다는 증거다. 제외 전 그래프 1·2위는 텍스트 1·2위와 문서도 순서도 같았다.
-
-가장 또렷한 개별 효과는 `tfidf`다. 텍스트 1위이면서 그래프 1위였으므로 같은 근거로 두 표를 받았다:
-
-```
-제외 전   tfidf  0.03279 (2위)   ← 1/61 + 1/61, 텍스트 한 표가 두 번 세어짐
-제외 후   tfidf  0.01639 (5위)   ← 1/61, 정확히 절반
-```
-
-한편 `bm25`·`hnsw`·`ivf`는 텍스트가 전혀 찾지 못한 문서인데 그래프 순회로 올라왔다 — 제외 후 그래프 신호가 내놓는 것이 **새 정보뿐**이라는 뜻이다.
-
-**남은 것.** 이중 계산은 사라졌지만 "텍스트 상위 5개"(`SeedN`)가 좋은 시드인지는 여전히 미검증이다. 그건 품질 문제이고 마일스톤 4의 몫이다.
-
-### 3.2 ✅ 시드를 `engine.Scorer`로 받은 것이 예상 밖의 이득
-`graph.New(ix, seed engine.Scorer)`. 그래프는 시드가 텍스트인지 모른다 — 그래서 `scorer/graph`는 `scorer/text`를 import하지 않고, `graph_test.go`는 stub 신호로 BFS를 시드한다. **신호 무관성이 융합 층에서만이 아니라 신호 사이에서도 성립한다.** 계획이 예상하지 않은 결과다.
-
-### 3.3 ⚠️ RRF k=60의 감쇠가 예상보다 강하다
-순위 1과 2의 기여 차이는 `1/61 - 1/62 ≈ 0.00026`. 신호 4개 중 1개가 순위를 뒤집으려면 나머지 3개의 합의를 이겨야 한다. 실제로 recency 추가는 **순서를 바꾸지 못했고 점수만 바꿨다** — 단언 1을 "순서가 변한다"로 쓸 수 없었던 이유이고, `lonely` 문서 방식으로 우회한 이유다.
-
-`k=60`은 인용된 기본값이고 이 코퍼스에서 검증되지 않았다. **마일스톤 4에서 튜닝 대상에 올려야 한다.**
-
-### 3.4 engine이 fusion을 import할 수 없다 → 계획보다 강한 결과
-`fusion`이 `Candidate` 때문에 `engine`을 import하므로 역방향은 순환이다. 그래서 `Search`가 `Fuser` 함수를 파라미터로 받는다. 결과적으로 **engine은 신호도 모르고 융합 전략도 모른다.** RRF를 가중 점수합으로 바꿔도 `engine/`은 한 줄도 변하지 않는다. 계획은 이걸 요구하지 않았다.
-
-### 3.5 토크나이저 위치는 선택이 아니라 강제였다
-`Index.Add`가 색인 시점에 토크나이즈해야 하고(단일 쓰기 진입점), 토크나이저가 `scorer/text`에 있으면 `engine`이 `scorer/text`를 import하게 되어 가설이 즉시 깨진다. 그래서 `engine.Tokenize`다.
-
-즉 **"단일 쓰기 진입점" + "신호가 자기 저장소를 갖지 않음"이 토크나이저의 위치를 강제한다.** 이후 다국어·형태소 토크나이저를 넣으면 이 지점이 압력을 받는다: 언어별 토크나이저를 `engine`에 다 넣을 수는 없다. 그때는 `Add`가 토크나이저를 **주입받는** 형태(`Fuser`와 같은 패턴)가 답일 가능성이 높다.
+A heap is `O(n log k)` against `O(n log n)` and pays off only when candidate sets far exceed `k`, which nothing here measures. One shared deterministic selection path for four scorers beats four hand-rolled ones. The upgrade path is marked in a `ponytail:` comment.
 
 ---
 
-## 4. 계획 대비 변경 사항
+## 4. Carried into milestone 2
 
-| 변경 | 이유 |
+1. **Postings format** — settled in [D-001](DECISIONS.md): the cursor interface waits, the format goes block-structured immediately.
+2. **Keep `Document.Links` keyed by document key.** Resolving lazily handles forward references and dangling edges for free (`TestForwardLinksResolve`, `TestDanglingLinksAreIgnored`). A `DocID` adjacency list would introduce an indexing-order dependency, and [the recommended evaluation path](DATASETS.md) depends on joining an external citation graph by key, where many targets fall outside the corpus.
+3. **Two places depend on `DocID` increasing densely** — the tiebreak in `engine.TopK`, and postings staying sorted because appends are monotonic. Deletion and segment merge break that invariant. Design tombstones and generations before adding deletion.
+4. **Make BM25 collection statistics atomic per commit.** `N`, `avgdl` and `docLen` are collection-wide, so "one commit makes all scorers' data visible atomically" has to include the statistics snapshot. Otherwise a query landing mid-commit produces internally inconsistent scores. Easy to atomize document visibility and forget the statistics.
+5. **Evaluation dataset** — settled in [DATASETS.md](DATASETS.md): milestone 4 is viable, and milestone 2's scope is unaffected.
+6. **Run one round of community research.** Zero user interviews so far.
+
+---
+
+## 5. Open questions
+
+| Question | Why it is open |
 |---|---|
-| 토크나이저를 `scorer/text` → `engine` | 3.5. import 순환 회피, 가설 보존 |
-| `engine/search.go`가 `fusion`을 import하지 않고 `Fuser` 함수를 받음 | 3.4. 순환 회피 |
-| 상위 k 선택을 `container/heap` → 공유 `engine.TopK`(sort 기반) | 힙은 후보 집합이 k보다 훨씬 클 때만 이득. M1은 그걸 측정하지 않는다. 4개 신호가 같은 결정적 선택 경로를 쓰는 편이 낫다. 승급 경로는 `ponytail:` 주석에 명시 |
-| `example_test.go`를 루트 → `pkg/engine/` | 루트에 Go 패키지가 없다. 예제만을 위한 패키지를 만들지 않았다 |
-| 100줄 예산에서 테스트 제외 | 1절. 테스트를 세면 무테스트 신호가 유리해진다 |
-| **레이아웃을 golang-standards/project-layout으로 재배치** (M1 완료 후) | 라이브러리 코드를 `pkg/` 아래로, 데모 바이너리를 `cmd/weft/`로 옮겼다. import 경로가 `.../weft/pkg/engine`으로 바뀌었고 `architecture_test.go`의 경로 단언 3곳을 함께 고쳤다. **단언 3개는 재배치 후에도 그대로 통과한다** — 디렉터리 이름이 아니라 import 그래프를 보기 때문. 참고: project-layout은 Go 코어 팀의 공식 표준이 아니다(README에 명시) |
-
----
-
-## 5. 마일스톤 2 권고 — 디스크로 굳히기 전에
-
-1. ~~**커서 인터페이스 확장 여부를 디스크 포맷보다 먼저 결정하라.**~~ → **결정됨: [D-001](DECISIONS.md).** 두 결정이 묶여 있다는 전제가 틀렸다. 커서 인터페이스는 마일스톤 5로 미루고, 포스팅 포맷만 블록 구조로 쓴다. 마일스톤 2의 차단이 풀렸다.
-2. **`Document.Links`를 Key 기반으로 유지하라.** 지연 해소가 forward reference와 dangling edge를 공짜로 처리한다(`TestForwardLinksResolve`, `TestDanglingLinksAreIgnored`). DocID 인접 리스트로 굳히면 색인 순서 의존성이 생긴다.
-3. **`DocID`의 조밀 증가에 의존하는 곳이 두 군데 있다** — `engine.TopK`의 타이브레이크, 포스팅 리스트 정렬(append만으로 정렬 유지). 삭제·세그먼트 병합이 들어오면 이 불변이 깨진다. 삭제를 넣을 거면 tombstone + generation을 먼저 설계하라.
-4. **BM25 전역 통계(N, avgdl, docLen)를 커밋 단위로 원자화하라.** 마일스톤 2의 "단일 커밋이 세 신호를 원자적으로 가시화"는 통계 스냅샷의 원자성까지 포함한다. 그러지 않으면 커밋 진행 중 쿼리가 서로 모순되는 점수를 낸다. 문서 가시성만 원자화하고 통계를 빼먹기 쉬운 지점이다.
-5. ~~**그래프 nDCG 데이터셋 조사를 마일스톤 2보다 먼저 하라.**~~ → **완료: [DATASETS.md](DATASETS.md).** 데이터셋은 존재하고 **마일스톤 4는 성립한다.** 권장 경로는 TREC-COVID qrels(사람 판정) ⋈ Semantic Scholar 인용 그래프. **M2 범위는 바뀌지 않는다** — 오히려 권고 2(`Links`를 Key 기반)가 이 경로에 필요하다는 것이 확인됐다. 주의: NFCorpus는 크기가 딱 맞아 보이지만 라벨이 링크 홉 수에서 파생돼 **실격**이다.
-6. **커뮤니티 조사 1회** — PRD 리스크에 명시된 착수 조건. 사용자 인터뷰는 여전히 0건이다.
-
----
-
-## 6. 미해결로 남은 것
-
-- **RRF k=60**이 이 도메인에 맞는지 미검증 (3.3)
-- **그래프 시드 개수·출처** — 이중 계산은 3.1에서 해결했다. 남은 질문은 `SeedN = 5`와 "텍스트 상위 n개"라는 출처가 품질에 좋은 선택인지이고, 이건 마일스톤 4에서만 답할 수 있다
-- **PageRank류 근접도** — BFS 거리로 시작했다. 마일스톤 4에서 품질이 부족하면 교체 후보
-- **CJK 토크나이징** — `engine.Tokenize`는 한글·한자 연속을 한 토큰으로 붙인다. 알려진 오답이고 M1은 여기서 옳을 필요가 없었다 (3.5의 압력과 같은 지점)
-- **지속 가능성 질문** — 마일스톤 1은 계획 추정(3–5일)보다 훨씬 짧게 끝났다. 인메모리 + 표준 라이브러리 제약이 실제로 작동했다는 데이터다. 다만 이것은 "수개월 지속 가능한가"에 대한 답이 아니다 — **M1이 쉬웠다는 것 이상을 주장할 수 없다.** 영속화·세그먼트 병합이 시작되는 마일스톤 2–3이 진짜 시험이다.
+| Is `RRF k = 60` right for this domain? | Cited default, never measured here (§3.2). |
+| Are `SeedN = 5` and "top n from text" good seeds? | Double counting is fixed (§2.3); seed quality is a separate, unmeasured question. |
+| Should graph proximity use PageRank instead of BFS distance? | BFS was the simplest real proximity. A replacement candidate if quality falls short. |
+| Does CJK tokenization matter? | `engine.Tokenize` collapses CJK runs into one token. A known wrong answer that milestone 1 did not need to be right about — same pressure point as §2.2. |
+| Is multi-month solo development sustainable? | Milestone 1 finished well under its estimate, and the in-memory plus standard-library-only constraints are why. That says milestone 1 was easy and nothing more. Persistence and segment merge are the real test. |

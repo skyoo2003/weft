@@ -1,78 +1,66 @@
-# 결정 기록
+# Decisions
 
-되돌리기 비싼 선택만 여기 남긴다. 코드로 읽히는 것은 적지 않는다.
+Only choices that are expensive to reverse. Anything readable from the code is not recorded here.
 
 ---
 
-## D-001 — 커서 인터페이스는 마일스톤 5로 미루고, 포스팅 포맷만 블록 구조로 간다
+## D-001 — Defer the cursor interface; make the postings format block-structured now
 
-**상태**: **승인됨** (2026-08-11)
-**맥락**: [FINDINGS 2절](FINDINGS.md), [5절 권고 1](FINDINGS.md)
+**Status:** accepted, 2026-08-11
+**Context:** [FINDINGS §3.1](FINDINGS.md), [§4.1](FINDINGS.md)
 
-### 질문
+### Question
 
-FINDINGS 5절 권고 1이 마일스톤 2를 막고 있었다:
+Milestone 2 was blocked on a circular dependency between two decisions: skip lists only pay off if a cursor interface exists, and the disk format cannot be designed without knowing whether skip lists are in it.
 
-> 커서 인터페이스 확장 여부를 디스크 포맷보다 먼저 결정하라. 스킵 리스트는 커서 인터페이스가 있을 때만 값을 한다.
+### The circularity dissolves
 
-순환이다. 인터페이스를 안 정하면 스킵 리스트를 넣을지 모르고, 스킵 리스트를 모르면 포맷을 못 정한다.
+The real question is not whether to add skip lists now but whether to keep them addable later — and that is independent of the consuming interface.
 
-### 전제가 틀렸다
+Writing postings in blocks with three values per block is sufficient:
 
-진짜 질문은 "스킵 리스트를 **지금 넣을지**"가 아니라 "**나중에 넣을 수 있게 할지**"다. 그리고 후자는 인터페이스와 무관하다.
-
-포스팅을 **블록 단위**로 쓰고 블록마다 세 값을 붙이면 된다:
-
-| 필드 | 용도 |
+| Field | Purpose |
 |---|---|
-| `maxDocID` | 이 블록의 마지막 문서 id — 건너뛸 블록 판정 |
-| `maxTF` | 블록 내 최대 텀 빈도 |
-| `minDocLen` | 블록 내 최소 문서 길이 |
+| `maxDocID` | last document id in the block — decides whether the block can be skipped |
+| `maxTF` | highest term frequency in the block |
+| `minDocLen` | shortest document length in the block |
 
-이게 block-max WAND(Ding & Suel, 2011)가 요구하는 전부다. **소비자가 커서든 top-k 목록이든 상관없다.** 지금은 아무도 안 읽고, 마일스톤 5가 읽기 시작한다.
+That is everything block-max WAND (Ding & Suel, 2011) requires. Nothing reads these fields yet; milestone 5 starts reading them.
 
-### 왜 `maxScore`가 아니라 `maxTF` + `minDocLen`인가
+### Why `maxTF` + `minDocLen` rather than `maxScore`
 
-이 구분이 이 결정에서 제일 틀리기 쉬운 지점이다.
-
-BM25 기여도는
+This is the easiest part of the decision to get wrong. A BM25 term contribution is
 
 ```
 IDF(q) × f·(k1+1) / (f + k1·(1 - b + b·|D|/avgdl))
 ```
 
-인데 `IDF`는 `N`·`n(q)`에, 정규화 항은 `avgdl`에 의존한다. **셋 다 코퍼스 전역 값이고 문서를 추가할 때마다 변한다.** 블록에 완성된 `maxScore`를 굳혀 두면 다음 커밋에서 조용히 낡는다 — 그리고 낡았다는 사실을 아무도 모른다.
+where `IDF` depends on `N` and `n(q)`, and the normalization term depends on `avgdl`. All three are collection-wide and change on every document added. A finished `maxScore` written into a block goes stale on the next commit, and nothing signals that it has.
 
-대신 세그먼트-지역이고 불변인 두 값만 저장한다. 대괄호 항은 `f`에 대해 증가하고 `|D|`에 대해 감소하므로, `(maxTF, minDocLen)` 조합이 **그 블록의 진짜 상한**을 준다. 상한 점수는 질의 시점의 `N`·`avgdl`로 계산한다.
+`maxTF` and `minDocLen` are segment-local and immutable. The bracketed term increases in `f` and decreases in `|D|`, so the pair yields the block's true ceiling, computed at query time against the current `N` and `avgdl`. Accurate, never stale, and no floats in the file.
 
-정확하고, 낡지 않고, float를 파일에 쓰지 않는다.
+### Decision
 
-### 결정
+1. **Do not add the cursor interface in milestone 2.** It is a performance interface with no performance measurement behind it yet — that is milestone 5's work. Designing it now means designing against a guess.
+2. **Write the postings format block-structured from the start**, carrying `maxDocID`, `maxTF` and `minDocLen` per block.
 
-1. **커서 인터페이스는 마일스톤 2에서 추가하지 않는다.** 성능 인터페이스인데 성능 측정이 아직 없다 — 그건 마일스톤 5의 일이다. 지금 설계하면 추측을 상대로 설계하는 것이다.
-2. **포스팅 디스크 포맷은 처음부터 블록 구조로 쓴다.** 블록당 `maxDocID` + `maxTF` + `minDocLen`.
+### Rationale — the costs are asymmetric
 
-### 근거 — 비대칭
-
-| 지금 안 하고 나중에 하면 | 비용 |
+| Deferred to later | Cost of deferring |
 |---|---|
-| 커서 인터페이스 추가 | **싸다.** 확장 인터페이스라 기존 `Scorer` 구현을 안 건드린다 (FINDINGS 2절 `Streamer` 스케치) |
-| 블록 구조 + 블록 메타 | **비싸다.** 포맷 재작성 + 기존 색인 마이그레이션 |
+| Cursor interface | **Low.** It is an extension interface, so existing `Scorer` implementations are untouched ([FINDINGS §3.1](FINDINGS.md) sketch). |
+| Block structure and metadata | **High.** Format rewrite plus migration of existing indexes. |
 
-비대칭이 결정을 내려준다. 되돌리기 비싼 쪽만 지금 하고, 싼 쪽은 미룬다. 마일스톤 1을 인메모리로 시작한 것과 같은 논리다.
+The asymmetry decides it: do the expensive-to-reverse half now, defer the cheap half. Same reasoning that kept milestone 1 in memory.
 
-### 비용
+Overhead is three varints per block, roughly 6–10 bytes. At 128 postings per block that is under 1%. Writing fields nobody reads yet is the intended cost.
 
-블록당 varint 3개 ≈ 6~10바이트. 블록 크기를 128 포스팅으로 잡으면 오버헤드 1% 미만.
+### Follow-through for milestone 2
 
-**지금 아무도 읽지 않는 필드를 쓴다.** 의도된 비용이다.
+- **Keep the block size a constant** and mark it with a `ponytail:` comment stating that 128 is convention, not a measurement.
+- **Unread fields rot silently.** Since nothing reads the block metadata yet, milestone 2 tests must verify that recorded `maxDocID`, `maxTF` and `minDocLen` match the block's actual contents. Discovering they are wrong at milestone 5 means they are already on disk.
+- **Design alongside [FINDINGS §4.3](FINDINGS.md).** Block skipping depends on postings being ordered by ascending `DocID`. Deletion or merge breaking that invariant breaks the block metadata with it.
 
-### 마일스톤 2가 이어받는 것
+### What would show this decision was wrong
 
-- **블록 크기는 상수로 두고 `ponytail:` 주석에 "튜닝 근거 없음"을 명시하라.** 128은 관례일 뿐 이 코퍼스에서 측정된 값이 아니다.
-- **안 읽는 필드는 조용히 썩는다.** 블록 메타를 쓰되 읽지는 않는 상태가 되므로, 마일스톤 2 테스트가 "기록된 `maxDocID`·`maxTF`·`minDocLen`이 블록 실제 내용과 일치하는가"를 반드시 검증해야 한다. 마일스톤 5에 가서 틀린 걸 발견하면 이미 디스크에 쌓여 있다.
-- FINDINGS 5절 권고 3(`DocID` 조밀 증가 의존)과 함께 설계할 것. 블록 `maxDocID` 스킵은 **포스팅이 DocID 오름차순**이라는 불변에 의존한다. 삭제·병합이 그 불변을 깨면 블록 메타도 같이 깨진다.
-
-### 이 결정이 틀렸다는 신호
-
-마일스톤 5에서 커서 인터페이스를 붙였는데 **블록 메타로 부족해 포맷을 다시 써야 한다면** 이 결정이 틀린 것이다. 그때 무엇이 더 필요했는지 여기 추가할 것.
+Milestone 5 adds the cursor interface and the block metadata proves insufficient, forcing a format rewrite. If that happens, record here what was missing.
