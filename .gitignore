@@ -1,0 +1,21 @@
+# Binaries
+/weft
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test and profiling output
+*.test
+*.out
+coverage.*
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
