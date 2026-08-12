@@ -299,6 +299,7 @@ func typeAPI(name string, expr ast.Expr) []string {
 	switch t := expr.(type) {
 	case *ast.StructType:
 		out := []string{"type " + name + " struct"}
+		unexported := false
 		for _, fld := range t.Fields.List {
 			if len(fld.Names) == 0 {
 				// Embedded: contributes a whole surface of its own, so it cannot
@@ -309,8 +310,25 @@ func typeAPI(name string, expr ast.Expr) []string {
 			for _, f := range fld.Names {
 				if f.IsExported() {
 					out = append(out, "field "+name+"."+f.Name+" "+types.ExprString(fld.Type))
+					continue
 				}
+				unexported = true
 			}
+		}
+		// One marker for the whole struct, not a line per unexported field.
+		// Go forbids an unkeyed composite literal from another package once a
+		// struct holds any unexported field, so a caller writing
+		// engine.Document{k, t, v, l, ts} stops compiling the moment Document
+		// gains its first — a break with no name and no exported type to show
+		// for it. That is the whole of what a caller can observe: the second
+		// unexported field takes away nothing the first had not already taken,
+		// their names are unreachable, and their types and order are not
+		// something engine promises. Recording them individually would fail this
+		// assertion for every internal Index field and demand the author record
+		// an engine cost that does not exist — the mistake the parameter-name
+		// rule in FINDINGS section 1 already names.
+		if unexported {
+			out = append(out, name+" has unexported fields")
 		}
 		return out
 

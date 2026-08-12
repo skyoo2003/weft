@@ -32,15 +32,39 @@ const RRFk = 60.0
 // which already returns nil for each — guarding them here would be three copies
 // of an invariant this package does not own.
 func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
-	// Every stream is at most k long, so this is an upper bound rather than a
-	// guess, and it is small.
-	fused := make(map[engine.DocID]float64, max(k, 0)*len(streams))
-	for _, stream := range streams {
-		for i, c := range stream {
-			// Note what is absent: c.Score is never read. Position is
-			// everything.
-			rank := float64(i + 1)
-			fused[c.Doc] += 1 / (RRFk + rank)
+	// Sized from what the streams actually hold, not from k. A stream is at most
+	// k long, but k is caller-supplied and unbounded — the demo takes it from a
+	// flag — so hinting k*len(streams) asks the runtime to reserve space for a
+	// number of candidates that may not exist. The summed lengths cannot
+	// overflow: those elements are already in memory.
+	total, depth := 0, 0
+	for _, s := range streams {
+		total += len(s)
+		depth = max(depth, len(s))
+	}
+	fused := make(map[engine.DocID]float64, total)
+
+	// Rank-major, not stream-major. Float addition is not associative, so the
+	// order a document's contributions arrive in decides its last bit — and
+	// sweeping streams first makes that order the caller's scorer order. Two
+	// documents holding the same multiset of ranks in different streams, 1,2,7
+	// against 7,1,2, then get mathematically equal totals that differ as
+	// float64, and merely permuting the scorer slice flips which one wins
+	// instead of letting TopK's DocID tiebreak settle it.
+	//
+	// Sweeping rank by rank, every document accumulates in ascending rank order
+	// whatever stream supplied each hit, so equal multisets sum to identical
+	// bits. Repeats of one rank across streams add the same value and commute.
+	// Same total work, and the reciprocal is computed once per rank rather than
+	// once per candidate.
+	for i := 0; i < depth; i++ {
+		// Note what is absent: Candidate.Score is never read. Position is
+		// everything.
+		w := 1 / (RRFk + float64(i+1))
+		for _, stream := range streams {
+			if i < len(stream) {
+				fused[stream[i].Doc] += w
+			}
 		}
 	}
 

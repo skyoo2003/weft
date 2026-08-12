@@ -4,14 +4,14 @@
 
 | Package | Implementation | Tests |
 |---|---|---|
-| `pkg/engine` | 506 | 1026 |
-| `pkg/fusion` | 52 | 138 |
+| `pkg/engine` | 527 | 1076 |
+| `pkg/fusion` | 76 | 174 |
 | `pkg/scorer/text` | 141 | 296 |
 | `pkg/scorer/vector` | 134 | 250 |
 | `pkg/scorer/graph` | 208 | 423 |
 | `pkg/scorer/recency` | **99** | 238 |
 
-1,140 implementation lines, 2,371 test lines, zero external dependencies.
+1,185 implementation lines, 2,457 test lines, zero external dependencies.
 
 ---
 
@@ -42,8 +42,9 @@ Two checks measure different things, and neither substitutes for the other:
   | Signatures and member types | Names only | An interface method is the most expensive change a scorer can force — every existing scorer stops compiling — and names alone could not see one. |
   | Order per declaration | Every line sorted together | Field order is what unkeyed composite literals resolve against. Swapping the same-typed `Document.Key` and `Document.Text` reverses their meaning in existing callers, compiles cleanly, and left the golden byte-identical. |
   | Types without parameter names | `ctx context.Context` | Go has no named arguments, so renaming a parameter breaks nothing. Recording the name made the assertion fail on a pure refactor and tell the author to write down an engine cost that does not exist. |
+  | One `has unexported fields` marker per struct | Exported fields only | Go forbids an unkeyed composite literal from another package once a struct holds any unexported field, so `Document`'s first one breaks every external `engine.Document{k, t, v, l, ts}` with no name and no exported type to show for it. One marker, not a line per field: the second unexported field takes away nothing the first had not, and recording each would fail the assertion on every internal `Index` field — the mistake the row above names. |
 
-  The last one trims coverage, which is the opposite of the first two, and it has a price: swapping two adjacent parameters of the same type is now invisible here even though it changes meaning at every call site. No declaration in `engine` has such a pair today.
+  The parameter-name row trims coverage, which is the opposite of the others, and it has a price: swapping two adjacent parameters of the same type is now invisible here even though it changes meaning at every call site. No declaration in `engine` has such a pair today.
 
 The line budget counts implementation files only — counting tests would reward untested scorers.
 

@@ -124,6 +124,42 @@ func TestScorerCountIsIrrelevant(t *testing.T) {
 	}
 }
 
+func TestEqualRankMultisetsTieRegardlessOfStreamOrder(t *testing.T) {
+	// Doc 1 holds ranks 1, 2, 7 and doc 2 holds 7, 1, 2 — the same multiset, so
+	// RRF owes them the same total and TopK owes the tie to the lower DocID.
+	// Ranks 1, 2 and 7 are the smallest triple whose reciprocals sum to two
+	// different float64 values depending on the order they are added in, so
+	// accumulating stream by stream let a permutation of the scorer slice pick
+	// the winner. Fillers are distinct per stream so they cannot reach the top.
+	f := func(n engine.DocID) engine.Candidate { return engine.Candidate{Doc: n} }
+	streams := [][]engine.Candidate{
+		{f(1), f(10), f(11), f(12), f(13), f(14), f(2)},
+		{f(2), f(1), f(20), f(21), f(22), f(23), f(24)},
+		{f(30), f(2), f(31), f(32), f(33), f(34), f(1)},
+	}
+	perms := [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
+	for _, p := range perms {
+		got := Fuse([][]engine.Candidate{streams[p[0]], streams[p[1]], streams[p[2]]}, 2)
+		if !equal(docs(got), 1, 2) {
+			t.Fatalf("stream order %v: Fuse = %v, want [1 2]", p, docs(got))
+		}
+		if got[0].Score != got[1].Score {
+			t.Fatalf("stream order %v: scores %.20g and %.20g differ; equal rank "+
+				"multisets must fuse to identical bits", p, got[0].Score, got[1].Score)
+		}
+	}
+}
+
+func TestLargeKDoesNotReserveMemoryForAbsentCandidates(t *testing.T) {
+	// k is caller-supplied — cmd/weft takes it straight from a flag — so sizing
+	// the accumulator from k rather than from the streams lets one large -k
+	// exhaust memory against an eight-document corpus.
+	got := Fuse([][]engine.Candidate{{{Doc: 1}, {Doc: 2}}}, 1<<40)
+	if !equal(docs(got), 1, 2) {
+		t.Fatalf("Fuse = %v, want [1 2]", docs(got))
+	}
+}
+
 func TestDuplicateDocWithinOneStreamAccumulates(t *testing.T) {
 	// Not a case any scorer produces today, but Fuse must not corrupt or panic
 	// if a stream ever repeats a document.

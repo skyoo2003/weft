@@ -156,7 +156,13 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// afterwards addresses document 0 instead. Doc and DocLen already compare
 	// their bounds in uint64 to avoid the mirror image of this; refusing the Add
 	// is the same choice on the write side, and Add already returns an error.
-	if len(ix.docs) > math.MaxUint32 {
+	//
+	// Widened to uint64 before comparing, not after. len returns int, so an
+	// untyped MaxUint32 on the other side of the operator becomes an int, which
+	// does not fit on a 32-bit target: the package stops compiling entirely
+	// under GOARCH=386. Widened, the comparison is simply never true there,
+	// which is the right answer — an int that narrow cannot reach the limit.
+	if uint64(len(ix.docs)) > math.MaxUint32 {
 		return 0, fmt.Errorf("add %q: index is full at %d documents", d.Key, uint64(math.MaxUint32)+1)
 	}
 	id := DocID(len(ix.docs))

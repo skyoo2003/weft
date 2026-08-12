@@ -220,6 +220,38 @@ func TestSearchRejectsNilScorer(t *testing.T) {
 	}
 }
 
+// typedNilScorer dereferences its receiver, so a nil *typedNilScorer panics on
+// any method call — the shape of every pointer-backed scorer in this tree.
+type typedNilScorer struct{ name string }
+
+func (s *typedNilScorer) Name() string { return s.name }
+
+func (s *typedNilScorer) Candidates(context.Context, Query, int) ([]Candidate, error) {
+	return nil, nil
+}
+
+func TestSearchRejectsTypedNilScorer(t *testing.T) {
+	// The form runtime configuration produces: an optional scorer declared up
+	// front and never assigned. The interface carries a type descriptor, so it is
+	// not == nil and the plain guard waved it through into a panic — in a package
+	// whose sentinels are introduced with "library code here never panics".
+	var missing *typedNilScorer
+	fuse := func(streams [][]Candidate, k int) []Candidate { return nil }
+
+	_, err := Search(t.Context(), Query{}, 5, fuse, missing)
+	if !errors.Is(err, ErrNilScorer) {
+		t.Fatalf("Search with a typed-nil Scorer err = %v, want ErrNilScorer", err)
+	}
+	if !strings.Contains(err.Error(), "scorer 0") {
+		t.Errorf("err = %q, want it to name the offending position", err)
+	}
+	// A live scorer of the same type must still be accepted, or the guard is
+	// rejecting the type rather than the nil.
+	if _, err := Search(t.Context(), Query{}, 5, fuse, &typedNilScorer{name: "live"}); err != nil {
+		t.Fatalf("Search with a live scorer err = %v, want nil", err)
+	}
+}
+
 func TestSearchRejectsNilScorerWhateverKIs(t *testing.T) {
 	// A nil entry is a configuration mistake, not a query that found nothing, so
 	// it has to surface independently of k. While the k check ran first, a caller

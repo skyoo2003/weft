@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 )
 
 // Sentinel errors from Search. Both report a collaborator the caller left nil,
@@ -16,13 +17,16 @@ var (
 	// signal the caller believes is switched on — a scorer list assembled at
 	// runtime is exactly where an optional scorer goes missing.
 	//
-	// It catches a nil interface value, not a non-nil interface holding a nil
-	// pointer. `var s *text.Scorer` assigned into a Scorer slot is not == nil —
-	// the interface carries a type descriptor — so it still panics inside
-	// Candidates. Detecting that needs reflect, which is a heavy import for a
-	// leaf package to carry for a caller bug that fails loudly on the first
-	// query rather than corrupting a ranking. Construct optional scorers into
-	// the slice conditionally rather than pre-declaring a typed nil.
+	// It covers the typed nil too. `var s *text.Scorer` assigned into a Scorer
+	// slot is not == nil — the interface carries a type descriptor — and that is
+	// the form runtime configuration actually produces: an optional scorer
+	// declared up front and left unassigned. An earlier round documented that
+	// hole rather than closing it, on the grounds that reflect was a heavy
+	// import for a leaf package to carry. It traded away the promise index.go
+	// makes above its own sentinels — library code here never panics — and a
+	// guard that rejects the nil a caller did not write while panicking on the
+	// one they did is worse than either alternative. One reflect call per
+	// scorer per query, against three full corpus scans.
 	ErrNilScorer = errors.New("engine: nil Scorer")
 )
 
@@ -64,7 +68,10 @@ func Search(ctx context.Context, q Query, k int, fuse Fuser, scorers ...Scorer) 
 	// to be, so a caller computing k dynamically must not have it hidden until
 	// the first time k goes positive.
 	for i, s := range scorers {
-		if s == nil {
+		// Pointer is the only kind worth reflecting on. A nil map, slice or func
+		// receiver does not fault on a method call the way a dereferenced nil
+		// pointer does, and no scorer in the tree is any of those.
+		if v := reflect.ValueOf(s); s == nil || (v.Kind() == reflect.Pointer && v.IsNil()) {
 			return nil, fmt.Errorf("scorer %d: %w", i, ErrNilScorer)
 		}
 	}
@@ -90,6 +97,14 @@ func Search(ctx context.Context, q Query, k int, fuse Fuser, scorers ...Scorer) 
 	// Fusion does the same shape of work — a map aggregation across every stream
 	// and another sort — and Fuser takes no context, so it cannot check for
 	// itself. This is the only place it can happen.
+	//
+	// Before the fuser, and deliberately not after it as well. Every context
+	// check in this tree buys something: it declines work that is about to be
+	// wasted. A check on the way out declines nothing — the fusion is paid for
+	// and the candidates are correct — so it would trade a complete answer for
+	// an error, on a caller who is free to drop the result themselves. Search
+	// therefore promises that a cancelled query does not do fusion, not that a
+	// cancelled query never returns one.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
