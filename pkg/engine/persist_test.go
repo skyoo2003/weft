@@ -53,8 +53,9 @@ func TestCommitEmptyIndex(t *testing.T) {
 
 // TestUnmanifestedSegmentIsInvisible is the atomicity pass line: a segment
 // written but never named by a MANIFEST — a commit that died before its
-// rename — must be indistinguishable from a segment that never existed, and
-// gets swept.
+// rename — must be indistinguishable from a segment that never existed. Open
+// ignores it and leaves it alone (it cannot tell debris from a commit still
+// running); the next Commit is what sweeps it.
 func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	committed := New()
 	addAll(t, committed, []Document{{Key: "safe", Text: "the committed corpus"}})
@@ -86,8 +87,16 @@ func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	if _, ok := got.Resolve("safe"); !ok {
 		t.Fatal("Open lost the committed corpus")
 	}
-	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001"}) {
-		t.Fatalf("orphan segment not swept: %v", names)
+	// A reader must not delete a directory a concurrent Commit could be
+	// filling in right now, so the orphan is still there after the Open.
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
+		t.Fatalf("Open touched the directory: %v", names)
+	}
+	if err := got.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000002"}) {
+		t.Fatalf("orphan segment not swept by the next commit: %v", names)
 	}
 }
 
@@ -160,6 +169,50 @@ func TestCommitRefusesACorruptManifest(t *testing.T) {
 	}
 	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Commit over a corrupt manifest: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestMissingSectionIsCorruptNotAbsent separates the two failures a caller
+// branches on. "Nothing committed here yet" is fs.ErrNotExist and invites
+// starting fresh; a manifest naming a segment whose files are gone is damage,
+// and reporting it as absence would let a caller overwrite a recoverable
+// index without ever seeing an error.
+func TestMissingSectionIsCorruptNotAbsent(t *testing.T) {
+	for _, name := range []string{metaFile, docsFile, postingsFile, termsFile} {
+		t.Run(name, func(t *testing.T) {
+			dir, segDir := commitTiny(t)
+			if err := os.Remove(filepath.Join(segDir, name)); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Open(dir)
+			if !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("missing %s: got %v, want ErrCorrupt", name, err)
+			}
+			if errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("missing %s also reads as fs.ErrNotExist: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestCommitRefusesAManifestNamingTheNextGeneration guards the RemoveAll that
+// clears a half-written segment: a manifest whose generation number and
+// segment name disagree would aim it at the segment that is currently
+// published, destroying the live commit before the new one is durable.
+func TestCommitRefusesAManifestNamingTheNextGeneration(t *testing.T) {
+	dir, segDir := commitTiny(t)
+	rewriteSection(t, filepath.Join(dir, manifestName), kindManifest, func(w *segWriter) {
+		w.uvarint(0) // generation 0, so the next commit would write seg-000001
+		w.uvarint(1)
+		w.str(segDirName(1))
+	})
+	ix := New()
+	addAll(t, ix, []Document{{Key: "new", Text: "the corpus that must not overwrite"}})
+	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Commit: got %v, want ErrCorrupt", err)
+	}
+	if _, err := os.Stat(filepath.Join(segDir, docsFile)); err != nil {
+		t.Fatalf("the published segment was destroyed anyway: %v", err)
 	}
 }
 

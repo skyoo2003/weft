@@ -27,7 +27,9 @@ milestone 3's incremental segments extend the contents of this format rather tha
 the format itself.
 
 A segment directory the manifest does not name does not exist. Nothing reads it,
-and `Commit` and `Open` delete it on their way past.
+and `Commit` deletes it on its way past. `Open` leaves it alone: "unnamed" is also
+true of the segment a commit still in flight has written but not yet published, so
+a reader that swept would delete a live writer's work.
 
 ## 2. File frame
 
@@ -135,9 +137,15 @@ per term (in the terms index's order):
     maxTF         uvarint    highest term frequency in this block
     minDocLen     uvarint    shortest document in this block
     per posting:
-      DocID       uvarint    absolute for the term's first posting, then a delta ≥ 1
+      DocID       uvarint    absolute for each block's first posting, then a delta ≥ 1
       frequency   uvarint    ≥ 1, and ≤ the document's token count
 ```
+
+Delta chains **stop at the block boundary**. Every block's first DocID is absolute,
+so a block can be decoded without its predecessors — which is the entire point of
+the metadata below, since a skipper that had to decode every preceding block to
+learn where this one starts would be skipping nothing. It costs at most three
+bytes per block, and retrofitting it would cost a format migration.
 
 Term strings are **not** in this file — they live in the terms index, and entries
 are located by the offsets recorded there.
@@ -175,6 +183,7 @@ plausible but breaks an invariant a scorer relies on.
 |---|---|
 | Checksum mismatch, truncation, trailing bytes | Damage, or a file this encoder did not write |
 | Wrong magic, wrong kind, unknown version | Foreign file, misplaced file, future format |
+| A section file the manifest names but that is not on disk | Damage, reported as `ErrCorrupt` and never as `fs.ErrNotExist`, so a caller's "nothing committed yet" branch cannot overwrite a damaged index |
 | Empty or duplicate key | `Add` refuses both; a restored index must not hold what a live one cannot |
 | NaN or infinite vector component | `scorer/vector` skips re-checking documents because `ErrNonFiniteVector` promised this |
 | Mixed vector widths | Mixed embedding models |
@@ -184,6 +193,8 @@ plausible but breaks an invariant a scorer relies on.
 | Block metadata contradicting block contents | The D-001 rot check |
 | Terms unsorted, or an offset not landing on its entry | Milestone 3 would inherit a broken seek structure |
 | A non-final block that is not full | Block and posting counts would stop agreeing |
+| A block whose first DocID does not exceed the previous block's last | The block continued a delta chain instead of starting absolute |
+| A manifest whose generation already names the segment the next commit would write | `Commit` clears a half-written segment directory before writing it; aimed at the live segment that clears the published commit |
 
 ## 6. Atomicity and durability
 
@@ -208,7 +219,9 @@ a commit the caller believes exists.
 
 One writer at a time. `Commit` is safe alongside `Add` and queries — it takes the
 same read lock a query does — but not alongside another `Commit` on the same
-directory.
+directory. `Open` performs no deletions and no writes, so opening a directory
+while it is being committed to cannot damage it; a reader that loses the race
+against `Commit`'s sweep of the previous generation sees an error and can retry.
 
 ## 7. Changing this format
 

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -68,7 +69,7 @@ func (ix *Index) Commit(dir string) error {
 	// manifest is a first commit; a corrupt one is not — guessing a generation
 	// on top of a directory in an unknown state could orphan a commit the
 	// caller believes exists, so Commit refuses and reports.
-	gen, _, err := readManifest(dir)
+	gen, live, err := readManifest(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		gen = 0
 	} else if err != nil {
@@ -76,6 +77,14 @@ func (ix *Index) Commit(dir string) error {
 	}
 
 	seg := segDirName(gen + 1)
+	// The generation and the segment names come off the same manifest but are
+	// not otherwise tied together, so a manifest naming the generation it is
+	// about to be superseded by would send the RemoveAll below through the
+	// segment that is currently published — destroying the live commit before
+	// the new one is durable.
+	if slices.Contains(live, seg) {
+		return fmt.Errorf("commit %s: manifest at generation %d already names %s: %w", dir, gen, seg, ErrCorrupt)
+	}
 	segDir := filepath.Join(dir, seg)
 	// A crash after writing segment files but before the manifest flip leaves
 	// this directory half-written. It was never visible — no manifest names it
@@ -126,8 +135,14 @@ func (ix *Index) Commit(dir string) error {
 // A missing directory or manifest reports fs.ErrNotExist. Damaged or foreign
 // files report ErrCorrupt; files from a different format version report
 // ErrBadVersion. Segment directories the manifest does not name — the debris
-// of a commit that never finished — are ignored, and cleaned up best-effort
-// once the open has succeeded.
+// of a commit that never finished — are ignored.
+//
+// Open never deletes anything. Sweeping the debris is Commit's job, because
+// "the manifest does not name it" is also true of the segment a commit that is
+// still running has written but not yet published: a reader that swept would
+// delete a live writer's work and leave the directory naming a segment that no
+// longer exists. Until the next Commit, unnamed debris costs disk and nothing
+// else.
 func Open(dir string) (*Index, error) {
 	_, segs, err := readManifest(dir)
 	if err != nil {
@@ -172,8 +187,6 @@ func Open(dir string) (*Index, error) {
 	if err := decodePostings(postR, termsR, ix); err != nil {
 		return nil, fmt.Errorf("open %s: %w", segs[0], err)
 	}
-
-	prune(dir, segs[0])
 	return ix, nil
 }
 
@@ -212,7 +225,10 @@ func readManifest(dir string) (gen uint64, segs []string, err error) {
 // prune removes every segment directory except keep, plus a stale manifest
 // temp file. Best-effort by design: everything it deletes is unreachable —
 // nothing reads a segment the manifest does not name — so failing to delete
-// must not fail the commit or open that already succeeded.
+// must not fail the commit that already succeeded.
+//
+// Only Commit calls this, and only after its own rename: weft's single writer
+// is the one party that knows no other segment is being written right now.
 func prune(dir, keep string) {
 	os.Remove(filepath.Join(dir, manifestName+".tmp"))
 	entries, err := os.ReadDir(dir)

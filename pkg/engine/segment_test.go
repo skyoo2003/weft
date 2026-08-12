@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -340,6 +341,61 @@ func TestLyingFilesAreRefused(t *testing.T) {
 				t.Fatalf("Open: got %v, want ErrCorrupt", err)
 			}
 		})
+	}
+}
+
+// TestBlocksStartAtAbsoluteDocIDs pins block independence, which is the whole
+// point of the D-001 metadata: a skipper that had to decode every preceding
+// block to learn where this one starts would be skipping nothing. Both
+// directions are pinned — the bytes the writer emits, and the decoder refusing
+// a block that continues the previous block's delta chain.
+func TestBlocksStartAtAbsoluteDocIDs(t *testing.T) {
+	ix := New()
+	docs := make([]Document, blockSize+1)
+	for i := range docs {
+		docs[i] = Document{Key: fmt.Sprintf("d%04d", i), Text: "x"}
+	}
+	addAll(t, ix, docs)
+	dir := t.TempDir()
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	path := filepath.Join(dir, segDirName(1), postingsFile)
+
+	// Term "x" in every document, one token each: block 0 holds documents
+	// 0..127, block 1 holds document 128. lastField is what block 1's single
+	// posting records — the absolute DocID, or the delta a chained writer
+	// would have emitted.
+	payload := func(lastField uint64) func(*segWriter) {
+		return func(w *segWriter) {
+			uvs(w, 1, 2)                         // one term, two blocks
+			uvs(w, blockSize, blockSize-1, 1, 1) // cnt, maxDocID, maxTF, minDocLen
+			uvs(w, 0, 1)                         // document 0, frequency 1
+			for range blockSize - 1 {
+				uvs(w, 1, 1) // delta 1, frequency 1
+			}
+			uvs(w, 1, blockSize, 1, 1)
+			uvs(w, lastField, 1)
+		}
+	}
+
+	want := filepath.Join(t.TempDir(), "want")
+	rewriteSection(t, want, kindPostings, payload(blockSize))
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBytes, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, wantBytes) {
+		t.Fatalf("postings file:\n got %x\nwant %x", got, wantBytes)
+	}
+
+	rewriteSection(t, path, kindPostings, payload(1)) // the chained encoding
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("second block continuing the delta chain: got %v, want ErrCorrupt", err)
 	}
 }
 

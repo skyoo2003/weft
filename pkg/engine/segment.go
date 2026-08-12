@@ -3,8 +3,10 @@ package engine
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
+	"io/fs"
 	"maps"
 	"math"
 	"os"
@@ -147,13 +149,18 @@ func (ix *Index) writeSegment(segDir string) error {
 	}
 	meta, docs, post, terms := ws[0], ws[1], ws[2], ws[3]
 
-	ix.mu.RLock()
-	meta.uvarint(uint64(len(ix.docs)))
-	meta.uvarint(uint64(ix.totalLen))
-	meta.uvarint(uint64(ix.vecDim))
-	encodeDocs(docs, ix)
-	encodePostings(post, terms, ix)
-	ix.mu.RUnlock()
+	// Deferred inside a closure, not unlocked inline: a panic anywhere in the
+	// encoders would otherwise leave the index read-locked forever and deadlock
+	// every later Add.
+	func() {
+		ix.mu.RLock()
+		defer ix.mu.RUnlock()
+		meta.uvarint(uint64(len(ix.docs)))
+		meta.uvarint(uint64(ix.totalLen))
+		meta.uvarint(uint64(ix.vecDim))
+		encodeDocs(docs, ix)
+		encodePostings(post, terms, ix)
+	}()
 
 	for i, w := range ws {
 		if err := w.close(); err != nil {
@@ -216,7 +223,14 @@ func encodeDocs(w *segWriter, ix *Index) {
 // Entries are in sorted term order, so identical index states produce
 // identical bytes. Postings within a term are already ascending by DocID —
 // Add appends monotonically — which is what makes each block's last posting
-// its maxDocID and every delta after the first strictly positive.
+// its maxDocID and every delta after a block's first strictly positive.
+//
+// Delta chains stop at the block boundary: every block's first posting is an
+// absolute DocID. That is what makes a block decodable on its own, which is
+// the whole point of the D-001 metadata — a skipper that had to decode every
+// preceding block to learn where this one starts would be skipping nothing.
+// Costing at most three extra bytes per block, and a format migration to
+// retrofit.
 //
 // Each block carries maxDocID, maxTF and minDocLen (D-001): segment-local,
 // immutable, and together the block's true BM25 score ceiling under whatever
@@ -233,7 +247,6 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 		pl := ix.postings[t]
 		post.uvarint(uint64((len(pl) + blockSize - 1) / blockSize))
 
-		prev, first := uint64(0), true
 		for start := 0; start < len(pl); start += blockSize {
 			blk := pl[start:min(start+blockSize, len(pl))]
 			maxTF, minDL := 0, maxInt
@@ -245,11 +258,11 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 			post.uvarint(uint64(blk[len(blk)-1].Doc)) // maxDocID
 			post.uvarint(uint64(maxTF))
 			post.uvarint(uint64(minDL))
-			for _, p := range blk {
+			prev := uint64(0)
+			for i, p := range blk {
 				id := uint64(p.Doc)
-				if first {
+				if i == 0 {
 					post.uvarint(id)
-					first = false
 				} else {
 					post.uvarint(id - prev)
 				}
@@ -341,9 +354,16 @@ func (r *segReader) done() error {
 }
 
 // openSection reads one framed file and hands back a reader over its payload.
+//
+// A section the manifest names but that is not on disk is damage, not an
+// absent index: it reports ErrCorrupt rather than fs.ErrNotExist, so a caller
+// whose "nothing committed here yet" branch starts a fresh index cannot be
+// handed a half-deleted segment and quietly overwrite it.
 func openSection(dir, name string, kind byte) (*segReader, error) {
 	b, err := os.ReadFile(filepath.Join(dir, name))
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%s: the manifest names this segment but the file is missing: %w", name, ErrCorrupt)
+	} else if err != nil {
 		return nil, err
 	}
 	return parseSection(name, b, kind)
@@ -410,10 +430,12 @@ func decodeDocs(r *segReader) (*Index, error) {
 		return nil, err
 	}
 
-	// Capacity hints are capped by what the payload could physically hold — a
-	// document entry is at least 7 bytes — so a hostile count cannot buy a
-	// giant allocation before the bytes run out.
-	hint := min(n, len(r.b)/7)
+	// Capacity hints are capped twice: by what the payload could physically
+	// hold — a document entry is at least 7 bytes — and by a flat ceiling,
+	// because a Document is ~100 bytes of header for those 7 bytes on disk and
+	// the ratio, not the count, is what a hostile file would buy. Past the
+	// ceiling append grows the slice, which is what it is for.
+	hint := min(n, len(r.b)/7, 1<<16)
 	ix := &Index{
 		docs:     make([]Document, 0, hint),
 		byKey:    make(map[string]DocID, hint),
@@ -472,7 +494,9 @@ func decodeDocs(r *segReader) (*Index, error) {
 			return nil, err
 		}
 		if ln > 0 {
-			d.Links = make([]string, 0, ln)
+			// Same ceiling as the document hint, for the same reason: a link is
+			// one byte on disk and sixteen in a slice header.
+			d.Links = make([]string, 0, min(ln, 1<<12))
 			for range ln {
 				l, err := r.str("link key")
 				if err != nil {
@@ -531,7 +555,9 @@ func decodePostings(post, terms *segReader, host *Index) error {
 		if term == "" {
 			return fmt.Errorf("%s: term %d is empty, which the tokenizer never emits: %w", terms.name, i, ErrCorrupt)
 		}
-		if i > 0 && term <= prevTerm {
+		// prevTerm starts empty and terms are non-empty, so the first term is
+		// never out of order and needs no special case.
+		if term <= prevTerm {
 			return fmt.Errorf("%s: term %q out of order after %q: %w", terms.name, term, prevTerm, ErrCorrupt)
 		}
 		prevTerm = term
@@ -554,7 +580,7 @@ func decodePostings(post, terms *segReader, host *Index) error {
 		}
 
 		var pl []Posting
-		prev, first := uint64(0), true
+		prev := uint64(0)
 		for b := 0; b < nblocks; b++ {
 			cnt, err := post.intn("block posting count", blockSize)
 			if err != nil {
@@ -579,19 +605,28 @@ func decodePostings(post, terms *segReader, host *Index) error {
 			}
 
 			gotMaxTF, gotMinDL := 0, maxInt
-			for range cnt {
+			for j := range cnt {
 				delta, err := post.uvarint("posting docID delta")
 				if err != nil {
 					return err
 				}
 				var id uint64
-				if first {
-					id, first = delta, false
-				} else {
+				switch {
+				case j > 0:
 					if delta == 0 {
 						return fmt.Errorf("%s: term %q repeats a docID; postings are strictly ascending: %w", post.name, term, ErrCorrupt)
 					}
 					id = prev + delta
+				case b == 0:
+					id = delta // the term's first posting: nothing precedes it
+				default:
+					// A block's first posting is absolute, so the check that it
+					// still ascends past the previous block is explicit.
+					id = delta
+					if id <= prev {
+						return fmt.Errorf("%s: term %q block %d starts at document %d, block %d ended at %d; postings are strictly ascending: %w",
+							post.name, term, b, id, b-1, prev, ErrCorrupt)
+					}
 				}
 				if id >= uint64(len(host.docs)) {
 					return fmt.Errorf("%s: term %q names document %d of a %d-document corpus: %w", post.name, term, id, len(host.docs), ErrCorrupt)
