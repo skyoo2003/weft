@@ -183,6 +183,7 @@ plausible but breaks an invariant a scorer relies on.
 |---|---|
 | Checksum mismatch, truncation, trailing bytes | Damage, or a file this encoder did not write |
 | Wrong magic, wrong kind, unknown version | Foreign file, misplaced file, future format |
+| Version 1 written in more than one byte | `binary.Uvarint` decodes `0x81 0x00` as 1 too. The header would be seven bytes while `segHeaderLen`, and every offset the terms index records against it, still says six |
 | A section file the manifest names but that is not on disk | Damage, reported as `ErrCorrupt` and never as `fs.ErrNotExist`, so a caller's "nothing committed yet" branch cannot overwrite a damaged index |
 | Empty or duplicate key | `Add` refuses both; a restored index must not hold what a live one cannot |
 | NaN or infinite vector component | `scorer/vector` skips re-checking documents because `ErrNonFiniteVector` promised this |
@@ -190,6 +191,8 @@ plausible but breaks an invariant a scorer relies on.
 | meta disagreeing with docs | The BM25 snapshot must describe its own corpus |
 | Postings not strictly ascending, or naming a document past the corpus | Block skipping and the `TopK` tiebreak both assume dense ascending DocIDs |
 | Frequency of 0, or above the document's token count | `Add` writes neither |
+| A document's frequencies summed across all terms differing from its stored length | Per posting the only rule is `freq ≤ docLen`, so two terms can each claim one occurrence in a one-token document. BM25 would divide real frequencies by a length that never held them |
+| A DocID delta whose sum overflows uint64 | The wrapped id lands back inside the corpus and passes every later check while breaking ascending order |
 | Block metadata contradicting block contents | The D-001 rot check |
 | Terms unsorted, or an offset not landing on its entry | Milestone 3 would inherit a broken seek structure |
 | A non-final block that is not full | Block and posting counts would stop agreeing |
@@ -201,10 +204,16 @@ plausible but breaks an invariant a scorer relies on.
 `Commit` writes the segment's four files, fsyncs each, fsyncs the segment
 directory, then renames a temporary manifest over `MANIFEST`.
 
-**Guaranteed against process death.** The rename is atomic, so a crash at any
-point leaves either the previous generation or the new one — never a mix, and
-never a partly visible segment. A segment written but not yet named by a manifest
-is indistinguishable from one that was never written.
+**Guaranteed against process death, on POSIX.** The rename is atomic there, so a
+crash at any point leaves either the previous generation or the new one — never a
+mix, and never a partly visible segment. A segment written but not yet named by a
+manifest is indistinguishable from one that was never written.
+
+The guarantee is the platform's, not weft's. Go's `os.Rename` contract does not
+promise atomic replacement everywhere it compiles — Windows in particular — and
+weft calls no platform-specific replacement primitive. Linux and macOS are what
+milestone 2 claims and what its tests run on; anywhere else the commit point is
+as atomic as that system's rename and no more.
 
 **Best-effort against power loss.** Contents and directory entries are fsynced,
 but weft uses no platform-specific write barrier (no `F_FULLFSYNC` on macOS, no
@@ -222,6 +231,15 @@ same read lock a query does — but not alongside another `Commit` on the same
 directory. `Open` performs no deletions and no writes, so opening a directory
 while it is being committed to cannot damage it; a reader that loses the race
 against `Commit`'s sweep of the previous generation sees an error and can retry.
+
+**The trust boundary is the bytes, not the directory.** Every value read from a
+file is validated, but the directory's permissions are the caller's problem: an
+attacker who can write into it can plant a whole valid segment, so weft does not
+pretend to defend against one. It does refuse to be used as a weapon *outside*
+that directory — the temp manifest is created with `O_EXCL`, so a symlink planted
+at its predictable path is refused rather than written through. Reading a
+symlinked segment is not in that class: it shows the reader bytes the attacker
+could equally have copied in.
 
 ## 7. Changing this format
 

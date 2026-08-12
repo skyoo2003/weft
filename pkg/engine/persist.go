@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -69,22 +68,17 @@ func (ix *Index) Commit(dir string) error {
 	// manifest is a first commit; a corrupt one is not — guessing a generation
 	// on top of a directory in an unknown state could orphan a commit the
 	// caller believes exists, so Commit refuses and reports.
-	gen, live, err := readManifest(dir)
+	gen, _, err := readManifest(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		gen = 0
 	} else if err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
 
+	// readManifest has already established that the live segment is named for
+	// gen, so the directory cleared below is this commit's own debris and never
+	// the published one.
 	seg := segDirName(gen + 1)
-	// The generation and the segment names come off the same manifest but are
-	// not otherwise tied together, so a manifest naming the generation it is
-	// about to be superseded by would send the RemoveAll below through the
-	// segment that is currently published — destroying the live commit before
-	// the new one is durable.
-	if slices.Contains(live, seg) {
-		return fmt.Errorf("commit %s: manifest at generation %d already names %s: %w", dir, gen, seg, ErrCorrupt)
-	}
 	segDir := filepath.Join(dir, seg)
 	// A crash after writing segment files but before the manifest flip leaves
 	// this directory half-written. It was never visible — no manifest names it
@@ -102,7 +96,13 @@ func (ix *Index) Commit(dir string) error {
 	// claims they exist.
 	syncDir(segDir)
 
+	// The temp manifest is created exclusively, so a leftover from a crashed
+	// commit has to be cleared here rather than truncated open. Removing a
+	// symlink removes the link, never its target.
 	tmp := filepath.Join(dir, manifestName+".tmp")
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("commit %s: clearing stale %s: %w", dir, manifestName+".tmp", err)
+	}
 	w, err := newSegWriter(tmp, kindManifest)
 	if err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
@@ -148,9 +148,6 @@ func Open(dir string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}
-	if len(segs) != 1 {
-		return nil, fmt.Errorf("open %s: manifest lists %d segments; format v1 writes exactly one: %w", dir, len(segs), ErrCorrupt)
-	}
 	segDir := filepath.Join(dir, segs[0])
 
 	metaR, err := openSection(segDir, metaFile, kindMeta)
@@ -193,6 +190,14 @@ func Open(dir string) (*Index, error) {
 // readManifest reads and decodes dir's manifest. Segment names come off disk,
 // so they are validated like everything else that does: a name with a path
 // separator in it would let a doctored manifest read files outside dir.
+//
+// Version 1's writer contract — exactly one segment, named from the generation
+// — is enforced here rather than at each call site, because the two callers
+// need it for different reasons and only one of them used to check. Open needs
+// the count. Commit needs the name: it clears the directory it is about to
+// write, so a manifest whose generation and segment name disagree can aim that
+// RemoveAll at the segment that is still published, destroying the live commit
+// before its replacement is durable.
 func readManifest(dir string) (gen uint64, segs []string, err error) {
 	b, err := os.ReadFile(filepath.Join(dir, manifestName))
 	if err != nil {
@@ -219,7 +224,14 @@ func readManifest(dir string) (gen uint64, segs []string, err error) {
 		}
 		segs = append(segs, s)
 	}
-	return gen, segs, r.done()
+	if err := r.done(); err != nil {
+		return 0, nil, err
+	}
+	if want := segDirName(gen); len(segs) != 1 || segs[0] != want {
+		return 0, nil, fmt.Errorf("%s: generation %d names %q; format v1 writes exactly one segment, called %s: %w",
+			manifestName, gen, segs, want, ErrCorrupt)
+	}
+	return gen, segs, nil
 }
 
 // prune removes every segment directory except keep, plus a stale manifest

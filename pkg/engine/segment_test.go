@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io/fs"
 	"maps"
 	"math"
 	"os"
@@ -189,6 +190,13 @@ func commitTiny(t *testing.T) (dir, segDir string) {
 // and checksummed exactly as the real writer frames it.
 func rewriteSection(t *testing.T, path string, kind byte, payload func(w *segWriter)) {
 	t.Helper()
+	// newSegWriter creates exclusively — it refuses a path something already
+	// stands at, which is how a planted symlink gets refused. The real writer
+	// only ever writes into a directory it just made, so replacing a committed
+	// file is a thing only this helper does, and it clears the way itself.
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("clearing %s: %v", path, err)
+	}
 	w, err := newSegWriter(path, kind)
 	if err != nil {
 		t.Fatalf("newSegWriter(%s): %v", path, err)
@@ -249,6 +257,19 @@ func TestLyingFilesAreRefused(t *testing.T) {
 		}},
 		{"frequency exceeds the document's tokens", postingsFile, kindPostings, func(w *segWriter) {
 			uvs(w, 1, 1, 2, 1, 9, 1, 0, 9 /* doc 0 holds 2 tokens */, 1, 1)
+		}},
+		// prev is 1 and the delta is MaxUint64, so the sum wraps to 0 — a
+		// document that exists, with a frequency it can hold, in a block whose
+		// recorded metadata matches. Every check but the overflow guard passes,
+		// and the postings come out [1, 0], descending.
+		{"docID delta overflows into the corpus", postingsFile, kindPostings, func(w *segWriter) {
+			uvs(w, 1, 1, 2, 0, 2, 1, 1, 1, math.MaxUint64, 2)
+		}},
+		// Doc 0 holds two tokens and is given one. Legal per posting — the only
+		// per-posting rule is freq <= docLen — and impossible in aggregate,
+		// because every token Add saw became an increment somewhere.
+		{"frequencies do not add up to the document's length", postingsFile, kindPostings, func(w *segWriter) {
+			uvs(w, 1, 1, 2, 1, 1, 1, 0, 1, 1, 1)
 		}},
 		{"non-final block not full", postingsFile, kindPostings, func(w *segWriter) {
 			uvs(w, 1, 2, 1 /* first of two blocks holds 1 */)
@@ -396,6 +417,33 @@ func TestBlocksStartAtAbsoluteDocIDs(t *testing.T) {
 	rewriteSection(t, path, kindPostings, payload(1)) // the chained encoding
 	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("second block continuing the delta chain: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestOverlongVersionEncodingIsRefused pins the frame's canonical form.
+// binary.Uvarint decodes 0x81 0x00 to 1 as readily as 0x01, which would put a
+// seven-byte header under a file while segHeaderLen — and every absolute offset
+// the terms index records against it — still says six.
+func TestOverlongVersionEncodingIsRefused(t *testing.T) {
+	dir, segDir := commitTiny(t)
+	path := filepath.Join(segDir, metaFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := b[:len(b)-crc32.Size]
+
+	// Same magic, same kind, same payload; version 1 spelled in two bytes.
+	overlong := append([]byte(nil), segMagic...)
+	overlong = append(overlong, 0x81, 0x00)
+	overlong = append(overlong, body[len(segMagic)+1:]...)
+	overlong = binary.LittleEndian.AppendUint32(overlong, crc32.Checksum(overlong, segCRC))
+	if err := os.WriteFile(path, overlong, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open: got %v, want ErrCorrupt", err)
 	}
 }
 

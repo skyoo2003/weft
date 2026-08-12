@@ -81,8 +81,16 @@ type segWriter struct {
 	buf []byte
 }
 
+// newSegWriter creates path exclusively. O_EXCL rather than os.Create because
+// the index directory belongs to the caller, not to weft, and the manifest's
+// temp file sits at a predictable name inside it: os.Create follows a symlink
+// planted there and would write this file's bytes over whatever it points at,
+// turning "can write in the index directory" into "can overwrite any file this
+// process can reach". O_CREATE|O_EXCL refuses an existing path, symlink
+// included — so a caller clears its own debris first, and anything still in
+// the way belongs to somebody else and is worth failing over.
 func newSegWriter(path string, kind byte) (*segWriter, error) {
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return nil, err
 	}
@@ -392,6 +400,15 @@ func parseSection(name string, b []byte, kind byte) (*segReader, error) {
 	if v != formatVersion {
 		return nil, fmt.Errorf("%s: format version %d, this build reads %d: %w", name, v, formatVersion, ErrBadVersion)
 	}
+	// Version 1 is one byte, and only one byte. binary.Uvarint accepts overlong
+	// encodings — 0x81 0x00 also decodes to 1 — which would make the header
+	// seven bytes while segHeaderLen, and every absolute offset the terms index
+	// records against it, still says six. Two byte strings meaning the same
+	// index is one too many for a format whose writer is expected to be
+	// deterministic.
+	if n != segHeaderLen-len(segMagic)-1 {
+		return nil, fmt.Errorf("%s: format version 1 written in %d bytes, not 1: %w", name, n, ErrCorrupt)
+	}
 	if got := body[len(segMagic)+n]; got != kind {
 		return nil, fmt.Errorf("%s: section kind %d where %d belongs: %w", name, got, kind, ErrCorrupt)
 	}
@@ -546,6 +563,15 @@ func decodePostings(post, terms *segReader, host *Index) error {
 		return fmt.Errorf("%s lists %d terms, %s lists %d: %w", post.name, pn, terms.name, tn, ErrCorrupt)
 	}
 
+	// Every token Add saw became exactly one posting increment, so a document's
+	// frequencies summed across all terms equal the docLen stored beside it.
+	// Per-posting the check is only freq <= docLen, which lets a doctored file
+	// give a one-token document a frequency of 1 under two different terms —
+	// each legal alone, together describing a document that cannot exist. BM25
+	// would then divide real frequencies by a length that never held them and
+	// return scores that look reasonable and are wrong.
+	sumFreq := make([]int, len(host.docs))
+
 	prevTerm := ""
 	for i := 0; i < pn; i++ {
 		term, err := terms.str("term")
@@ -616,6 +642,13 @@ func decodePostings(post, terms *segReader, host *Index) error {
 					if delta == 0 {
 						return fmt.Errorf("%s: term %q repeats a docID; postings are strictly ascending: %w", post.name, term, ErrCorrupt)
 					}
+					// Checked before the addition, not after: uint64 wraps
+					// silently, and a wrapped id lands back inside the corpus
+					// and passes every check below while breaking the ascending
+					// order block skipping and the TopK tiebreak both assume.
+					if delta > math.MaxUint64-prev {
+						return fmt.Errorf("%s: term %q docID delta %d overflows past %d: %w", post.name, term, delta, prev, ErrCorrupt)
+					}
 					id = prev + delta
 				case b == 0:
 					id = delta // the term's first posting: nothing precedes it
@@ -645,6 +678,7 @@ func decodePostings(post, terms *segReader, host *Index) error {
 						post.name, term, freq, id, host.docLen[id], ErrCorrupt)
 				}
 				pl = append(pl, Posting{Doc: DocID(id), Freq: freq})
+				sumFreq[id] += freq
 				gotMaxTF = max(gotMaxTF, freq)
 				gotMinDL = min(gotMinDL, host.docLen[id])
 			}
@@ -660,6 +694,13 @@ func decodePostings(post, terms *segReader, host *Index) error {
 			}
 		}
 		host.postings[term] = pl
+	}
+
+	for id, sum := range sumFreq {
+		if sum != host.docLen[id] {
+			return fmt.Errorf("%s: document %d holds %d indexed tokens, its stored length is %d: %w",
+				post.name, id, sum, host.docLen[id], ErrCorrupt)
+		}
 	}
 
 	if err := post.done(); err != nil {

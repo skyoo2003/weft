@@ -216,6 +216,60 @@ func TestCommitRefusesAManifestNamingTheNextGeneration(t *testing.T) {
 	}
 }
 
+// TestCommitRefusesAManifestListingTwoSegments closes the gap between the two
+// readers of a manifest: Open has always refused a v1 manifest listing anything
+// but one segment, while Commit read the same file and published over it. The
+// commit that followed pruned every segment the old manifest named, turning a
+// directory that could still be repaired into one that could not.
+func TestCommitRefusesAManifestListingTwoSegments(t *testing.T) {
+	dir, segDir := commitTiny(t)
+	rewriteSection(t, filepath.Join(dir, manifestName), kindManifest, func(w *segWriter) {
+		w.uvarint(1)
+		w.uvarint(2)
+		w.str(segDirName(1))
+		w.str(segDirName(2))
+	})
+	ix := New()
+	addAll(t, ix, []Document{{Key: "new", Text: "nothing here may be published"}})
+	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Commit: got %v, want ErrCorrupt", err)
+	}
+	if _, err := os.Stat(filepath.Join(segDir, docsFile)); err != nil {
+		t.Fatalf("the published segment was pruned anyway: %v", err)
+	}
+}
+
+// TestCommitDoesNotFollowASymlinkedTempManifest guards the one place weft
+// writes to a predictable path in a directory it does not own. os.Create
+// follows a symlink standing there, which would turn "can write in the index
+// directory" into "can overwrite any file this process can reach".
+func TestCommitDoesNotFollowASymlinkedTempManifest(t *testing.T) {
+	const bystander = "a file weft has no business writing"
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "bystander")
+	if err := os.WriteFile(outside, []byte(bystander), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, manifestName+".tmp")); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+
+	ix := New()
+	addAll(t, ix, []Document{{Key: "a", Text: "x"}})
+	// Whether the commit succeeds is not the point — it may legitimately fail
+	// on a directory somebody else is meddling with. What it must never do is
+	// write through the link.
+	commitErr := ix.Commit(dir)
+
+	got, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("the bystander file is gone (commit returned %v): %v", commitErr, err)
+	}
+	if string(got) != bystander {
+		t.Fatalf("Commit wrote through the symlink; the bystander now holds %q", got)
+	}
+}
+
 func TestManifestNamingAnEscapePathIsRefused(t *testing.T) {
 	// A doctored manifest must not be able to point the reader outside dir.
 	dir := t.TempDir()

@@ -162,8 +162,14 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// does not fit on a 32-bit target: the package stops compiling entirely
 	// under GOARCH=386. Widened, the comparison is simply never true there,
 	// which is the right answer — an int that narrow cannot reach the limit.
-	if uint64(len(ix.docs)) > math.MaxUint32 {
-		return 0, fmt.Errorf("add %q: index is full at %d documents", d.Key, uint64(math.MaxUint32)+1)
+	//
+	// The comparison is >=, not >, so the ceiling is 2^32-1 documents rather
+	// than 2^32: one lower than DocID alone would allow, and the number
+	// FORMAT.md publishes. The doc count on disk is a uvarint the reader ranges
+	// against MaxUint32, so accepting one more here would build an index that
+	// commits and then cannot be reopened.
+	if uint64(len(ix.docs)) >= math.MaxUint32 {
+		return 0, fmt.Errorf("add %q: index is full at %d documents", d.Key, uint64(math.MaxUint32))
 	}
 	id := DocID(len(ix.docs))
 	ix.docs = append(ix.docs, d)
