@@ -23,12 +23,12 @@ If you need text + vector hybrid search today, [bleve](https://github.com/bleves
 
 ## Status
 
-Milestone 1 passed. **Not usable in production:** the index is in memory only and is lost on restart.
+Milestones 1 and 2 passed. **Not usable in production:** every commit rewrites the whole corpus and every open reads it all into memory, so the corpus must fit in RAM.
 
 | # | Milestone | State |
 |---|---|---|
 | 1 | Scorer-agnostic fusion | ✅ 3/3 assertions pass |
-| 2 | Persistence | Not started |
+| 2 | Persistence | ✅ restores identically, commits atomically |
 | 3 | Scale — segment merge, ANN | Not started |
 | 4 | Quality — graph contribution to nDCG | Not started |
 | 5 | Performance — p99 including GC pauses | Not started |
@@ -92,7 +92,8 @@ The third assertion carries the weight. `Fuse` never reads `Candidate.Score`, on
 cmd/weft/          interactive demo binary
 examples/basic/    minimal library embedding
 pkg/
-  engine/          shared types, Scorer interface, in-memory index, Search
+  engine/          shared types, Scorer interface, in-memory index, Search,
+                   segment format, Commit and Open
   fusion/          RRF — imports engine and nothing else
   scorer/
     text/          BM25, ln(1+…) IDF form
@@ -100,9 +101,11 @@ pkg/
     graph/         seed BFS, 1/(1+hops)
     recency/       1/(1+age/HalfLife)
 docs/
-  FINDINGS.md      milestone 1 results, known costs, open questions
+  FINDINGS.md      milestone 1 and 2 results, known costs, open questions
+  FORMAT.md        the on-disk format, version 1
   DECISIONS.md     decisions expensive to reverse
   DATASETS.md      evaluation dataset survey for milestone 4
+  RESEARCH.md      one round of community and competitive research
 ```
 
 Dependencies point inward. `engine` imports no weft package; `fusion` imports only `engine`. `engine.Search` takes a `Fuser` function rather than importing `fusion`, so `engine` is ignorant of the fusion strategy as well as of scorers.
@@ -117,13 +120,15 @@ make run        # interactive demo
 make example    # minimal example
 ```
 
-1,185 implementation lines, 2,457 test lines, **zero external dependencies**. Go 1.26+.
+2,059 implementation lines, 3,354 test lines, **zero external dependencies**. Go 1.26+.
 
 ## Limitations
 
 | Limitation | Detail |
 |---|---|
-| No persistence | In memory only. Milestone 2. |
+| Corpus must fit in memory | `Commit` rewrites the whole corpus and `Open` loads all of it. Incremental segments and lazy loading are milestone 3: [FORMAT.md §8](docs/FORMAT.md). |
+| No deletion | Documents can be added, never removed. Tombstones and DocID namespacing are one design problem, taken together in milestone 3: [FINDINGS, milestone 2 §4](docs/FINDINGS.md). |
+| Durability stops at fsync | Atomic against process death; best-effort against power loss, with no platform write barrier: [FORMAT.md §6](docs/FORMAT.md). |
 | No early termination | The top-k candidate interface forecloses WAND-style skipping. Cost and extension path: [FINDINGS §3.1](docs/FINDINGS.md). |
 | Graph seeds unverified | Double counting is fixed; whether `SeedN = 5` and "top n from text" are good choices needs measurement. Milestone 4. |
 | Scorers must share one index | `DocID` is index-relative, so scorers built against different indexes fuse unrelated documents. A precondition on `Search`, not a check: [FINDINGS §3.4](docs/FINDINGS.md). |
