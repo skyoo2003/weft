@@ -1,15 +1,3 @@
-field Candidate.Doc DocID
-field Candidate.Score float64
-field Document.Key string
-field Document.Links []string
-field Document.Text string
-field Document.Time time.Time
-field Document.Vector []float32
-field Posting.Doc DocID
-field Posting.Freq int
-field Query.Seeds []string
-field Query.Text string
-field Query.Vector []float32
 func New() *Index
 func Search(ctx context.Context, q Query, k int, fuse Fuser, scorers ...Scorer) ([]Candidate, error)
 func Tokenize(s string) []string
@@ -22,16 +10,28 @@ method Index.Len() int
 method Index.Lookup(term string) []Posting
 method Index.Resolve(key string) (DocID, bool)
 method Index.Stats() (docs int, avgDocLen float64)
-method Scorer.Candidates(ctx context.Context, q Query, k int) ([]Candidate, error)
-method Scorer.Name() string
 type Candidate struct
+field Candidate.Doc DocID
+field Candidate.Score float64
 type DocID uint32
 type Document struct
+field Document.Key string
+field Document.Text string
+field Document.Vector []float32
+field Document.Links []string
+field Document.Time time.Time
 type Fuser func(streams [][]Candidate, k int) []Candidate
 type Index struct
 type Posting struct
+field Posting.Doc DocID
+field Posting.Freq int
 type Query struct
+field Query.Text string
+field Query.Vector []float32
+field Query.Seeds []string
 type Scorer interface
+method Scorer.Name() string
+method Scorer.Candidates(ctx context.Context, q Query, k int) ([]Candidate, error)
 var ErrDuplicateKey
 var ErrEmptyKey
 var ErrNoFuser

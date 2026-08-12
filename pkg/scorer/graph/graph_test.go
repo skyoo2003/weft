@@ -346,6 +346,24 @@ func TestCancellationIsObservedInsideTheLinkScan(t *testing.T) {
 	}
 }
 
+func TestCancellationIsObservedWhileResolvingExplicitSeeds(t *testing.T) {
+	// Every seed key unknown, so nothing is enqueued and the traversal that polls
+	// the context never starts: the old code resolved all 3000 keys and returned
+	// a successful empty result, which a caller cannot tell apart from "no seed
+	// matched". A plainly cancelled context suffices — the poll at i == 0 is the
+	// first check that exists anywhere on this path.
+	seeds := make([]string, 3000)
+	for i := range seeds {
+		seeds[i] = fmt.Sprintf("missing%d", i)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got, err := New(engine.New(), nil).Candidates(ctx, engine.Query{Seeds: seeds}, 10)
+	if err == nil {
+		t.Fatalf("Candidates returned %+v and no error while resolving seeds after cancellation", got)
+	}
+}
+
 func TestCancellationArrivingAfterTheLastNodeIsObserved(t *testing.T) {
 	// An explicit seed with one link, so the calls are countable: one per-dequeue
 	// check for the seed, one i == 0 poll over its single link, and one more

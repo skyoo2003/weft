@@ -144,7 +144,17 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 func (s *Scorer) seedDocs(ctx context.Context, q engine.Query) ([]engine.DocID, error) {
 	if len(q.Seeds) > 0 {
 		ids := make([]engine.DocID, 0, len(q.Seeds))
-		for _, key := range q.Seeds {
+		for i, key := range q.Seeds {
+			// Seeds is caller-supplied and unbounded, and this loop runs before
+			// the traversal that would otherwise do the checking: if every key is
+			// unknown, ids comes back empty and Candidates reports a successful
+			// empty result, indistinguishable from an honest miss. Every 1024
+			// keys, as in the link and posting scans.
+			if i&1023 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			if id, ok := s.ix.Resolve(key); ok {
 				ids = append(ids, id)
 			}

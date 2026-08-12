@@ -222,9 +222,16 @@ func TestEngineAPISurfaceIsUnchanged(t *testing.T) {
 	}
 }
 
-// exportedAPI lists dir's exported declarations one per line, sorted, with
-// member and signature types included — see typeAPI for why names alone are not
-// enough.
+// exportedAPI lists dir's exported declarations one per line, with member and
+// signature types included — see typeAPI for why names alone are not enough.
+//
+// Sorting is per declaration, never across the whole list. Declarations may move
+// between files, so their order is not something engine promises and sorting
+// them is what keeps the golden stable. The order of a struct's fields is a
+// promise: every unkeyed composite literal depends on it, so swapping two
+// same-typed fields reverses their meaning in existing callers while still
+// compiling. A flat sort of every line hides exactly that, so each declaration
+// is one block and its members stay in the order they are written.
 func exportedAPI(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -232,7 +239,7 @@ func exportedAPI(t *testing.T, dir string) []string {
 		t.Fatalf("ReadDir(%s): %v", dir, err)
 	}
 	fset := token.NewFileSet()
-	var api []string
+	var blocks [][]string
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -249,9 +256,9 @@ func exportedAPI(t *testing.T, dir string) []string {
 					continue
 				}
 				if d.Recv == nil {
-					api = append(api, "func "+d.Name.Name+signature(d.Type))
+					blocks = append(blocks, []string{"func " + d.Name.Name + signature(d.Type)})
 				} else if recv := receiverName(d.Recv); ast.IsExported(recv) {
-					api = append(api, "method "+recv+"."+d.Name.Name+signature(d.Type))
+					blocks = append(blocks, []string{"method " + recv + "." + d.Name.Name + signature(d.Type)})
 				}
 			case *ast.GenDecl:
 				for _, spec := range d.Specs {
@@ -260,11 +267,11 @@ func exportedAPI(t *testing.T, dir string) []string {
 						if !s.Name.IsExported() {
 							continue
 						}
-						api = append(api, typeAPI(s.Name.Name, s.Type)...)
+						blocks = append(blocks, typeAPI(s.Name.Name, s.Type))
 					case *ast.ValueSpec:
 						for _, n := range s.Names {
 							if n.IsExported() {
-								api = append(api, d.Tok.String()+" "+n.Name)
+								blocks = append(blocks, []string{d.Tok.String() + " " + n.Name})
 							}
 						}
 					}
@@ -272,7 +279,15 @@ func exportedAPI(t *testing.T, dir string) []string {
 			}
 		}
 	}
-	sort.Strings(api)
+
+	// Two declarations cannot share a first line — that would be a redeclaration
+	// — so ordering by it is total, and every member keeps its declared position
+	// underneath.
+	sort.Slice(blocks, func(i, j int) bool { return blocks[i][0] < blocks[j][0] })
+	var api []string
+	for _, b := range blocks {
+		api = append(api, b...)
+	}
 	return api
 }
 

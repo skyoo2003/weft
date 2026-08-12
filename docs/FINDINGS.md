@@ -4,14 +4,14 @@
 
 | Package | Implementation | Tests |
 |---|---|---|
-| `pkg/engine` | 403 | 848 |
+| `pkg/engine` | 403 | 863 |
 | `pkg/fusion` | 54 | 138 |
-| `pkg/scorer/text` | 119 | 278 |
+| `pkg/scorer/text` | 131 | 291 |
 | `pkg/scorer/vector` | 127 | 242 |
-| `pkg/scorer/graph` | 168 | 371 |
+| `pkg/scorer/graph` | 178 | 389 |
 | `pkg/scorer/recency` | **93** | 202 |
 
-964 implementation lines, 2,079 test lines, zero external dependencies.
+986 implementation lines, 2,125 test lines, zero external dependencies.
 
 ---
 
@@ -33,7 +33,9 @@ The engine side is not zero, and an earlier version of this document claimed it 
 Two checks measure different things, and neither substitutes for the other:
 
 - `engine/` and `fusion/` import no `scorer/*` package, checked with `go/parser`. This proves package-level ignorance and holds for every future scorer without needing a baseline commit, and it does not trip on the words "text" or "vector" in comments. It cannot detect a new `Document` field.
-- `engine`'s exported API is recorded in `pkg/engine/testdata/engine_api.txt`, signatures and member types included. That covers all three ways a scorer can widen the shared contract — a field on `Document`, a method on the `Scorer` interface, a parameter on `Search` or `Fuser` — so the engine cost of a new scorer is a visible edit rather than a silent one. Names alone were not enough: an interface method is the most expensive change a scorer can force, since every existing scorer stops compiling. Refresh with `WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/`.
+- `engine`'s exported API is recorded in `pkg/engine/testdata/engine_api.txt`, signatures and member types included, each declaration's members in the order they are written. That covers all three ways a scorer can widen the shared contract — a field on `Document`, a method on the `Scorer` interface, a parameter on `Search` or `Fuser` — so the engine cost of a new scorer is a visible edit rather than a silent one. Refresh with `WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/`.
+
+  This assertion has been the weakest link twice, both times for the same reason: it recorded less than the contract contains. Names alone missed signatures and member types, and an interface method is the most expensive change a scorer can force, since every existing scorer stops compiling. Sorting every line then missed field *order*, which unkeyed composite literals depend on — swapping the same-typed `Document.Key` and `Document.Text` reverses their meaning in existing callers, compiles cleanly, and left the golden byte-identical. Sorting is now per declaration, so declarations stay stable across file moves while members keep their positions.
 
 The line budget counts implementation files only — counting tests would reward untested scorers.
 

@@ -258,6 +258,19 @@ func TestConcurrentAddNeverProducesNonPositiveScores(t *testing.T) {
 	}
 }
 
+func TestCancellationIsObservedBeforeTokenizing(t *testing.T) {
+	// A query of pure punctuation tokenizes to no terms, so the per-term loop
+	// never runs and the old code returned a successful empty result whatever the
+	// context said. Not a review finding — the same shape as the seed and vector
+	// scans, found by looking for the rest of them.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got, err := New(engine.New()).Candidates(ctx, engine.Query{Text: "!!! ---"}, 10)
+	if err == nil {
+		t.Fatalf("Candidates returned %+v and no error for an untokenizable query after cancellation", got)
+	}
+}
+
 func TestCancellationArrivingAfterTheLastPostingIsObserved(t *testing.T) {
 	// One term over a one-document corpus, so the calls are countable: one for
 	// the per-term check and one for the i == 0 poll. Cancellation lands on the

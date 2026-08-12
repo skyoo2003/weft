@@ -48,6 +48,18 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 	if k <= 0 {
 		return nil, nil
 	}
+	// Before tokenizing, not after. Query.Text is caller-supplied and unbounded,
+	// and a text of pure punctuation tokenizes to nothing, so the early return
+	// below would otherwise report success on a context that was already dead.
+	//
+	// This bounds the wait at one tokenization, not inside it: Tokenize is shared
+	// with Index.Add, which has no context, so polling within it would mean
+	// either widening engine's API or keeping a second tokenizer here — and one
+	// tokenizer, living in engine, is what keeps engine from importing a scorer
+	// (docs/FINDINGS.md section 2.2).
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	terms := engine.Tokenize(q.Text)
 	if len(terms) == 0 {
 		return nil, nil
