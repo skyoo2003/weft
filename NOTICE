@@ -19,9 +19,8 @@ THIRD-PARTY NOTICES
 
 weft has no third-party dependencies.
 
-This is a project constraint rather than a coincidence: "standard library only,
-zero external dependencies" is one of the PRD's success metrics, and a test
-enforces it.
+This is a project constraint rather than a coincidence: standard library only,
+zero external dependencies, enforced by a test rather than asserted.
 
     $ go list -m all
     github.com/skyoo2003/weft
@@ -60,7 +59,7 @@ implements algorithms they describe, and attribution is the honest thing to do.
     "Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning
     Methods." SIGIR '09.
 
-    BM25 (pkg/signal/text)
+    BM25 (pkg/scorer/text)
     Robertson, S. E., & Zaragoza, H. (2009).
     "The Probabilistic Relevance Framework: BM25 and Beyond."
     Foundations and Trends in Information Retrieval, 3(4).

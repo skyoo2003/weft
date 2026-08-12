@@ -1,0 +1,41 @@
+func New() *Index
+func Search(context.Context, Query, int, Fuser, ...Scorer) ([]Candidate, error)
+func Tokenize(string) []string
+func TopK([]Candidate, int) []Candidate
+method Index.Add(Document) (DocID, error)
+method Index.AvgDocLen() float64
+method Index.Doc(DocID) (Document, bool)
+method Index.DocLen(DocID) int
+method Index.Len() int
+method Index.Lookup(string) []Posting
+method Index.Resolve(string) (DocID, bool)
+method Index.Stats() (int, float64)
+type Candidate struct
+field Candidate.Doc DocID
+field Candidate.Score float64
+type DocID uint32
+type Document struct
+field Document.Key string
+field Document.Text string
+field Document.Vector []float32
+field Document.Links []string
+field Document.Time time.Time
+type Fuser func([][]Candidate, int) []Candidate
+type Index struct
+Index has unexported fields
+type Posting struct
+field Posting.Doc DocID
+field Posting.Freq int
+type Query struct
+field Query.Text string
+field Query.Vector []float32
+field Query.Seeds []string
+type Scorer interface
+method Scorer.Name() string
+method Scorer.Candidates(context.Context, Query, int) ([]Candidate, error)
+var ErrDimMismatch
+var ErrDuplicateKey
+var ErrEmptyKey
+var ErrNilScorer
+var ErrNoFuser
+var ErrNonFiniteVector
