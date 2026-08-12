@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -195,6 +197,61 @@ func TestTopK(t *testing.T) {
 func TestSearchRejectsNilFuser(t *testing.T) {
 	if _, err := Search(t.Context(), Query{}, 5, nil); !errors.Is(err, ErrNoFuser) {
 		t.Fatalf("Search with nil Fuser err = %v, want ErrNoFuser", err)
+	}
+}
+
+func TestSearchRejectsNilScorer(t *testing.T) {
+	// A nil interface in the scorer list used to panic on the Candidates call.
+	// Search already rejects a nil Fuser, and a scorer list assembled at runtime
+	// is where an unconfigured optional scorer turns up.
+	fuse := func(streams [][]Candidate, k int) []Candidate { return nil }
+	ran := false
+	ok := scorerFunc(func() { ran = true })
+
+	_, err := Search(t.Context(), Query{}, 5, fuse, ok, nil)
+	if !errors.Is(err, ErrNilScorer) {
+		t.Fatalf("Search with a nil Scorer err = %v, want ErrNilScorer", err)
+	}
+	if !strings.Contains(err.Error(), "scorer 1") {
+		t.Errorf("err = %q, want it to name the offending position", err)
+	}
+	if ran {
+		t.Error("a scorer ran before the nil entry was reported; validate before scanning")
+	}
+}
+
+// scorerFunc is a Scorer with no opinion that records having been asked.
+type scorerFunc func()
+
+func (s scorerFunc) Name() string { return "stub" }
+
+func (s scorerFunc) Candidates(context.Context, Query, int) ([]Candidate, error) {
+	s()
+	return nil, nil
+}
+
+func TestTopKSortsNaNLastAndDeterministically(t *testing.T) {
+	// Both NaN > x and x > NaN are false, so comparing scores by hand reported a
+	// NaN as neither better nor worse than anything and skipped the DocID
+	// tiebreak with it: a NaN document held rank 1 above one scoring 0.9, and the
+	// answer depended on the order candidates arrived in.
+	nan := math.NaN()
+	orderings := [][]Candidate{
+		{{1, nan}, {2, 0.9}, {3, 0.5}, {4, nan}, {5, 0.1}},
+		{{2, 0.9}, {1, nan}, {5, 0.1}, {3, 0.5}, {4, nan}},
+		{{4, nan}, {5, 0.1}, {3, 0.5}, {2, 0.9}, {1, nan}},
+	}
+	want := []DocID{2, 3, 5, 1, 4} // scores descending, then the NaNs by DocID
+	for i, in := range orderings {
+		got := TopK(in, len(want))
+		if len(got) != len(want) {
+			t.Fatalf("ordering %d: TopK = %+v, want %d results", i, got, len(want))
+		}
+		for j := range got {
+			if got[j].Doc != want[j] {
+				t.Fatalf("ordering %d: TopK = %+v, want docs %v", i, got, want)
+			}
+		}
 	}
 }
 

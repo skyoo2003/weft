@@ -6,8 +6,17 @@ import (
 	"fmt"
 )
 
-// ErrNoFuser is returned by Search when called without a fusion operator.
-var ErrNoFuser = errors.New("engine: nil Fuser")
+// Sentinel errors from Search. Both report a collaborator the caller left nil,
+// which is a configuration mistake and not a query that found nothing.
+var (
+	ErrNoFuser = errors.New("engine: nil Fuser")
+
+	// ErrNilScorer reports a nil entry in Search's scorer list. Calling
+	// Candidates on it would panic, and skipping it would quietly rank without a
+	// signal the caller believes is switched on — a scorer list assembled at
+	// runtime is exactly where an optional scorer goes missing.
+	ErrNilScorer = errors.New("engine: nil Scorer")
+)
 
 // Fuser collapses N candidate streams into one ranked list of at most k.
 //
@@ -42,6 +51,14 @@ func Search(ctx context.Context, q Query, k int, fuse Fuser, scorers ...Scorer) 
 	}
 	if k <= 0 {
 		return nil, nil
+	}
+	// Checked before any scorer runs, for the same reason the fuser is: a caller
+	// that misconfigured its scorer list should not pay for three full corpus
+	// scans before hearing about it.
+	for i, s := range scorers {
+		if s == nil {
+			return nil, fmt.Errorf("scorer %d: %w", i, ErrNilScorer)
+		}
 	}
 
 	// ponytail: scorers run sequentially. Fan out with goroutines when one slow

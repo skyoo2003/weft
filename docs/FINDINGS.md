@@ -4,14 +4,14 @@
 
 | Package | Implementation | Tests |
 |---|---|---|
-| `pkg/engine` | 403 | 863 |
+| `pkg/engine` | 436 | 967 |
 | `pkg/fusion` | 54 | 138 |
 | `pkg/scorer/text` | 131 | 291 |
 | `pkg/scorer/vector` | 127 | 242 |
 | `pkg/scorer/graph` | 178 | 389 |
 | `pkg/scorer/recency` | **93** | 202 |
 
-986 implementation lines, 2,125 test lines, zero external dependencies.
+1,019 implementation lines, 2,229 test lines, zero external dependencies.
 
 ---
 
@@ -35,7 +35,15 @@ Two checks measure different things, and neither substitutes for the other:
 - `engine/` and `fusion/` import no `scorer/*` package, checked with `go/parser`. This proves package-level ignorance and holds for every future scorer without needing a baseline commit, and it does not trip on the words "text" or "vector" in comments. It cannot detect a new `Document` field.
 - `engine`'s exported API is recorded in `pkg/engine/testdata/engine_api.txt`, signatures and member types included, each declaration's members in the order they are written. That covers all three ways a scorer can widen the shared contract — a field on `Document`, a method on the `Scorer` interface, a parameter on `Search` or `Fuser` — so the engine cost of a new scorer is a visible edit rather than a silent one. Refresh with `WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/`.
 
-  This assertion has been the weakest link twice, both times for the same reason: it recorded less than the contract contains. Names alone missed signatures and member types, and an interface method is the most expensive change a scorer can force, since every existing scorer stops compiling. Sorting every line then missed field *order*, which unkeyed composite literals depend on — swapping the same-typed `Document.Key` and `Document.Text` reverses their meaning in existing callers, compiles cleanly, and left the golden byte-identical. Sorting is now per declaration, so declarations stay stable across file moves while members keep their positions.
+  This assertion has been corrected three times, and what it now records is the result of separating two questions that look like one. **Does this change break a caller?** goes in the file. **Is this change visible in the source?** does not.
+
+  | Correction | Was recorded | Why it was wrong |
+  |---|---|---|
+  | Signatures and member types | Names only | An interface method is the most expensive change a scorer can force — every existing scorer stops compiling — and names alone could not see one. |
+  | Order per declaration | Every line sorted together | Field order is what unkeyed composite literals resolve against. Swapping the same-typed `Document.Key` and `Document.Text` reverses their meaning in existing callers, compiles cleanly, and left the golden byte-identical. |
+  | Types without parameter names | `ctx context.Context` | Go has no named arguments, so renaming a parameter breaks nothing. Recording the name made the assertion fail on a pure refactor and tell the author to write down an engine cost that does not exist. |
+
+  The last one trims coverage, which is the opposite of the first two, and it has a price: swapping two adjacent parameters of the same type is now invisible here even though it changes meaning at every call site. No declaration in `engine` has such a pair today.
 
 The line budget counts implementation files only — counting tests would reward untested scorers.
 

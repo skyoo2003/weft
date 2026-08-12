@@ -335,17 +335,64 @@ func typeAPI(name string, expr ast.Expr) []string {
 		}
 		return out
 
+	case *ast.FuncType:
+		// Fuser's signature is part of the contract, and it goes through the same
+		// name-stripping as a func declaration: renaming its streams parameter is
+		// no more a contract change here than it is there.
+		return []string{"type " + name + " func" + signature(t)}
+
 	default:
-		// A defined type or a func type: DocID's width and Fuser's signature are
-		// both part of the contract.
+		// A defined type: DocID's width is part of the contract.
 		return []string{"type " + name + " " + types.ExprString(expr)}
 	}
 }
 
-// signature renders a function's parameters and results, dropping the leading
-// "func" keyword so the line reads "func Search(...) (...)".
+// signature renders a function's parameter and result types, dropping the
+// leading "func" keyword so the line reads "func Search(...) (...)".
 func signature(ft *ast.FuncType) string {
-	return strings.TrimPrefix(types.ExprString(ft), "func")
+	s := "(" + strings.Join(fieldTypes(ft.Params), ", ") + ")"
+	switch res := fieldTypes(ft.Results); len(res) {
+	case 0:
+	case 1:
+		s += " " + res[0]
+	default:
+		s += " (" + strings.Join(res, ", ") + ")"
+	}
+	return s
+}
+
+// fieldTypes lists one type per parameter or result, with the names left out.
+//
+// A parameter name is not part of what a caller has to satisfy — Go has no named
+// arguments, so renaming ctx to c breaks nothing — and recording it made this
+// assertion fail on a pure refactor while telling the author to go write down an
+// engine cost that does not exist. Everything a caller does have to satisfy is
+// still here: arity, order, types, and whether the last parameter is variadic.
+//
+// This trims what the golden records, which is the opposite of the last two
+// corrections to this file, and the distinction is the point. Field order and
+// member types decide whether existing code still compiles and still means what
+// it did. Identifier spelling inside a signature decides nothing.
+//
+// It does cost one thing, and the cost is real: swapping two adjacent parameters
+// of the same type is now invisible here, though it silently changes meaning at
+// every call site. No declaration in engine has a same-typed adjacent pair
+// today, and unlike a field rename that pair cannot be reordered by accident —
+// but nothing below would catch it if it were.
+func fieldTypes(fl *ast.FieldList) []string {
+	if fl == nil {
+		return nil
+	}
+	var out []string
+	for _, fld := range fl.List {
+		// `a, b int` is two parameters sharing one type; an unnamed one is still
+		// one parameter.
+		t := types.ExprString(fld.Type)
+		for range max(len(fld.Names), 1) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // receiverName returns the bare type name of a method receiver.
