@@ -10,7 +10,6 @@ import (
 	"maps"
 	"math"
 	"os"
-	"path/filepath"
 	"slices"
 	"time"
 )
@@ -81,16 +80,21 @@ type segWriter struct {
 	buf []byte
 }
 
-// newSegWriter creates path exclusively. O_EXCL rather than os.Create because
-// the index directory belongs to the caller, not to weft, and the manifest's
-// temp file sits at a predictable name inside it: os.Create follows a symlink
-// planted there and would write this file's bytes over whatever it points at,
-// turning "can write in the index directory" into "can overwrite any file this
-// process can reach". O_CREATE|O_EXCL refuses an existing path, symlink
-// included — so a caller clears its own debris first, and anything still in
-// the way belongs to somebody else and is worth failing over.
-func newSegWriter(path string, kind byte) (*segWriter, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+// newSegWriter creates name under root, exclusively. Two guards, because the
+// index directory belongs to the caller and weft's paths inside it are
+// predictable:
+//
+// The root confines the write to the directory tree it was opened on, so a
+// symlink standing where a segment directory belongs cannot redirect it. This
+// is the OS's check, not one of ours that a rename could race.
+//
+// O_EXCL refuses a path something already stands at, symlink included, which
+// is what stops the manifest's temp file from being written through a link
+// planted at its name — the difference between "can write in the index
+// directory" and "can overwrite any file this process can reach". A caller
+// clears its own debris first; anything still in the way is somebody else's.
+func newSegWriter(root *os.Root, name string, kind byte) (*segWriter, error) {
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +138,7 @@ func (w *segWriter) close() error {
 // atomicity FINDINGS section 4.4 asked for, statistics snapshot included.
 // Only the in-memory encoding happens under the lock; the disk writes in
 // close run after it is released.
-func (ix *Index) writeSegment(segDir string) error {
+func (ix *Index) writeSegment(segRoot *os.Root) error {
 	sections := []struct {
 		name string
 		kind byte
@@ -146,7 +150,7 @@ func (ix *Index) writeSegment(segDir string) error {
 	}
 	ws := make([]*segWriter, len(sections))
 	for i, s := range sections {
-		w, err := newSegWriter(filepath.Join(segDir, s.name), s.kind)
+		w, err := newSegWriter(segRoot, s.name, s.kind)
 		if err != nil {
 			for _, open := range ws[:i] {
 				open.f.Close()
@@ -367,8 +371,8 @@ func (r *segReader) done() error {
 // absent index: it reports ErrCorrupt rather than fs.ErrNotExist, so a caller
 // whose "nothing committed here yet" branch starts a fresh index cannot be
 // handed a half-deleted segment and quietly overwrite it.
-func openSection(dir, name string, kind byte) (*segReader, error) {
-	b, err := os.ReadFile(filepath.Join(dir, name))
+func openSection(root *os.Root, name string, kind byte) (*segReader, error) {
+	b, err := root.ReadFile(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("%s: the manifest names this segment but the file is missing: %w", name, ErrCorrupt)
 	} else if err != nil {

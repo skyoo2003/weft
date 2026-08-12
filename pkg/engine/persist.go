@@ -63,12 +63,17 @@ func (ix *Index) Commit(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	defer root.Close()
 
 	// The previous generation number comes from the manifest. A missing
 	// manifest is a first commit; a corrupt one is not — guessing a generation
 	// on top of a directory in an unknown state could orphan a commit the
 	// caller believes exists, so Commit refuses and reports.
-	gen, _, err := readManifest(dir)
+	gen, _, err := readManifest(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		gen = 0
 	} else if err != nil {
@@ -79,31 +84,35 @@ func (ix *Index) Commit(dir string) error {
 	// gen, so the directory cleared below is this commit's own debris and never
 	// the published one.
 	seg := segDirName(gen + 1)
-	segDir := filepath.Join(dir, seg)
 	// A crash after writing segment files but before the manifest flip leaves
 	// this directory half-written. It was never visible — no manifest names it
 	// — so replacing it wholesale is safe.
-	if err := os.RemoveAll(segDir); err != nil {
+	if err := root.RemoveAll(seg); err != nil {
 		return fmt.Errorf("commit %s: clearing stale segment: %w", dir, err)
 	}
-	if err := os.Mkdir(segDir, 0o755); err != nil {
+	if err := root.Mkdir(seg, 0o755); err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
-	if err := ix.writeSegment(segDir); err != nil {
+	segRoot, err := root.OpenRoot(seg)
+	if err != nil {
+		return fmt.Errorf("commit %s: %w", dir, err)
+	}
+	defer segRoot.Close()
+	if err := ix.writeSegment(segRoot); err != nil {
 		return fmt.Errorf("commit %s: %w", seg, err)
 	}
 	// The segment directory's entries need to reach disk before the manifest
 	// claims they exist.
-	syncDir(segDir)
+	syncDir(segRoot)
 
 	// The temp manifest is created exclusively, so a leftover from a crashed
 	// commit has to be cleared here rather than truncated open. Removing a
 	// symlink removes the link, never its target.
-	tmp := filepath.Join(dir, manifestName+".tmp")
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("commit %s: clearing stale %s: %w", dir, manifestName+".tmp", err)
+	tmp := manifestName + ".tmp"
+	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("commit %s: clearing stale %s: %w", dir, tmp, err)
 	}
-	w, err := newSegWriter(tmp, kindManifest)
+	w, err := newSegWriter(root, tmp, kindManifest)
 	if err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
@@ -113,16 +122,16 @@ func (ix *Index) Commit(dir string) error {
 	if err := w.close(); err != nil {
 		return fmt.Errorf("commit %s: %s: %w", dir, manifestName, err)
 	}
-	if err := os.Rename(tmp, filepath.Join(dir, manifestName)); err != nil {
+	if err := root.Rename(tmp, manifestName); err != nil {
 		return fmt.Errorf("commit %s: publishing manifest: %w", dir, err)
 	}
-	syncDir(dir)
+	syncDir(root)
 
 	// The previous generation is unreachable now. Pruning it is best-effort:
 	// the commit above is already durable, and a leftover directory nothing
 	// names is invisible — failing to delete it must not turn a successful
 	// commit into a reported failure.
-	prune(dir, seg)
+	prune(root, seg)
 	return nil
 }
 
@@ -144,25 +153,39 @@ func (ix *Index) Commit(dir string) error {
 // longer exists. Until the next Commit, unnamed debris costs disk and nothing
 // else.
 func Open(dir string) (*Index, error) {
-	_, segs, err := readManifest(dir)
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}
-	segDir := filepath.Join(dir, segs[0])
+	defer root.Close()
 
-	metaR, err := openSection(segDir, metaFile, kindMeta)
+	_, segs, err := readManifest(root)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", dir, err)
+	}
+	segRoot, err := root.OpenRoot(segs[0])
+	if errors.Is(err, fs.ErrNotExist) {
+		// Same reasoning as openSection: the manifest named it, so its absence
+		// is damage rather than an index that was never written.
+		return nil, fmt.Errorf("open %s: the manifest names this segment but the directory is missing: %w", segs[0], ErrCorrupt)
+	} else if err != nil {
+		return nil, fmt.Errorf("open %s: %w", segs[0], err)
+	}
+	defer segRoot.Close()
+
+	metaR, err := openSection(segRoot, metaFile, kindMeta)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", segs[0], err)
 	}
-	docsR, err := openSection(segDir, docsFile, kindDocs)
+	docsR, err := openSection(segRoot, docsFile, kindDocs)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", segs[0], err)
 	}
-	postR, err := openSection(segDir, postingsFile, kindPostings)
+	postR, err := openSection(segRoot, postingsFile, kindPostings)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", segs[0], err)
 	}
-	termsR, err := openSection(segDir, termsFile, kindTerms)
+	termsR, err := openSection(segRoot, termsFile, kindTerms)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", segs[0], err)
 	}
@@ -198,8 +221,8 @@ func Open(dir string) (*Index, error) {
 // write, so a manifest whose generation and segment name disagree can aim that
 // RemoveAll at the segment that is still published, destroying the live commit
 // before its replacement is durable.
-func readManifest(dir string) (gen uint64, segs []string, err error) {
-	b, err := os.ReadFile(filepath.Join(dir, manifestName))
+func readManifest(root *os.Root) (gen uint64, segs []string, err error) {
+	b, err := root.ReadFile(manifestName)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -241,15 +264,20 @@ func readManifest(dir string) (gen uint64, segs []string, err error) {
 //
 // Only Commit calls this, and only after its own rename: weft's single writer
 // is the one party that knows no other segment is being written right now.
-func prune(dir, keep string) {
-	os.Remove(filepath.Join(dir, manifestName+".tmp"))
-	entries, err := os.ReadDir(dir)
+func prune(root *os.Root, keep string) {
+	root.Remove(manifestName + ".tmp")
+	d, err := root.Open(".")
+	if err != nil {
+		return
+	}
+	entries, err := d.ReadDir(-1)
+	d.Close()
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
 		if e.IsDir() && strings.HasPrefix(e.Name(), segPrefix) && e.Name() != keep {
-			os.RemoveAll(filepath.Join(dir, e.Name()))
+			root.RemoveAll(e.Name())
 		}
 	}
 }
@@ -260,8 +288,8 @@ func prune(dir, keep string) {
 // filesystems), and where it fails the process-crash guarantee Commit
 // documents still holds; only the power-loss window widens, which is already
 // declared best-effort.
-func syncDir(path string) {
-	if d, err := os.Open(path); err == nil {
+func syncDir(root *os.Root) {
+	if d, err := root.Open("."); err == nil {
 		d.Sync()
 		d.Close()
 	}

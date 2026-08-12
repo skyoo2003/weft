@@ -197,6 +197,7 @@ plausible but breaks an invariant a scorer relies on.
 | Terms unsorted, or an offset not landing on its entry | Milestone 3 would inherit a broken seek structure |
 | A non-final block that is not full | Block and posting counts would stop agreeing |
 | A block whose first DocID does not exceed the previous block's last | The block continued a delta chain instead of starting absolute |
+| A segment directory or section file that resolves outside the index directory | Both readers work through an `os.Root`, so a symlink planted where a segment belongs is refused by the OS, not by a check that a rename could race |
 | A manifest whose generation already names the segment the next commit would write | `Commit` clears a half-written segment directory before writing it; aimed at the live segment that clears the published commit |
 
 ## 6. Atomicity and durability
@@ -232,14 +233,26 @@ directory. `Open` performs no deletions and no writes, so opening a directory
 while it is being committed to cannot damage it; a reader that loses the race
 against `Commit`'s sweep of the previous generation sees an error and can retry.
 
-**The trust boundary is the bytes, not the directory.** Every value read from a
-file is validated, but the directory's permissions are the caller's problem: an
-attacker who can write into it can plant a whole valid segment, so weft does not
-pretend to defend against one. It does refuse to be used as a weapon *outside*
-that directory — the temp manifest is created with `O_EXCL`, so a symlink planted
-at its predictable path is refused rather than written through. Reading a
-symlinked segment is not in that class: it shows the reader bytes the attacker
-could equally have copied in.
+**Nothing weft opens leaves the index directory.** `Commit` and `Open` both work
+through an `os.Root` on that directory, so every path below it — segment
+directories and section files alike — is resolved by the OS with the guarantee
+that it stays beneath the root. A symlink standing where `seg-000007` belongs is
+refused rather than followed, and the refusal is not a check of weft's that a
+rename could race.
+
+Two things that follows from, and one it does not:
+
+- The manifest's name check and the root do different jobs. `seg-000007` is a
+  syntactically perfect name whether the entry standing there is a directory or a
+  link into somebody else's index; the first question is about the manifest's
+  bytes, the second about the filesystem.
+- The temp manifest is additionally created with `O_EXCL`, because it sits at a
+  predictable path: without it, a symlink planted at that name would be written
+  through, which is the difference between "can write in the index directory" and
+  "can overwrite any file this process can reach".
+- It is **not** a claim that the directory's contents are trustworthy. Somebody
+  who can write there can plant a whole valid segment, and weft would read it —
+  which is why every value in it is validated anyway.
 
 ## 7. Changing this format
 

@@ -186,6 +186,22 @@ func commitTiny(t *testing.T) (dir, segDir string) {
 	return dir, filepath.Join(dir, segDirName(1))
 }
 
+// makeSegDir creates a segment directory under dir and returns a root on it,
+// which is what the writer takes: every path weft writes is resolved inside a
+// root so that a symlink cannot redirect it out of the index directory.
+func makeSegDir(t *testing.T, dir, name string) *os.Root {
+	t.Helper()
+	if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	return root
+}
+
 // rewriteSection replaces one section file with handcrafted content, framed
 // and checksummed exactly as the real writer frames it.
 func rewriteSection(t *testing.T, path string, kind byte, payload func(w *segWriter)) {
@@ -197,7 +213,12 @@ func rewriteSection(t *testing.T, path string, kind byte, payload func(w *segWri
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("clearing %s: %v", path, err)
 	}
-	w, err := newSegWriter(path, kind)
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("OpenRoot(%s): %v", filepath.Dir(path), err)
+	}
+	defer root.Close()
+	w, err := newSegWriter(root, filepath.Base(path), kind)
 	if err != nil {
 		t.Fatalf("newSegWriter(%s): %v", path, err)
 	}
@@ -630,7 +651,11 @@ func FuzzSegmentDecoding(f *testing.F) {
 
 func FuzzParseSection(f *testing.F) {
 	for _, kind := range []byte{kindMeta, kindDocs, kindPostings, kindTerms, kindManifest} {
-		w, err := newSegWriter(filepath.Join(f.TempDir(), "seed"), kind)
+		root, err := os.OpenRoot(f.TempDir())
+		if err != nil {
+			f.Fatal(err)
+		}
+		w, err := newSegWriter(root, "seed", kind)
 		if err != nil {
 			f.Fatal(err)
 		}

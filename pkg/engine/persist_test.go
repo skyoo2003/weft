@@ -69,11 +69,8 @@ func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	// manifest flip.
 	orphan := New()
 	addAll(t, orphan, []Document{{Key: "ghost", Text: "the corpus that never landed"}})
-	orphanDir := filepath.Join(dir, segDirName(2))
-	if err := os.Mkdir(orphanDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := orphan.writeSegment(orphanDir); err != nil {
+	orphanRoot := makeSegDir(t, dir, segDirName(2))
+	if err := orphan.writeSegment(orphanRoot); err != nil {
 		t.Fatal(err)
 	}
 
@@ -267,6 +264,42 @@ func TestCommitDoesNotFollowASymlinkedTempManifest(t *testing.T) {
 	}
 	if string(got) != bystander {
 		t.Fatalf("Commit wrote through the symlink; the bystander now holds %q", got)
+	}
+}
+
+// TestSymlinkedSegmentIsRefused covers what the manifest's name check cannot.
+// "seg-000001" is a syntactically perfect segment name; whether the entry
+// standing there is a directory or a link to somebody else's index is a
+// question about the filesystem, not about the manifest's bytes. Every path
+// weft opens is resolved inside a root on the index directory, so the answer
+// comes from the OS rather than from a check of ours that a rename could race.
+func TestSymlinkedSegmentIsRefused(t *testing.T) {
+	// A real, valid, committed index — the thing worth stealing.
+	elsewhere, victimSeg := commitTiny(t)
+
+	// A second index directory whose manifest is honest and whose segment is a
+	// link into the first.
+	dir := t.TempDir()
+	rewriteSection(t, filepath.Join(dir, manifestName), kindManifest, func(w *segWriter) {
+		w.uvarint(1)
+		w.uvarint(1)
+		w.str(segDirName(1))
+	})
+	if err := os.Symlink(victimSeg, filepath.Join(dir, segDirName(1))); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+
+	// The link resolves and the documents behind it are readable, so a refusal
+	// below is weft declining to follow it rather than the setup not working.
+	if _, err := os.ReadFile(filepath.Join(dir, segDirName(1), docsFile)); err != nil {
+		t.Fatalf("the symlink does not lead anywhere, so this test proves nothing: %v", err)
+	}
+	if _, err := Open(elsewhere); err != nil {
+		t.Fatalf("the index being linked to is not loadable, so this test proves nothing: %v", err)
+	}
+
+	if _, err := Open(dir); err == nil {
+		t.Fatal("Open followed a symlink out of the index directory and loaded another index")
 	}
 }
 
