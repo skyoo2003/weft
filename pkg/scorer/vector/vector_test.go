@@ -43,6 +43,14 @@ func TestCosineExactValues(t *testing.T) {
 	for _, c := range cands {
 		got[c.Doc] = c.Score
 	}
+	// Checked before the scores, because reading them out of a map cannot tell
+	// "scored 0" apart from "never returned" — both give the zero value, and the
+	// orthogonal document's expected score is exactly 0. Without this, silently
+	// dropping every orthogonal document still passes, and under RRF a dropped
+	// document is a missing rank that changes the fused output.
+	if len(cands) != 4 {
+		t.Fatalf("Candidates returned %d documents, want all 4: %+v", len(cands), cands)
+	}
 
 	for _, tc := range []struct {
 		doc  engine.DocID

@@ -2,7 +2,7 @@ package engine
 
 import (
 	"cmp"
-	"sort"
+	"slices"
 )
 
 // TopK orders cands best-first and truncates to k, sorting in place and
@@ -35,14 +35,19 @@ func TopK(cands []Candidate, k int) []Candidate {
 	if k <= 0 || len(cands) == 0 {
 		return nil
 	}
-	sort.Slice(cands, func(i, j int) bool {
-		if c := cmp.Compare(cands[i].Score, cands[j].Score); c != 0 {
-			return c > 0
+	// slices.SortFunc rather than sort.Slice: same pdqsort and the same
+	// cmp.Compare semantics, but monomorphized instead of swapping through
+	// reflect. This is the one selection path every scorer and the fuser share,
+	// and text.go emits one candidate per matching document, so the candidate
+	// set is corpus-sized for a common term rather than k-sized.
+	slices.SortFunc(cands, func(a, b Candidate) int {
+		if c := cmp.Compare(b.Score, a.Score); c != 0 {
+			return c
 		}
-		return cands[i].Doc < cands[j].Doc
+		return cmp.Compare(a.Doc, b.Doc)
 	})
-	if len(cands) > k {
-		cands = cands[:k]
-	}
-	return cands
+	// Capped at k, not just sliced to it. A bare cands[:k] keeps the spare
+	// capacity, so a caller appending to the result writes over element k of the
+	// array it just handed in.
+	return cands[:min(len(cands), k):min(len(cands), k)]
 }

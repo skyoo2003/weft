@@ -53,7 +53,7 @@ Trailing columns are each scorer's rank *before* fusion.
 
 - `tfidf` leads text but lands fifth: no other scorer agreed. One scorer's confidence does not beat consensus.
 - `hnsw`, `bm25` and `ivf` are invisible to text — graph traversal found them.
-- `-` means no opinion, which costs nothing. `vector:-` is everywhere because the query had no vector; append `@ 0,1,0` and the vector scorer joins. `graph:-` on `rrf` and `tfidf` marks them as traversal seeds, which are excluded ([FINDINGS §2.3](docs/FINDINGS.md)).
+- `-` means the document is absent from that scorer's stream, for one of three reasons. No opinion, which costs nothing: `vector:-` is everywhere because the query had no vector, so append `@ 0,1,0` and the vector scorer joins. Deliberately withheld: `graph:-` on `rrf` and `tfidf` marks them as traversal seeds, which are excluded ([FINDINGS §2.3](docs/FINDINGS.md)). Or simply below the cut — every scorer is asked for `k`, so `recency:-` on `tfidf` is truncation, not abstention. Raise `-k` and it fills in.
 
 Minimal embedding: [`examples/basic`](examples/basic/main.go). Godoc example: `Example` in `pkg/engine`.
 
@@ -81,7 +81,7 @@ results, err := engine.Search(ctx, q, 10, fusion.Fuse, scorers...)
 `make arch` verifies this mechanically:
 
 - **Fusion is invariant to scorer count** — three and four scorers use the same call expression; compiling is the proof.
-- **A new scorer is cheap** — `scorer/recency` is 93 implementation lines against a 100-line budget, and `fusion/` needs no change. Whatever a scorer costs `engine` shows up in `pkg/engine/testdata/engine_api.txt`, which records member types, parameter and result types, and declaration order — everything a caller has to satisfy, and nothing that only spelling would change ([FINDINGS §1](docs/FINDINGS.md)).
+- **A new scorer is cheap** — `scorer/recency` is 99 implementation lines against a 100-line budget, and `fusion/` needs no change. Whatever a scorer costs `engine` shows up in `pkg/engine/testdata/engine_api.txt`, which records member types, parameter and result types, and declaration order — everything a caller has to satisfy, and nothing that only spelling would change ([FINDINGS §1](docs/FINDINGS.md)).
 - **Fusion cannot see scorers** — `go list -deps ./pkg/fusion` names no `scorer/*` package.
 
 The third assertion carries the weight. `Fuse` never reads `Candidate.Score`, only rank: BM25 is unbounded, cosine is `[-1,1]`, graph proximity is `(0,1]`, so comparing scores across scorers would need per-scorer normalization — and knowing how to normalize means knowing which scorer produced the score.
@@ -117,7 +117,7 @@ make run        # interactive demo
 make example    # minimal example
 ```
 
-1,019 implementation lines, 2,229 test lines, **zero external dependencies**. Go 1.26+.
+1,140 implementation lines, 2,371 test lines, **zero external dependencies**. Go 1.26+.
 
 ## Limitations
 

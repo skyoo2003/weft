@@ -54,6 +54,17 @@ func main() {
 	k := flag.Int("k", 5, "how many results to show")
 	flag.Parse()
 
+	// Search returns an empty result for k <= 0 rather than an error, so without
+	// this the demo answers every query with "no results" and exits 0.
+	if *k <= 0 {
+		fmt.Fprintf(os.Stderr, "-k must be positive, got %d\n", *k)
+		os.Exit(2)
+	}
+	if flag.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "queries are read from stdin, not arguments: %q\n", flag.Args())
+		os.Exit(2)
+	}
+
 	ix := engine.New()
 	for _, d := range corpus {
 		if _, err := ix.Add(d); err != nil {
@@ -101,8 +112,19 @@ func main() {
 func run(ix *engine.Index, scorers []engine.Scorer, q engine.Query, k int) error {
 	ctx := context.Background()
 
+	// Fuser is a parameter, so wrapping it hands back the very streams Search
+	// fused. Asking every scorer a second time to rebuild the breakdown would
+	// print a reconstruction instead of what happened — and the two can disagree
+	// the moment a scorer is not deterministic, which is the one thing this
+	// display exists to rule out. It also halves the work per query.
+	var streams [][]engine.Candidate
+	fuse := func(s [][]engine.Candidate, k int) []engine.Candidate {
+		streams = s
+		return fusion.Fuse(s, k)
+	}
+
 	// The fused ranking. Note that this call names no scorer and no count.
-	results, err := engine.Search(ctx, q, k, fusion.Fuse, scorers...)
+	results, err := engine.Search(ctx, q, k, fuse, scorers...)
 	if err != nil {
 		return err
 	}
@@ -111,13 +133,9 @@ func run(ix *engine.Index, scorers []engine.Scorer, q engine.Query, k int) error
 		return nil
 	}
 
-	// Each scorer is asked again on its own, purely so the breakdown can show
-	// where each document placed before fusion.
 	breakdown := make([]map[engine.DocID]int, len(scorers))
-	for i, s := range scorers {
-		if breakdown[i], err = ranksOf(ctx, s, q, k); err != nil {
-			return err
-		}
+	for i, stream := range streams {
+		breakdown[i] = ranksOf(stream)
 	}
 
 	for rank, c := range results {
@@ -132,20 +150,23 @@ func run(ix *engine.Index, scorers []engine.Scorer, q engine.Query, k int) error
 	return nil
 }
 
-// ranksOf maps each document a scorer returned to its 1-based position.
-func ranksOf(ctx context.Context, s engine.Scorer, q engine.Query, k int) (map[engine.DocID]int, error) {
-	cands, err := s.Candidates(ctx, q, k)
-	if err != nil {
-		return nil, fmt.Errorf("scorer %s: %w", s.Name(), err)
-	}
-	ranks := make(map[engine.DocID]int, len(cands))
-	for i, c := range cands {
+// ranksOf maps each document in one scorer's stream to its 1-based position.
+func ranksOf(stream []engine.Candidate) map[engine.DocID]int {
+	ranks := make(map[engine.DocID]int, len(stream))
+	for i, c := range stream {
 		ranks[c.Doc] = i + 1
 	}
-	return ranks, nil
+	return ranks
 }
 
-// place renders a rank, or a dash for a scorer that did not return the document.
+// place renders a rank, or a dash for a document absent from that scorer's
+// stream.
+//
+// A dash is not the same as "no opinion". Every scorer is asked for k, so a
+// scorer that ranks the whole corpus — recency does — shows a dash for anything
+// below its own top k. Raise -k and the dashes fill in. Only a scorer with
+// nothing to say at all, like vector on a query carrying no vector, is dashed
+// the whole way down.
 func place(rank int) string {
 	if rank == 0 {
 		return "-"

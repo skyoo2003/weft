@@ -15,6 +15,14 @@ var (
 	// Candidates on it would panic, and skipping it would quietly rank without a
 	// signal the caller believes is switched on — a scorer list assembled at
 	// runtime is exactly where an optional scorer goes missing.
+	//
+	// It catches a nil interface value, not a non-nil interface holding a nil
+	// pointer. `var s *text.Scorer` assigned into a Scorer slot is not == nil —
+	// the interface carries a type descriptor — so it still panics inside
+	// Candidates. Detecting that needs reflect, which is a heavy import for a
+	// leaf package to carry for a caller bug that fails loudly on the first
+	// query rather than corrupting a ranking. Construct optional scorers into
+	// the slice conditionally rather than pre-declaring a typed nil.
 	ErrNilScorer = errors.New("engine: nil Scorer")
 )
 
@@ -49,16 +57,19 @@ func Search(ctx context.Context, q Query, k int, fuse Fuser, scorers ...Scorer) 
 	if fuse == nil {
 		return nil, ErrNoFuser
 	}
-	if k <= 0 {
-		return nil, nil
-	}
 	// Checked before any scorer runs, for the same reason the fuser is: a caller
 	// that misconfigured its scorer list should not pay for three full corpus
-	// scans before hearing about it.
+	// scans before hearing about it. And before the k check below, for the same
+	// reason again: a nil scorer is a configuration mistake whatever k happens
+	// to be, so a caller computing k dynamically must not have it hidden until
+	// the first time k goes positive.
 	for i, s := range scorers {
 		if s == nil {
 			return nil, fmt.Errorf("scorer %d: %w", i, ErrNilScorer)
 		}
+	}
+	if k <= 0 {
+		return nil, nil
 	}
 
 	// ponytail: scorers run sequentially. Fan out with goroutines when one slow
@@ -72,6 +83,15 @@ func Search(ctx context.Context, q Query, k int, fuse Fuser, scorers ...Scorer) 
 			return nil, fmt.Errorf("scorer %s: %w", s.Name(), err)
 		}
 		streams = append(streams, cands)
+	}
+
+	// Every scorer checks this before its own TopK, so that a cancellation
+	// arriving after its last poll does not buy an O(n log n) sort nobody reads.
+	// Fusion does the same shape of work — a map aggregation across every stream
+	// and another sort — and Fuser takes no context, so it cannot check for
+	// itself. This is the only place it can happen.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// ponytail: each scorer is asked for exactly k. Over-fetching (asking for

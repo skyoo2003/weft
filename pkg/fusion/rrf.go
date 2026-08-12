@@ -28,12 +28,13 @@ const RRFk = 60.0
 // There is deliberately no scorer count, no scorer identity, and no branch on
 // either. A switch on scorer name appearing in this file is the hypothesis
 // failing.
+// Empty streams, no streams and a non-positive k all fall through to TopK,
+// which already returns nil for each — guarding them here would be three copies
+// of an invariant this package does not own.
 func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
-	if k <= 0 || len(streams) == 0 {
-		return nil
-	}
-
-	fused := make(map[engine.DocID]float64)
+	// Every stream is at most k long, so this is an upper bound rather than a
+	// guess, and it is small.
+	fused := make(map[engine.DocID]float64, max(k, 0)*len(streams))
 	for _, stream := range streams {
 		for i, c := range stream {
 			// Note what is absent: c.Score is never read. Position is
@@ -41,9 +42,6 @@ func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
 			rank := float64(i + 1)
 			fused[c.Doc] += 1 / (RRFk + rank)
 		}
-	}
-	if len(fused) == 0 {
-		return nil
 	}
 
 	cands := make([]engine.Candidate, 0, len(fused))

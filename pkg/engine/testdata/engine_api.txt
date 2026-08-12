@@ -32,6 +32,7 @@ field Query.Seeds []string
 type Scorer interface
 method Scorer.Name() string
 method Scorer.Candidates(context.Context, Query, int) ([]Candidate, error)
+var ErrDimMismatch
 var ErrDuplicateKey
 var ErrEmptyKey
 var ErrNilScorer

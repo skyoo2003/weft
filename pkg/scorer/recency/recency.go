@@ -20,7 +20,8 @@ import (
 // halves again.
 const HalfLife = 30 * 24 * time.Hour
 
-// Scorer ranks documents by exponential decay of age.
+// Scorer ranks documents by harmonic decay of age, 1/(1 + age/HalfLife). Not
+// exponential — see Candidates for why 2^(-age/HalfLife) was rejected.
 type Scorer struct {
 	ix  *engine.Index
 	now func() time.Time
@@ -70,7 +71,12 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		// and subtracting Unix seconds before widening wraps for a sufficiently
 		// old timestamp, whereupon the guard below reads the negative as a future
 		// date and scores the oldest document brand new. Widening first cannot
-		// overflow and is exact to the nanosecond for about 285 million years.
+		// overflow, and stays exact to the second for about 285 million years —
+		// to the second, not the nanosecond. float64 carries 53 bits, so the ulp
+		// of an age in seconds passes 1 ns at ~104 days old and 1 µs at ~285
+		// years; closer than that, scores tie and TopK's DocID tiebreak puts the
+		// older document first. Inherent to seconds-as-float64, not to this
+		// expression, and orders of magnitude past where the exponential broke.
 		age := (float64(now.Unix()) - float64(d.Time.Unix())) +
 			float64(now.Nanosecond()-d.Time.Nanosecond())/1e9
 		if age < 0 {

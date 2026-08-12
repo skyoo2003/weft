@@ -4,14 +4,14 @@
 
 | Package | Implementation | Tests |
 |---|---|---|
-| `pkg/engine` | 436 | 967 |
-| `pkg/fusion` | 54 | 138 |
-| `pkg/scorer/text` | 131 | 291 |
-| `pkg/scorer/vector` | 127 | 242 |
-| `pkg/scorer/graph` | 178 | 389 |
-| `pkg/scorer/recency` | **93** | 202 |
+| `pkg/engine` | 506 | 1026 |
+| `pkg/fusion` | 52 | 138 |
+| `pkg/scorer/text` | 141 | 296 |
+| `pkg/scorer/vector` | 134 | 250 |
+| `pkg/scorer/graph` | 208 | 423 |
+| `pkg/scorer/recency` | **99** | 238 |
 
-1,019 implementation lines, 2,229 test lines, zero external dependencies.
+1,140 implementation lines, 2,371 test lines, zero external dependencies.
 
 ---
 

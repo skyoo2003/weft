@@ -8,8 +8,10 @@ build:
 vet:
 	go vet ./...
 
+# -race by default: scorer/text has a concurrent-writer test that only means
+# anything under the detector, and there is no CI to run it anywhere else.
 test:
-	go test ./...
+	go test -race ./...
 
 # The milestone 1 pass/fail line: fusion is invariant to scorer count, a fourth
 # scorer costs under 100 lines, and fusion cannot see any scorer.
@@ -19,9 +21,9 @@ arch:
 # The two architecture properties cheap enough to check by hand.
 deps:
 	@echo "--- external dependencies (want: this module and nothing else) ---"
-	@go list -m all
+	@GOWORK=off go list -m all
 	@echo "--- what fusion can see (want: nothing named scorer) ---"
-	@if go list -deps ./pkg/fusion | grep '/scorer/'; then \
+	@if GOWORK=off go list -deps ./pkg/fusion | grep '/scorer/'; then \
 		echo "FAIL: fusion imports a scorer package"; exit 1; \
 	else \
 		echo "OK: fusion imports no scorer package"; \

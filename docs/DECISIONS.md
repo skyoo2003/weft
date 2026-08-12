@@ -111,4 +111,6 @@ Do not schedule either. Add the measurement to milestone 5's load test so the ev
 
 ### Action now
 
-One comment edit: `pkg/engine/topk.go` records the size trigger but not the cursor-interface dependency, which makes it the one marker that could be repaid at the wrong time. Everything else stands as written.
+None outstanding. The one comment edit this decision called for — `pkg/engine/topk.go` recording the cursor-interface dependency alongside the size trigger, which made it the marker most likely to be repaid at the wrong time — has landed. Everything else stands as written.
+
+Two markers were added afterwards, both scale-gated and both blocking the sequential-execution item above: `scorer/text` and `scorer/graph` take the index-wide read lock once per posting and once per link, so fanning scorers out with goroutines as things stand loses throughput rather than gaining it. Batch the reads first.

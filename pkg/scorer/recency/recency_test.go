@@ -85,14 +85,22 @@ func TestVeryOldDocumentsStayOrdered(t *testing.T) {
 
 func TestFutureTimestampsCapAtOne(t *testing.T) {
 	// A clock-skewed document must not outrank a genuinely new one.
-	ix := index(t, -365*24*time.Hour, 0)
-	cands, err := NewAt(ix, refNow).Candidates(t.Context(), engine.Query{}, 10)
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	for _, c := range cands {
-		if c.Score > 1 {
-			t.Fatalf("doc %d scored %v, want <= 1", c.Doc, c.Score)
+	//
+	// The future ages here are all inside one half-life, which is the only range
+	// where dropping the clamp is visible. Past a half-life the unclamped score
+	// goes negative and sorts to the bottom, so a year-in-the-future fixture
+	// asserts nothing: -HalfLife lands exactly on the +Inf pole, and half of it
+	// scores 2.0 and takes an unbeatable rank 1.
+	for _, skew := range []time.Duration{time.Second, HalfLife / 2, HalfLife, HalfLife + time.Second} {
+		ix := index(t, -skew, 0)
+		cands, err := NewAt(ix, refNow).Candidates(t.Context(), engine.Query{}, 10)
+		if err != nil {
+			t.Fatalf("skew %v: Candidates: %v", skew, err)
+		}
+		for _, c := range cands {
+			if !(c.Score <= 1) { // !(<=1) rather than >1, so a NaN fails too.
+				t.Fatalf("skew %v: doc %d scored %v, want <= 1", skew, c.Doc, c.Score)
+			}
 		}
 	}
 }
@@ -140,9 +148,37 @@ func TestCancelledContext(t *testing.T) {
 }
 
 func TestNewUsesTheWallClock(t *testing.T) {
-	// New must differ from NewAt only in where the clock comes from.
-	if got := New(index(t, 0)).Name(); got != "recency" {
+	// New must differ from NewAt only in where the clock comes from, so this has
+	// to score against real time rather than just check Name(). New is the only
+	// constructor a caller outside a test would reach for, and asserting on the
+	// name alone never invokes the clock at all: swapping time.Now for anything
+	// else, a zero Time included, passed the whole suite.
+	now := time.Now()
+	ix := engine.New()
+	for key, stamp := range map[string]time.Time{"fresh": now, "stale": now.Add(-10 * HalfLife)} {
+		if _, err := ix.Add(engine.Document{Key: key, Time: stamp}); err != nil {
+			t.Fatalf("Add(%q): %v", key, err)
+		}
+	}
+	s := New(ix)
+	if got := s.Name(); got != "recency" {
 		t.Fatalf("Name() = %q", got)
+	}
+	cands, err := s.Candidates(t.Context(), engine.Query{}, 10)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(cands) != 2 {
+		t.Fatalf("Candidates = %+v, want two", cands)
+	}
+	// The spread is what pins the clock. Asserting only that the fresh document
+	// scores ~1 would also pass for a clock stuck at the zero Time, which reads
+	// every document as future-dated and clamps them all to 1.
+	if cands[0].Score < 0.999 {
+		t.Errorf("freshest document scored %v against the wall clock, want ~1", cands[0].Score)
+	}
+	if cands[1].Score > 0.1 {
+		t.Errorf("a document ten half-lives old scored %v, want well under 1 — the clock is not moving", cands[1].Score)
 	}
 }
 

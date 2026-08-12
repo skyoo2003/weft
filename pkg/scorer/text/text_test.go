@@ -172,10 +172,13 @@ func (c *cancelAfter) Err() error {
 }
 
 func TestCancellationIsObservedInsideThePostingScan(t *testing.T) {
-	// One term, one posting list longer than the poll interval. n = 2 spends the
-	// free calls on the per-term check and the i == 0 poll, so the cancellation
-	// lands on the i == 1024 poll — inside the scan, which is the only place the
-	// old code had no check at all.
+	// One term, one posting list longer than the poll interval. The three free
+	// calls are the pre-tokenize check, the per-term check and the i == 0 poll,
+	// so the cancellation lands on the i == 1024 poll — inside the scan, which is
+	// the only place the old code had no check at all. The count must include the
+	// pre-tokenize check: while it did not, deleting the entire posting poll left
+	// this test green, because the cancellation fell through to the guard before
+	// TopK instead.
 	ix := engine.New()
 	for i := range 3000 {
 		if _, err := ix.Add(engine.Document{Key: fmt.Sprintf("d%d", i), Text: "go"}); err != nil {
@@ -183,7 +186,7 @@ func TestCancellationIsObservedInsideThePostingScan(t *testing.T) {
 		}
 	}
 
-	ctx := &cancelAfter{Context: t.Context(), n: 2}
+	ctx := &cancelAfter{Context: t.Context(), n: 3}
 	got, err := New(ix).Candidates(ctx, engine.Query{Text: "go"}, 10)
 	if err == nil {
 		t.Fatalf("Candidates returned %d results and no error after mid-scan cancellation", len(got))
@@ -272,15 +275,17 @@ func TestCancellationIsObservedBeforeTokenizing(t *testing.T) {
 }
 
 func TestCancellationArrivingAfterTheLastPostingIsObserved(t *testing.T) {
-	// One term over a one-document corpus, so the calls are countable: one for
-	// the per-term check and one for the i == 0 poll. Cancellation lands on the
-	// third, the check guarding TopK — the window between the last posting and
-	// the sort, which no earlier check covers.
+	// One term over a one-document corpus, so the calls are countable: the
+	// pre-tokenize check, the per-term check and the i == 0 poll. Cancellation
+	// lands on the fourth, the check guarding TopK — the window between the last
+	// posting and the sort, which no earlier check covers. The count must include
+	// the pre-tokenize check, or the cancellation lands one check early and
+	// deleting the pre-TopK guard leaves this green.
 	ix := engine.New()
 	if _, err := ix.Add(engine.Document{Key: "a", Text: "go"}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	ctx := &cancelAfter{Context: t.Context(), n: 2}
+	ctx := &cancelAfter{Context: t.Context(), n: 3}
 	got, err := New(ix).Candidates(ctx, engine.Query{Text: "go"}, 10)
 	if err == nil {
 		t.Fatalf("Candidates returned %+v and no error after cancellation before the sort", got)

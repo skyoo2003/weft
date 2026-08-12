@@ -21,6 +21,17 @@ var (
 	// can sort above a document scoring 0.9, and fusion then turns that into a
 	// plausible-looking result. Failing here means it cannot happen at all.
 	ErrNonFiniteVector = errors.New("engine: vector has a non-finite component")
+
+	// ErrDimMismatch rejects a vector whose width differs from the width the
+	// corpus already established. Mixed widths mean mixed embedding models, and
+	// the write path is the only place that can be reported to the party able to
+	// fix it: caught here it is one rejected Add, caught at query time it is
+	// every vector query failing forever — and because Search aborts on the
+	// first scorer error, taking every other scorer's results down with it.
+	//
+	// A document with no vector is not a mismatch; it just has no opinion for
+	// the vector scorer to read.
+	ErrDimMismatch = errors.New("engine: vector width differs from the corpus")
 )
 
 // Posting is one document's occurrence count for one term.
@@ -48,6 +59,8 @@ type Index struct {
 	postings map[string][]Posting // term -> postings, ascending DocID
 	docLen   []int                // token count per DocID, for BM25 normalization
 	totalLen int
+
+	vecDim int // width of the first non-empty vector added; 0 until one is
 }
 
 // New returns an empty index.
@@ -62,7 +75,7 @@ func New() *Index {
 //
 // It lives in engine rather than in scorer/text because Add has to tokenize to
 // build the postings, and engine importing scorer/text would wreck the whole
-// dependency story. Morphological analysis is out of scope (PRD), and CJK runs
+// dependency story. Morphological analysis is out of scope, and CJK runs
 // stay glued into one token here — a known wrong answer that milestone 1 does
 // not need to be right about.
 func Tokenize(s string) []string {
@@ -79,18 +92,38 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	if d.Key == "" {
 		return 0, ErrEmptyKey
 	}
+
+	// Store copies of the slice-backed fields. Appending d would copy only the
+	// slice headers, leaving the index pointing at the caller's arrays: reusing
+	// a scratch buffer across Add calls would then silently rewrite documents
+	// already indexed, and mutating one concurrently would race past ix.mu.
+	//
+	// The clone comes before the checks below, not after, and the checks read
+	// the clone. Validating the caller's array and then copying it is two reads
+	// of memory this package does not own, so the bytes that were checked are
+	// not the bytes that get stored: a caller mutating its buffer in between
+	// lands a NaN in the index, which is exactly what ErrNonFiniteVector
+	// promises cannot happen — and scorer/vector builds on that promise by not
+	// re-checking document vectors.
+	d.Vector = slices.Clone(d.Vector)
+	d.Links = slices.Clone(d.Links)
+
 	for i, c := range d.Vector {
 		if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
 			return 0, fmt.Errorf("add %q: vector component %d is %v: %w", d.Key, i, c, ErrNonFiniteVector)
 		}
 	}
 
-	// Store copies of the slice-backed fields. Appending d would copy only the
-	// slice headers, leaving the index pointing at the caller's arrays: reusing
-	// a scratch buffer across Add calls would then silently rewrite documents
-	// already indexed, and mutating one concurrently would race past ix.mu.
-	d.Vector = slices.Clone(d.Vector)
-	d.Links = slices.Clone(d.Links)
+	// Tokenizing outside the lock. It is the dominant cost of Add — a 1 MB
+	// document spends ~92% of its Add here — and it reads only d.Text, a local
+	// copy of the caller's value, so holding the exclusive lock across it just
+	// stalls every reader for the duration. A duplicate key wastes the work,
+	// which is the error path.
+	toks := Tokenize(d.Text)
+	freq := make(map[string]int, len(toks))
+	for _, t := range toks {
+		freq[t]++
+	}
 
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -109,15 +142,27 @@ func (ix *Index) Add(d Document) (DocID, error) {
 		return 0, fmt.Errorf("add %q: %w", d.Key, ErrDuplicateKey)
 	}
 
+	if len(d.Vector) > 0 {
+		if ix.vecDim == 0 {
+			ix.vecDim = len(d.Vector)
+		} else if len(d.Vector) != ix.vecDim {
+			return 0, fmt.Errorf("add %q: vector has %d dims, corpus has %d: %w",
+				d.Key, len(d.Vector), ix.vecDim, ErrDimMismatch)
+		}
+	}
+
+	// DocID is uint32, so this conversion truncates silently past 2^32
+	// documents: the id wraps to 0 and every posting, key and link written
+	// afterwards addresses document 0 instead. Doc and DocLen already compare
+	// their bounds in uint64 to avoid the mirror image of this; refusing the Add
+	// is the same choice on the write side, and Add already returns an error.
+	if len(ix.docs) > math.MaxUint32 {
+		return 0, fmt.Errorf("add %q: index is full at %d documents", d.Key, uint64(math.MaxUint32)+1)
+	}
 	id := DocID(len(ix.docs))
 	ix.docs = append(ix.docs, d)
 	ix.byKey[d.Key] = id
 
-	toks := Tokenize(d.Text)
-	freq := make(map[string]int, len(toks))
-	for _, t := range toks {
-		freq[t]++
-	}
 	// IDs only ever increase, so appending keeps every posting list sorted by
 	// DocID for free.
 	for t, f := range freq {

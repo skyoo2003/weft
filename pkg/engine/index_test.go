@@ -220,6 +220,42 @@ func TestSearchRejectsNilScorer(t *testing.T) {
 	}
 }
 
+func TestSearchRejectsNilScorerWhateverKIs(t *testing.T) {
+	// A nil entry is a configuration mistake, not a query that found nothing, so
+	// it has to surface independently of k. While the k check ran first, a caller
+	// computing k dynamically — a page size, a limit parameter — got a silent
+	// empty result until the first time k went positive, in production.
+	fuse := func(streams [][]Candidate, k int) []Candidate { return nil }
+	for _, k := range []int{0, -1} {
+		if _, err := Search(t.Context(), Query{}, k, fuse, nil); !errors.Is(err, ErrNilScorer) {
+			t.Errorf("Search with k=%d and a nil Scorer err = %v, want ErrNilScorer", k, err)
+		}
+	}
+}
+
+func TestSearchObservesCancellationBeforeFusing(t *testing.T) {
+	// Every scorer checks the context before its own TopK so a late cancellation
+	// does not buy a sort nobody reads. Fusion does the same shape of work and
+	// Fuser takes no context, so Search is the only place that check can live.
+	fused := false
+	fuse := func(streams [][]Candidate, k int) []Candidate {
+		fused = true
+		return nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	// Cancelled after the scorer runs, so the scorers themselves see a live
+	// context and only the window before fusion is left.
+	s := scorerFunc(cancel)
+
+	_, err := Search(ctx, Query{}, 5, fuse, s)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Search err = %v, want context.Canceled", err)
+	}
+	if fused {
+		t.Error("the fuser ran after the context was cancelled")
+	}
+}
+
 // scorerFunc is a Scorer with no opinion that records having been asked.
 type scorerFunc func()
 
@@ -277,6 +313,29 @@ func TestAddRejectsNonFiniteVectors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAddRejectsMixedVectorWidths(t *testing.T) {
+	// A stale embedding is a write-time mistake, and the write path is the only
+	// place it can be reported to whoever can fix it. Left to query time it is
+	// not one bad document: scorer/vector errors on the first mismatch it scans,
+	// so every vector query fails forever, and because Search aborts on the first
+	// scorer error, text, graph and recency return nothing either.
+	ix := New()
+	mustAdd(t, ix, Document{Key: "a", Vector: []float32{1, 0, 0}})
+
+	// No vector at all is not a mismatch, just no opinion for the vector scorer.
+	mustAdd(t, ix, Document{Key: "textonly", Text: "no vector here"})
+
+	_, err := ix.Add(Document{Key: "stale", Vector: []float32{1, 0}})
+	if !errors.Is(err, ErrDimMismatch) {
+		t.Fatalf("err = %v, want ErrDimMismatch", err)
+	}
+	if ix.Len() != 2 {
+		t.Fatalf("Len() = %d, want 2 — the rejected document was stored anyway", ix.Len())
+	}
+	// The width survives the rejection, so the next correct Add still works.
+	mustAdd(t, ix, Document{Key: "b", Vector: []float32{0, 1, 0}})
 }
 
 func TestAddCopiesSliceFields(t *testing.T) {

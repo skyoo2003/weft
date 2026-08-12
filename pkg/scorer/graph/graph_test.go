@@ -169,12 +169,22 @@ func TestMaxDepthBounds(t *testing.T) {
 		node{"n3", []string{"n4"}},
 		node{"n4", nil},
 	)
+	// The expectation is written out rather than derived from MaxDepth. Comparing
+	// the result against the constant under test makes any value self-validating:
+	// at MaxDepth = 2 this fixture returns 2 documents and a derived assertion
+	// still passes, so halving the traversal's reach would go unnoticed.
+	want := map[engine.DocID]float64{1: 1.0 / 2, 2: 1.0 / 3, 3: 1.0 / 4}
 	got := scores(t, New(ix, nil), engine.Query{Seeds: []string{"n0"}}, 10)
-	if len(got) != MaxDepth {
-		t.Fatalf("got %d docs, want %d (MaxDepth=%d, seed excluded)", len(got), MaxDepth, MaxDepth)
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v (MaxDepth=%d, seed excluded)", got, want, MaxDepth)
 	}
-	if _, ok := got[engine.DocID(MaxDepth+1)]; ok {
-		t.Fatalf("the node at %d hops was included, MaxDepth is %d", MaxDepth+1, MaxDepth)
+	for id, score := range want {
+		if got[id] != score {
+			t.Fatalf("doc %d scored %v, want %v — full result %v", id, got[id], score, got)
+		}
+	}
+	if _, ok := got[4]; ok {
+		t.Fatalf("n4 sits four hops out and was included, MaxDepth is %d: %v", MaxDepth, got)
 	}
 }
 
@@ -257,6 +267,25 @@ func TestQuerySeedsOverrideSeedScorer(t *testing.T) {
 	}
 }
 
+func TestSeedScorerDocIDsAreCheckedAgainstThisIndex(t *testing.T) {
+	// A DocID means nothing outside the index that assigned it, so a seed scorer
+	// reading a different index hands back ids from another namespace. The
+	// traversal's own Doc miss only skips expansion — the id stays in dist at hop
+	// zero — so without this check NewIncludingSeeds emits a document that does
+	// not exist at score 1.0, the top rank, and every caller that ignores Doc's
+	// bool prints it as a blank row.
+	ix := index(t, node{"a", []string{"b"}}, node{"b", nil})
+	seed := stub{cands: []engine.Candidate{{Doc: 0}, {Doc: 9999}}}
+
+	for name, s := range map[string]*Scorer{"New": New(ix, seed), "NewIncludingSeeds": NewIncludingSeeds(ix, seed)} {
+		for id := range scores(t, s, engine.Query{Text: "anything"}, 10) {
+			if _, ok := ix.Doc(id); !ok {
+				t.Errorf("%s returned doc %d, which this index never assigned", name, id)
+			}
+		}
+	}
+}
+
 func TestSeedScorerErrorIsWrapped(t *testing.T) {
 	boom := errors.New("boom")
 	ix := index(t, node{"a", nil})
@@ -327,16 +356,19 @@ func (c *cancelAfter) Err() error {
 func TestCancellationIsObservedInsideTheLinkScan(t *testing.T) {
 	// One seed whose links are both numerous and dangling: nothing is enqueued,
 	// so the queue ends after a single node and the per-node check never runs a
-	// second time. n = 2 spends the free calls on that check and the i == 0
-	// poll, putting the cancellation on the i == 1024 poll — inside the scan,
-	// which is the only place the old code had no check at all.
+	// second time. The three free calls are seedDocs' i == 0 poll, the per-node
+	// check, and the link scan's i == 0 poll, which puts the cancellation on the
+	// i == 1024 poll — inside the scan, the only place the old code had no check
+	// at all. The count must include seedDocs: while it did not, deleting the
+	// entire link-scan poll left this test green, because the cancellation fell
+	// through to the guard before TopK instead.
 	links := make([]string, 3000)
 	for i := range links {
 		links[i] = fmt.Sprintf("nowhere%d", i)
 	}
 	ix := index(t, node{"a", links})
 
-	ctx := &cancelAfter{Context: t.Context(), n: 2}
+	ctx := &cancelAfter{Context: t.Context(), n: 4}
 	got, err := New(ix, nil).Candidates(ctx, engine.Query{Seeds: []string{"a"}}, 10)
 	if err == nil {
 		t.Fatalf("Candidates returned %d results and no error after mid-scan cancellation", len(got))
@@ -365,18 +397,20 @@ func TestCancellationIsObservedWhileResolvingExplicitSeeds(t *testing.T) {
 }
 
 func TestCancellationArrivingAfterTheLastNodeIsObserved(t *testing.T) {
-	// An explicit seed with one link, so the calls are countable: one per-dequeue
-	// check for the seed, one i == 0 poll over its single link, and one more
-	// per-dequeue check for the node that link reached. Cancellation lands on the
-	// fourth, the check guarding TopK — the window between the last node and the
-	// sort, which no earlier check covers.
+	// An explicit seed with one link, so the calls are countable: seedDocs' i == 0
+	// poll, one per-dequeue check for the seed, one i == 0 poll over its single
+	// link, and one more per-dequeue check for the node that link reached.
+	// Cancellation lands on the fifth, the check guarding TopK — the window
+	// between the last node and the sort, which no earlier check covers. The
+	// count must include seedDocs, or the cancellation lands one check early and
+	// deleting the pre-TopK guard leaves this green.
 	ix := engine.New()
 	for _, d := range []engine.Document{{Key: "a", Links: []string{"b"}}, {Key: "b"}} {
 		if _, err := ix.Add(d); err != nil {
 			t.Fatalf("Add(%q): %v", d.Key, err)
 		}
 	}
-	ctx := &cancelAfter{Context: t.Context(), n: 3}
+	ctx := &cancelAfter{Context: t.Context(), n: 4}
 	got, err := New(ix, nil).Candidates(ctx, engine.Query{Seeds: []string{"a"}}, 10)
 	if err == nil {
 		t.Fatalf("Candidates returned %+v and no error after cancellation before the sort", got)

@@ -1,7 +1,7 @@
 // Package vector ranks documents by cosine similarity to Query.Vector.
 //
-// Embeddings are supplied by the caller (PRD: model inference is out of scope).
-// This package only compares vectors it is handed.
+// Embeddings are supplied by the caller: generating them is out of scope for
+// weft, so this package only compares vectors it is handed.
 package vector
 
 import (
@@ -35,6 +35,13 @@ func (s *Scorer) Name() string { return "vector" }
 // — building an approximate index before the architecture is proven would mean
 // optimizing a structure that may not survive.
 func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
+	// Before the early return, not after. A text-only query gives this scorer no
+	// opinion, and returning that as a success on a context that was already
+	// dead makes a blown deadline indistinguishable from an honest miss — which
+	// then propagates, since graph.seedDocs can be reading this scorer.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if k <= 0 || len(q.Vector) == 0 {
 		return nil, nil
 	}

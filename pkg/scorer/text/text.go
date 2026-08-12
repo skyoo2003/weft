@@ -74,7 +74,11 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 
 	// Duplicate query terms are summed twice, which is the formula taken
 	// literally: the sum is over occurrences in Q, not over the distinct set.
-	acc := make(map[engine.DocID]float64)
+	//
+	// Sized to the corpus rather than grown from nothing: one common term
+	// produces one entry per matching document, so an unhinted map re-buckets
+	// its way up through every doubling on exactly the queries that cost most.
+	acc := make(map[engine.DocID]float64, docs)
 	for _, term := range terms {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -107,6 +111,12 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 			f := float64(p.Freq)
 			// avgdl == 0 means every document is empty, so there is nothing to
 			// normalize against; norm stays 1 rather than dividing by zero.
+			//
+			// ponytail: DocLen takes the index-wide RLock once per posting, so a
+			// million-posting term is a million lock acquisitions and the scan
+			// gets slower as cores are added. Batch it — a length snapshot read
+			// under one lock, the same aliasing contract Lookup already has —
+			// when scorer throughput is measured rather than assumed.
 			norm := 1.0
 			if avgdl > 0 {
 				norm = 1 - B + B*float64(s.ix.DocLen(p.Doc))/avgdl

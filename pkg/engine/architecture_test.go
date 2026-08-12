@@ -446,7 +446,7 @@ func TestGoListDepsProvesFusionIgnorance(t *testing.T) {
 }
 
 func TestNoExternalDependencies(t *testing.T) {
-	// The PRD's operational metric: `go list -m all` prints this module and
+	// The operational metric: `go list -m all` prints this module and
 	// nothing else.
 	mods := goList(t, "-m", "all")
 	if len(mods) != 1 || mods[0] != modulePath {

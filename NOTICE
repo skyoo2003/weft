@@ -59,7 +59,7 @@ implements algorithms they describe, and attribution is the honest thing to do.
     "Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning
     Methods." SIGIR '09.
 
-    BM25 (pkg/signal/text)
+    BM25 (pkg/scorer/text)
     Robertson, S. E., & Zaragoza, H. (2009).
     "The Probabilistic Relevance Framework: BM25 and Beyond."
     Foundations and Trends in Information Retrieval, 3(4).

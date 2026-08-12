@@ -50,6 +50,13 @@ func New(ix *engine.Index, seed engine.Scorer) *Scorer {
 // reason: milestone 4 has to measure whether graph proximity improves nDCG, and
 // that measurement is only trustworthy if both variants can be run over the same
 // query set. Prefer New everywhere else.
+//
+// Read the measurement carefully: every seed scores exactly 1.0, so TopK's tie
+// break puts them in DocID order, not the order the seed scorer ranked them.
+// This arm therefore measures the seed set getting a second vote, not the seed
+// scorer's ranking getting one. At k <= SeedN it is only seeds — hop-1 at 0.5
+// never outsorts a seed at 1.0 — so the traversal contributes nothing at the
+// demo's default k of 5.
 func NewIncludingSeeds(ix *engine.Index, seed engine.Scorer) *Scorer {
 	return &Scorer{ix: ix, seed: seed, includeSeeds: true}
 }
@@ -110,6 +117,11 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 					return nil, err
 				}
 			}
+			// ponytail: Resolve takes the index-wide RLock once per link, so a
+			// high-degree traversal loses throughput as cores are added rather
+			// than gaining it. Snapshot byKey once per query before fanning
+			// scorers out with goroutines — the batching is a prerequisite for
+			// that parallelism, not an independent optimization.
 			next, ok := s.ix.Resolve(key)
 			if !ok {
 				continue // Dangling link: a Key that was never added.
@@ -164,15 +176,33 @@ func (s *Scorer) seedDocs(ctx context.Context, q engine.Query) ([]engine.DocID, 
 		return ids, nil
 	}
 	if s.seed == nil {
-		return nil, nil
+		// The nil-seed branch still has to answer for the context. Without this
+		// it is the one path out of Candidates that reports a cancelled query as
+		// a successful "no opinion": len(seeds) == 0 short-circuits above the
+		// traversal, so the pre-TopK check never runs either.
+		//
+		// Note this catches a nil interface, not a non-nil interface holding a
+		// nil pointer — `var s *text.Scorer` passed to New still panics here.
+		// Same trade-off as engine.ErrNilScorer; build the seed into the call
+		// conditionally rather than pre-declaring a typed nil.
+		return nil, ctx.Err()
 	}
 	cands, err := s.seed.Candidates(ctx, q, SeedN)
 	if err != nil {
 		return nil, fmt.Errorf("seed scorer %s: %w", s.seed.Name(), err)
 	}
-	ids := make([]engine.DocID, len(cands))
-	for i, c := range cands {
-		ids[i] = c.Doc
+	// The seed scorer's DocIDs are checked against this index before they are
+	// trusted. A DocID means nothing outside the index that assigned it, and a
+	// seed scorer reading a different index hands back ids from another
+	// namespace. The traversal's own s.ix.Doc(cur) miss only skips expansion —
+	// the id stays in dist at hop 0, so NewIncludingSeeds would emit a document
+	// that does not exist at score 1.0, the top rank, and every consumer that
+	// ignores Doc's bool prints it as a blank row.
+	ids := make([]engine.DocID, 0, len(cands))
+	for _, c := range cands {
+		if _, ok := s.ix.Doc(c.Doc); ok {
+			ids = append(ids, c.Doc)
+		}
 	}
 	return ids, nil
 }
