@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -79,4 +80,50 @@ func Example() {
 	// 1. rrf
 	// 2. bm25
 	// 3. hnsw
+}
+
+// ExampleIndex_Commit is the persistence round trip: commit, restart, search.
+// Open returns an ordinary Index — scorers built on it neither know nor care
+// that it came from disk.
+func ExampleIndex_Commit() {
+	dir, err := os.MkdirTemp("", "weft-example")
+	if err != nil {
+		fmt.Println("tempdir:", err)
+		return
+	}
+	defer os.RemoveAll(dir)
+
+	ix := engine.New()
+	for _, d := range []engine.Document{
+		{Key: "weft", Text: "the thread that crosses and binds the warp"},
+		{Key: "warp", Text: "the threads a weft crosses"},
+	} {
+		if _, err := ix.Add(d); err != nil {
+			fmt.Println("add:", err)
+			return
+		}
+	}
+	if err := ix.Commit(dir); err != nil {
+		fmt.Println("commit:", err)
+		return
+	}
+
+	// The restart: everything above is gone, only dir remains.
+	restored, err := engine.Open(dir)
+	if err != nil {
+		fmt.Println("open:", err)
+		return
+	}
+
+	results, err := engine.Search(context.Background(),
+		engine.Query{Text: "crosses binds"}, 1, fusion.Fuse, text.New(restored))
+	if err != nil {
+		fmt.Println("search:", err)
+		return
+	}
+	d, _ := restored.Doc(results[0].Doc)
+	fmt.Println(d.Key)
+
+	// Output:
+	// weft
 }

@@ -114,3 +114,49 @@ Do not schedule either. Add the measurement to milestone 5's load test so the ev
 None outstanding. The one comment edit this decision called for — `pkg/engine/topk.go` recording the cursor-interface dependency alongside the size trigger, which made it the marker most likely to be repaid at the wrong time — has landed. Everything else stands as written.
 
 Two markers were added afterwards, both scale-gated and both blocking the sequential-execution item above: `scorer/text` and `scorer/graph` take the index-wide read lock once per posting and once per link, so fanning scorers out with goroutines as things stand loses throughput rather than gaining it. Batch the reads first.
+
+---
+
+## D-003 — A commit is a full snapshot; incremental segments wait for milestone 3
+
+**Status:** accepted, 2026-08-13
+**Context:** [FORMAT.md](FORMAT.md), [FINDINGS milestone 2 §3.1](FINDINGS.md)
+
+### Question
+
+Milestone 2's outcome is "the index survives restart, one commit makes all
+scorers' data visible atomically". Does that require incremental segments —
+each commit writing only new documents, queries reading across many segments —
+or does one rewritten segment per commit satisfy it?
+
+### Decision
+
+One segment per commit, the whole corpus rewritten, the previous generation
+deleted. The MANIFEST nonetheless carries a segment **list** with a generation
+number, and version 1 constrains the list to exactly one entry.
+
+### Rationale — the same asymmetry as D-001
+
+Incremental segments drag three problems in with them: multi-segment readers,
+per-segment BM25 statistics that must be merged at query time, and DocIDs that
+need a namespace the moment two segments are live (FINDINGS §3.4). All three
+are milestone 3's problems, and solving them now means solving them against a
+guess about scale.
+
+The costs are asymmetric in the familiar direction. Deferring incremental
+segments costs O(corpus) per commit — real, but irrelevant at in-memory scale,
+and marked with a `ponytail:` comment. Deferring the *manifest layout* would
+cost a format migration. So the layout (count + list) lands now, and the
+policy (exactly one) is a version-1 writer contract the reader enforces.
+
+A second choice folded in: **Commit refuses a corrupt manifest** instead of
+superseding it. Writing a fresh generation over a directory in an unknown
+state could orphan a commit the caller believes exists; refusal costs the
+caller one explicit decision (repair or start a new directory) and never
+costs them data they thought was safe.
+
+### What would show this decision was wrong
+
+Milestone 3 finds the v1 section formats unusable for multi-segment reading —
+statistics that cannot merge, offsets that cannot relocate — forcing a version
+bump that rewrites more than the manifest. Record here what v1 got wrong.

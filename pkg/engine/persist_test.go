@@ -1,0 +1,218 @@
+package engine
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+)
+
+// dirNames lists dir's entries, sorted, for asserting exactly what a commit
+// leaves behind.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(ents))
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	return names
+}
+
+func TestOpenWithoutACommitReportsNotExist(t *testing.T) {
+	if _, err := Open(t.TempDir()); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("empty dir: got %v, want fs.ErrNotExist", err)
+	}
+	if _, err := Open(filepath.Join(t.TempDir(), "never-made")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing dir: got %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestCommitEmptyIndex(t *testing.T) {
+	dir := t.TempDir()
+	if err := New().Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	ix, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if ix.Len() != 0 {
+		t.Fatalf("restored %d documents from an empty commit", ix.Len())
+	}
+	if _, err := ix.Add(Document{Key: "a", Text: "still works"}); err != nil {
+		t.Fatalf("Add after empty restore: %v", err)
+	}
+}
+
+// TestUnmanifestedSegmentIsInvisible is the atomicity pass line: a segment
+// written but never named by a MANIFEST — a commit that died before its
+// rename — must be indistinguishable from a segment that never existed, and
+// gets swept.
+func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
+	committed := New()
+	addAll(t, committed, []Document{{Key: "safe", Text: "the committed corpus"}})
+	dir := t.TempDir()
+	if err := committed.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Simulate the interrupted second commit: full, valid segment files for a
+	// different corpus, written exactly as Commit writes them — and no
+	// manifest flip.
+	orphan := New()
+	addAll(t, orphan, []Document{{Key: "ghost", Text: "the corpus that never landed"}})
+	orphanDir := filepath.Join(dir, segDirName(2))
+	if err := os.Mkdir(orphanDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := orphan.writeSegment(orphanDir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, ok := got.Resolve("ghost"); ok {
+		t.Fatal("Open surfaced a document from a segment no manifest names")
+	}
+	if _, ok := got.Resolve("safe"); !ok {
+		t.Fatal("Open lost the committed corpus")
+	}
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001"}) {
+		t.Fatalf("orphan segment not swept: %v", names)
+	}
+}
+
+func TestSuccessiveCommitsKeepOneGeneration(t *testing.T) {
+	ix := New()
+	dir := t.TempDir()
+	for i, key := range []string{"one", "two", "three"} {
+		addAll(t, ix, []Document{{Key: key, Text: "generation " + key}})
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit %d: %v", i+1, err)
+		}
+	}
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000003"}) {
+		t.Fatalf("after three commits: %v, want only MANIFEST and seg-000003", names)
+	}
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	assertIndexEqual(t, ix, got)
+}
+
+func TestCommitAfterOpenContinuesTheGenerations(t *testing.T) {
+	first := New()
+	addAll(t, first, []Document{{Key: "a", Text: "written before the restart"}})
+	dir := t.TempDir()
+	if err := first.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// The restart: reopen, keep writing, commit again.
+	second, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	addAll(t, second, []Document{{Key: "b", Text: "written after the restart"}})
+	if err := second.Commit(dir); err != nil {
+		t.Fatalf("second Commit: %v", err)
+	}
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	assertIndexEqual(t, second, got)
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000002"}) {
+		t.Fatalf("generations did not continue past the restart: %v", names)
+	}
+}
+
+// TestCommitRefusesACorruptManifest pins the decision that Commit does not
+// guess: a corrupt manifest means the directory's state is unknown, and
+// writing a fresh generation on top could orphan a commit the caller believes
+// exists.
+func TestCommitRefusesACorruptManifest(t *testing.T) {
+	ix := New()
+	addAll(t, ix, []Document{{Key: "a", Text: "committed fine"}})
+	dir := t.TempDir()
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	path := filepath.Join(dir, manifestName)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b[len(b)-1] ^= 0xff
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Commit over a corrupt manifest: got %v, want ErrCorrupt", err)
+	}
+}
+
+func TestManifestNamingAnEscapePathIsRefused(t *testing.T) {
+	// A doctored manifest must not be able to point the reader outside dir.
+	dir := t.TempDir()
+	rewriteSection(t, filepath.Join(dir, manifestName), kindManifest, func(w *segWriter) {
+		w.uvarint(1)
+		w.uvarint(1)
+		w.str("seg-../../etc")
+	})
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("escape path in manifest: got %v, want ErrCorrupt", err)
+	}
+}
+
+func TestManifestListingTwoSegmentsIsRefused(t *testing.T) {
+	// The list exists for milestone 3; a version-1 file using it is a writer
+	// that broke its contract without bumping the version.
+	dir, _ := commitTiny(t)
+	rewriteSection(t, filepath.Join(dir, manifestName), kindManifest, func(w *segWriter) {
+		w.uvarint(1)
+		w.uvarint(2)
+		w.str("seg-000001")
+		w.str("seg-000001")
+	})
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("two segments under version 1: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestCommitDuringReads exists for the race detector: Commit takes the same
+// read lock queries do, so encoding a snapshot while lookups run must be
+// clean. Run with -race (the Makefile default) or it proves little.
+func TestCommitDuringReads(t *testing.T) {
+	ix := New()
+	addAll(t, ix, []Document{{Key: "a", Text: "read me"}, {Key: "b", Text: "me too"}})
+	dir := t.TempDir()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 50 {
+			ix.Lookup("read")
+			ix.Stats()
+			ix.Doc(0)
+		}
+	}()
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	<-done
+	if _, err := Open(dir); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+}
