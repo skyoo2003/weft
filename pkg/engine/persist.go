@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -76,13 +78,19 @@ func (ix *Index) Commit(dir string) error {
 	gen, _, err := readManifest(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		gen = 0
+		// No manifest means nothing here is published. It does not mean this
+		// directory is weft's.
+		if err := refuseForeignSegments(root); err != nil {
+			return fmt.Errorf("commit %s: %w", dir, err)
+		}
 	} else if err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
 
 	// readManifest has already established that the live segment is named for
-	// gen, so the directory cleared below is this commit's own debris and never
-	// the published one.
+	// gen and that gen+1 does not wrap, and refuseForeignSegments has done the
+	// same job for a directory with no manifest at all, so the directory cleared
+	// below is this commit's own debris and never the published one.
 	seg := segDirName(gen + 1)
 	// A crash after writing segment files but before the manifest flip leaves
 	// this directory half-written. It was never visible — no manifest names it
@@ -164,11 +172,17 @@ func Open(dir string) (*Index, error) {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}
 	segRoot, err := root.OpenRoot(segs[0])
-	if errors.Is(err, fs.ErrNotExist) {
-		// Same reasoning as openSection: the manifest named it, so its absence
-		// is damage rather than an index that was never written.
-		return nil, fmt.Errorf("open %s: the manifest names this segment but the directory is missing: %w", segs[0], ErrCorrupt)
-	} else if err != nil {
+	if err != nil {
+		// Same reasoning as openSection: the manifest named it, so a segment
+		// that is missing — or is a plain file standing where its directory
+		// belongs, which is a foreign layout and not an index of ours — is
+		// damage rather than an index that was never written. A directory that
+		// is genuinely there and still will not open is the filesystem
+		// refusing us, not corruption, and reports as itself.
+		fi, serr := root.Stat(segs[0])
+		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.IsDir()) {
+			return nil, fmt.Errorf("open %s: the manifest names this segment but no directory stands there: %w", segs[0], ErrCorrupt)
+		}
 		return nil, fmt.Errorf("open %s: %w", segs[0], err)
 	}
 	defer segRoot.Close()
@@ -254,7 +268,72 @@ func readManifest(root *os.Root) (gen uint64, segs []string, err error) {
 		return 0, nil, fmt.Errorf("%s: generation %d names %q; format v1 writes exactly one segment, called %s: %w",
 			manifestName, gen, segs, want, ErrCorrupt)
 	}
+	// Generation counts commits, one at a time, so the largest value a uint64
+	// holds is one no writer ever reached. Refusing it here is also what keeps
+	// Commit's gen+1 from wrapping to zero: a wrapped generation would aim the
+	// pre-write RemoveAll at seg-000000 and then publish a generation lower than
+	// the one it replaced, breaking the strictly increasing counter the format
+	// rests on.
+	if gen == math.MaxUint64 {
+		return 0, nil, fmt.Errorf("%s: generation %d, which no sequence of commits could reach: %w", manifestName, gen, ErrCorrupt)
+	}
 	return gen, segs, nil
+}
+
+// segFiles are the four section files a segment directory holds, and the only
+// entries weft's writer ever creates inside one.
+var segFiles = []string{metaFile, docsFile, postingsFile, termsFile}
+
+// refuseForeignSegments establishes that a directory with no manifest is
+// weft's to overwrite, before Commit deletes anything in it.
+//
+// Commit removes every seg-* entry it finds — this generation's target before
+// writing it, the rest in prune afterwards — and a manifest is what proves
+// those names are weft's own. Without one there is nothing to say that
+// "seg-000001" is debris rather than a caller's directory sitting under a name
+// weft happens to reserve, and a first Commit aimed at, say, a home directory
+// would recursively delete data it never wrote.
+//
+// A commit that crashed before its rename must still be recoverable, so the
+// test is what such a commit leaves behind rather than mere absence: a seg-*
+// entry may exist, but only as a real directory holding nothing but section
+// files. Anything else and Commit refuses before it mutates a thing.
+func refuseForeignSegments(root *os.Root) error {
+	entries, err := readDir(root, ".")
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), segPrefix) {
+			continue
+		}
+		// A symlink is not a directory here — ReadDir reports the link itself —
+		// so one planted at a segment's name is somebody else's, exactly as it
+		// is for the manifest's temp file.
+		if !e.IsDir() {
+			return fmt.Errorf("%s is not a segment directory and no manifest claims it, so weft will not delete it", e.Name())
+		}
+		inner, err := readDir(root, e.Name())
+		if err != nil {
+			return err
+		}
+		for _, f := range inner {
+			if !slices.Contains(segFiles, f.Name()) {
+				return fmt.Errorf("%s holds %s, which weft never wrote, and no manifest claims it, so weft will not delete it", e.Name(), f.Name())
+			}
+		}
+	}
+	return nil
+}
+
+// readDir lists the entries of name under root.
+func readDir(root *os.Root, name string) ([]fs.DirEntry, error) {
+	d, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	return d.ReadDir(-1)
 }
 
 // prune removes every segment directory except keep, plus a stale manifest
@@ -266,12 +345,7 @@ func readManifest(root *os.Root) (gen uint64, segs []string, err error) {
 // is the one party that knows no other segment is being written right now.
 func prune(root *os.Root, keep string) {
 	root.Remove(manifestName + ".tmp")
-	d, err := root.Open(".")
-	if err != nil {
-		return
-	}
-	entries, err := d.ReadDir(-1)
-	d.Close()
+	entries, err := readDir(root, ".")
 	if err != nil {
 		return
 	}

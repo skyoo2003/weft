@@ -468,6 +468,51 @@ func TestOverlongVersionEncodingIsRefused(t *testing.T) {
 	}
 }
 
+// TestFrequencySumCannotWrap pins the check on each document's remaining token
+// budget. Bounding a posting by docLen alone and summing afterwards leaves the
+// sum itself free to overflow: a document claiming MaxInt tokens with four
+// frequencies of MaxInt, MaxInt, MaxInt and 2 wraps back onto exactly MaxInt,
+// so every total agrees and a posting set Add could never produce would load as
+// healthy. The identity holds at any int width, so this is not a 64-bit test.
+func TestFrequencySumCannotWrap(t *testing.T) {
+	dir, segDir := commitTiny(t)
+	mi := uint64(maxInt)
+
+	// One document, claiming every token this platform can count.
+	rewriteSection(t, filepath.Join(segDir, metaFile), kindMeta, func(w *segWriter) {
+		uvs(w, 1, mi, 0)
+	})
+	rewriteSection(t, filepath.Join(segDir, docsFile), kindDocs, func(w *segWriter) {
+		w.uvarint(1)
+		docRecord(w, "a", "x", mi)
+	})
+
+	// Four terms, each with one posting in document 0. No frequency exceeds
+	// docLen on its own, so only the running budget catches them.
+	freqs := []uint64{mi, mi, mi, 2}
+	var offs []uint64
+	rewriteSection(t, filepath.Join(segDir, postingsFile), kindPostings, func(w *segWriter) {
+		w.uvarint(uint64(len(freqs)))
+		for _, f := range freqs {
+			// off() is the absolute file offset the terms index must record.
+			offs = append(offs, uint64(w.off()))
+			// blocks, count, maxDocID, maxTF, minDocLen, then delta and freq.
+			uvs(w, 1, 1, 0, f, mi, 0, f)
+		}
+	})
+	rewriteSection(t, filepath.Join(segDir, termsFile), kindTerms, func(w *segWriter) {
+		w.uvarint(uint64(len(freqs)))
+		for i, term := range []string{"a", "b", "c", "d"} {
+			w.str(term)
+			w.uvarint(offs[i])
+		}
+	})
+
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open: got %v, want ErrCorrupt", err)
+	}
+}
+
 func TestUnsortedTermsAreRefused(t *testing.T) {
 	// Two terms so order can be wrong: corpus {a: "x y"}. Each postings entry
 	// is 7 one-byte varints, so "x" sits at absolute offset 7 and "y" at 14.

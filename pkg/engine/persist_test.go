@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -233,6 +234,125 @@ func TestCommitRefusesAManifestListingTwoSegments(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(segDir, docsFile)); err != nil {
 		t.Fatalf("the published segment was pruned anyway: %v", err)
+	}
+}
+
+// TestCommitRefusesAnExhaustedGeneration guards Commit's gen+1. A manifest at
+// the last generation a uint64 can hold wraps it to zero, which would aim the
+// pre-write RemoveAll at seg-000000 and then publish a generation below the one
+// it replaced — the strictly increasing counter the whole format rests on.
+func TestCommitRefusesAnExhaustedGeneration(t *testing.T) {
+	dir := t.TempDir()
+	last := uint64(math.MaxUint64)
+	rewriteSection(t, filepath.Join(dir, manifestName), kindManifest, func(w *segWriter) {
+		w.uvarint(last)
+		w.uvarint(1)
+		w.str(segDirName(last))
+	})
+	// The directory gen+1 wraps onto, holding something worth not deleting.
+	bystander := filepath.Join(dir, segDirName(0), "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(bystander), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bystander, []byte("not weft's"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ix := New()
+	addAll(t, ix, []Document{{Key: "a", Text: "must not be published as generation 0"}})
+	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Commit: got %v, want ErrCorrupt", err)
+	}
+	if _, err := os.Stat(bystander); err != nil {
+		t.Fatalf("the wrapped generation's directory was cleared anyway: %v", err)
+	}
+	// readManifest is shared, so the same impossible counter is refused on read.
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestFirstCommitRefusesAForeignSegmentDirectory covers the one commit with no
+// manifest to prove the directory is weft's. Commit clears its target seg-* name
+// before writing and prunes every other one afterwards, so pointed at a
+// directory that merely happens to hold such a name — a caller passing a home
+// or documents directory — it would recursively delete data it never wrote.
+func TestFirstCommitRefusesAForeignSegmentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	bystander := filepath.Join(dir, segDirName(1), "vacation-photos")
+	if err := os.MkdirAll(filepath.Dir(bystander), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bystander, []byte("not weft's"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ix := New()
+	addAll(t, ix, []Document{{Key: "a", Text: "x"}})
+	if err := ix.Commit(dir); err == nil {
+		t.Fatal("Commit claimed a directory holding files weft never wrote")
+	}
+	if _, err := os.Stat(bystander); err != nil {
+		t.Fatalf("Commit deleted a directory it does not own: %v", err)
+	}
+	// A refused commit mutates nothing at all, not even the parts it got to.
+	if names := dirNames(t, dir); !slices.Equal(names, []string{segDirName(1)}) {
+		t.Fatalf("a refused commit left something behind: %v", names)
+	}
+}
+
+// TestFirstCommitOverwritesItsOwnDebris is the other half of that guard. A first
+// commit that died before its rename leaves a segment directory holding nothing
+// but section files, and refusing that would wedge the index permanently —
+// every later commit failing — where the point is only to spare data weft never
+// wrote.
+func TestFirstCommitOverwritesItsOwnDebris(t *testing.T) {
+	dir := t.TempDir()
+	orphan := New()
+	addAll(t, orphan, []Document{{Key: "ghost", Text: "the corpus that never landed"}})
+	if err := orphan.writeSegment(makeSegDir(t, dir, segDirName(1))); err != nil {
+		t.Fatal(err)
+	}
+
+	ix := New()
+	addAll(t, ix, []Document{{Key: "real", Text: "the corpus that did"}})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit over its own unpublished debris: %v", err)
+	}
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, ok := got.Resolve("ghost"); ok {
+		t.Fatal("the abandoned segment survived the commit that replaced it")
+	}
+	if _, ok := got.Resolve("real"); !ok {
+		t.Fatal("Open lost the committed corpus")
+	}
+}
+
+// TestAFileWhereASegmentBelongsIsCorrupt pins Open's error classification. A
+// manifest naming a segment has already said this directory is an index, so a
+// plain file standing at that name is a foreign or damaged layout. Reporting the
+// raw ENOTDIR would leave errors.Is(err, ErrCorrupt) false, contrary to what
+// Open documents, and a caller branching on absence must not be handed one
+// either.
+func TestAFileWhereASegmentBelongsIsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	rewriteSection(t, filepath.Join(dir, manifestName), kindManifest, func(w *segWriter) {
+		w.uvarint(1)
+		w.uvarint(1)
+		w.str(segDirName(1))
+	})
+	if err := os.WriteFile(filepath.Join(dir, segDirName(1)), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Open(dir)
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open: got %v, want ErrCorrupt", err)
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a file where the segment belongs also reads as fs.ErrNotExist: %v", err)
 	}
 }
 

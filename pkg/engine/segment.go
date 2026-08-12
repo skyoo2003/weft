@@ -554,6 +554,18 @@ func decodeDocs(r *segReader) (*Index, error) {
 // compared against what the block records. Unread fields rot silently — D-001
 // requires tests to catch that, and the decoder checking on every Open means
 // the rot cannot even wait for a test run.
+//
+// What is deliberately not checked is that a term matches the text of the
+// documents it names: nothing here re-tokenizes Text to compare per-document
+// term frequencies. A doctored file can therefore file a document's postings
+// under a token its text does not contain, and text search will return it for
+// that token. That is accepted, for the same reason encodeDocs stores docLen
+// rather than recomputing it — a segment records what was indexed, not what
+// this build's tokenizer would index today, and a reader demanding the two
+// agree would refuse every segment written before a tokenizer change. The
+// invariants below are the ones the scorers actually rest on; term-to-text
+// correspondence is not one of them, and buying it would cost a full
+// re-tokenization of the corpus on every Open.
 func decodePostings(post, terms *segReader, host *Index) error {
 	pn, err := post.intn("term count", len(post.b))
 	if err != nil {
@@ -569,11 +581,13 @@ func decodePostings(post, terms *segReader, host *Index) error {
 
 	// Every token Add saw became exactly one posting increment, so a document's
 	// frequencies summed across all terms equal the docLen stored beside it.
-	// Per-posting the check is only freq <= docLen, which lets a doctored file
-	// give a one-token document a frequency of 1 under two different terms —
-	// each legal alone, together describing a document that cannot exist. BM25
+	// Bounding each posting on its own by docLen would let a doctored file give
+	// a one-token document a frequency of 1 under two different terms — each
+	// legal by itself, together describing a document that cannot exist. BM25
 	// would then divide real frequencies by a length that never held them and
-	// return scores that look reasonable and are wrong.
+	// return scores that look reasonable and are wrong. So each document's
+	// remaining token budget is tracked as its postings are read, and the total
+	// is checked once they all have been.
 	sumFreq := make([]int, len(host.docs))
 
 	prevTerm := ""
@@ -676,10 +690,18 @@ func decodePostings(post, terms *segReader, host *Index) error {
 				if freq == 0 {
 					return fmt.Errorf("%s: term %q in document %d has frequency 0, which Add never writes: %w", post.name, term, id, ErrCorrupt)
 				}
-				// A term cannot occur more often than its document has tokens.
-				if freq > host.docLen[id] {
-					return fmt.Errorf("%s: term %q occurs %d times in document %d of %d tokens: %w",
-						post.name, term, freq, id, host.docLen[id], ErrCorrupt)
+				// A term cannot occur more often than its document has tokens,
+				// and a document's terms cannot claim more tokens between them
+				// either. Checked against what is left of docLen rather than
+				// against docLen itself, which also keeps the running sum from
+				// wrapping: freq is only ever added when it fits, so sumFreq
+				// cannot pass docLen, let alone MaxInt. Summing first and
+				// checking after would let four frequencies near MaxInt wrap
+				// back onto a total that agrees with docLen, and postings Add
+				// could never produce would load as healthy.
+				if freq > host.docLen[id]-sumFreq[id] {
+					return fmt.Errorf("%s: term %q occurs %d times in document %d, which has %d of its %d tokens left to account for: %w",
+						post.name, term, freq, id, host.docLen[id]-sumFreq[id], host.docLen[id], ErrCorrupt)
 				}
 				pl = append(pl, Posting{Doc: DocID(id), Freq: freq})
 				sumFreq[id] += freq
