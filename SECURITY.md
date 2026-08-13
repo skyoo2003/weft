@@ -28,6 +28,6 @@ weft is a library. It opens no sockets, authenticates nobody, and performs no pr
 | Surface | Why |
 |---|---|
 | The persisted segment format | `Open` parses a block-structured file with varint headers ([docs/FORMAT.md](docs/FORMAT.md)). A malformed or hostile file reaching the decoder is the most likely source of a panic or an out-of-range read. |
-| Caller-supplied vectors and documents | Scores and embeddings come from the caller and are not sanitised. Denial of service through pathological input is in scope; input validation the caller chose to skip is not. |
+| Caller-supplied vectors and documents | The library does validate: `Index.Add` rejects non-finite components (`ErrNonFiniteVector`) and vectors whose width disagrees with the corpus (`ErrDimMismatch`), the vector scorer rejects a non-finite query norm, and the segment decoder checks again on the way back in. Anything that gets past one of those checks is in scope. Size is the part nobody checks — a document or vector large enough to exhaust memory is a [documented limitation](README.md#limitations), not a vulnerability. |
 
 Reports that the corpus must fit in memory are not vulnerabilities — that is a documented limitation ([README — Limitations](README.md#limitations)).

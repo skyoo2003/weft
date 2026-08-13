@@ -12,13 +12,15 @@ That is the whole local check, and it is exactly what [CI](.github/workflows/ci.
 
 ## What not to break
 
-Three assertions define this project, and `make arch` decides them rather than a reviewer:
+Three assertions define this project, and tests decide them rather than a reviewer:
 
 - Fusion is invariant to scorer count.
 - A new scorer costs under 100 implementation lines.
 - `fusion/` cannot see any scorer package.
 
-What they mean and how each is checked: [README — Adding a scorer](README.md#adding-a-scorer). Break one and CI says so before a person does.
+They are ordinary tests in `pkg/engine`, so `make all` — and therefore CI — already runs them. `make arch` reruns that same set by name, verbosely, for when you want to read them one at a time. Break one and CI says so before a person does.
+
+What each assertion means and why: [README — Adding a scorer](README.md#adding-a-scorer).
 
 ## Adding a scorer
 
