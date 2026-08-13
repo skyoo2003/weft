@@ -1,0 +1,43 @@
+# Contributing
+
+One maintainer. Replies are slow but real.
+
+## The gate
+
+```bash
+make all      # fmt + build + vet + test -race
+```
+
+That is the whole local check, and it is exactly what [CI](.github/workflows/ci.yml) runs — CI calls this target rather than copying its commands, so a local pass and a CI pass cannot mean different things.
+
+## What not to break
+
+Three assertions define this project, and `make arch` decides them rather than a reviewer:
+
+- Fusion is invariant to scorer count.
+- A new scorer costs under 100 implementation lines.
+- `fusion/` cannot see any scorer package.
+
+What they mean and how each is checked: [README — Adding a scorer](README.md#adding-a-scorer). Break one and CI says so before a person does.
+
+## Adding a scorer
+
+The main extension path is written down once, in [README](README.md#adding-a-scorer): implement `engine.Scorer` and nothing in `engine/` or `fusion/` should need to change. If your change does need to touch them, that is the interesting part of the pull request — lead with it.
+
+## Pull requests
+
+Fill in [the template](.github/PULL_REQUEST_TEMPLATE.md). It asks what changed, how you verified it, and what deserves attention; answering those three is most of the review.
+
+Commit messages: say why. `git log -p` already says what.
+
+No CLA and no DCO sign-off. Contributions are under [Apache-2.0](LICENSE), the license already on this repository.
+
+## Before a large change
+
+Open an issue first. Not for permission — to find out whether the thing you are about to build is already recorded as rejected in [docs/DECISIONS.md](docs/DECISIONS.md) or as unverified in [docs/FINDINGS.md](docs/FINDINGS.md).
+
+Neither document repeats anything readable from the code. If a change contradicts one of them, that document is part of the change.
+
+## Stability
+
+The API can break while this is v0.x. Changes that are expensive to reverse get a `DECISIONS.md` entry; everything else can move without ceremony.

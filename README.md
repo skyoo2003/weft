@@ -138,6 +138,12 @@ make example    # minimal example
 | No embedding generation | Vectors are supplied by the caller. |
 | No query language | Queries are built through the Go API. |
 
+## Contributing
+
+`make all` is the gate, and CI runs that same target. Everything else — what the three architecture assertions are, what a pull request should say, why a decision is recorded — is in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Vulnerabilities go to [SECURITY.md](SECURITY.md), not to the issue tracker. Behavior is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## License
 
 [Apache License 2.0](LICENSE). Third-party notices: [NOTICE](NOTICE) — there are none.
