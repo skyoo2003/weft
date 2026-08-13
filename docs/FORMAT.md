@@ -250,12 +250,18 @@ same goes for `MANIFEST.tmp`, the other name `Commit` deletes on sight. A commit
 that crashed before its rename must still be recoverable, so the test is what such
 a commit leaves behind rather than mere absence: a `seg-*` entry may exist, but
 only as a real directory holding nothing but regular section files, and
-`MANIFEST.tmp` may exist, but only holding what the writer leaves — nothing, since
-it buffers until close, or a prefix of the frame it was writing. Anything else — a
-stray file inside the segment, a *directory* named `meta`, which the recursive
-clearing would take everything beneath, a symlink standing at either name, or a
-temp manifest without weft's magic — and the commit refuses before it mutates
-anything at all.
+`MANIFEST.tmp` may exist too — and every one of those files has to carry weft's
+magic, because a reserved name and a file type are things a caller's own data can
+have by coincidence and four bytes of magic are not. A file the writer created but
+never filled satisfies that as well: it buffers until close, so its debris is
+empty or a prefix of the frame. Anything else — a stray entry inside the segment,
+a *directory* named `meta`, which the recursive clearing would take everything
+beneath, a symlink standing at any of those names, or a file under one of them
+that weft did not write — and the commit refuses before it mutates anything at
+all. The magic is the ownership signal and the only one available here: the kind
+byte says which section a file is rather than whose it is, and a torn write may
+stop before reaching it. A frame intact enough to carry the magic but broken past
+it is weft's own debris, and the reader's checksum is what refuses it as an index.
 
 One writer at a time. `Commit` is safe alongside `Add` and queries — it takes the
 same read lock a query does — but not alongside another `Commit` on the same

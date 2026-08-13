@@ -514,6 +514,65 @@ func TestFirstCommitRefusesADirectoryInsideASegmentName(t *testing.T) {
 	}
 }
 
+// TestFirstCommitRefusesAForeignSectionFile closes the last of the name-only
+// ownership gaps. A regular file called meta, docs, postings or terms has the
+// right name and is the right kind of entry, and is still not necessarily
+// weft's: the magic is what says so. What a crashed commit leaves is again the
+// yardstick — segWriter creates each section exclusively and buffers until
+// close, so its debris is an empty file or a prefix of a weft frame.
+func TestFirstCommitRefusesAForeignSectionFile(t *testing.T) {
+	const bystander = "somebody's data, under a name weft happens to reserve"
+	commitInto := func(t *testing.T, dir string) error {
+		t.Helper()
+		ix := New()
+		addAll(t, ix, []Document{{Key: "a", Text: "x"}})
+		return ix.Commit(dir)
+	}
+	plant := func(t *testing.T, dir, name string, content []byte) string {
+		t.Helper()
+		path := filepath.Join(dir, segDirName(1), name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	for _, name := range segFiles {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := plant(t, dir, name, []byte(bystander))
+			if err := commitInto(t, dir); err == nil {
+				t.Fatalf("Commit claimed a directory holding a %s file weft never wrote", name)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("Commit deleted a file it does not own: %v", err)
+			}
+			if string(got) != bystander {
+				t.Fatalf("the bystander %s now holds %q", name, got)
+			}
+		})
+	}
+
+	// A commit that died after creating a section file and before writing it
+	// out, and one that died mid-write with less than the magic on disk. Both
+	// have to stay overwritable, or a crash would wedge the directory.
+	t.Run("own debris", func(t *testing.T) {
+		dir := t.TempDir()
+		plant(t, dir, metaFile, nil)
+		plant(t, dir, docsFile, segMagic[:2])
+		if err := commitInto(t, dir); err != nil {
+			t.Fatalf("Commit over its own unpublished debris: %v", err)
+		}
+		if _, err := Open(dir); err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+	})
+}
+
 // TestFirstCommitRefusesAForeignTempManifest extends the ownership test to the
 // one other name weft reserves. Commit clears MANIFEST.tmp before writing its
 // own, and with no MANIFEST there is nothing to prove that file is weft's

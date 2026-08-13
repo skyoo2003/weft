@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -300,13 +301,13 @@ var segFiles = []string{metaFile, docsFile, postingsFile, termsFile}
 //
 // The same holds for MANIFEST.tmp, the other name Commit deletes on sight.
 //
-// A commit that crashed before its rename must still be recoverable, so the
-// test is what such a commit leaves behind rather than mere absence: a seg-*
-// entry may exist, but only as a real directory holding nothing but regular
-// section files, and MANIFEST.tmp may exist, but only holding what segWriter
-// leaves — nothing, since it buffers until close, or a prefix of the frame it
-// was writing when the machine died. Anything else and Commit refuses before it
-// mutates a thing.
+// A commit that crashed before its rename must still be recoverable, so the test
+// is what such a commit leaves behind rather than mere absence: a seg-* entry may
+// exist, but only as a real directory holding nothing but regular section files,
+// and MANIFEST.tmp may exist too — and every one of those files has to carry
+// weft's magic, because a name and a file type are things a caller's own data can
+// have by coincidence and four bytes of magic are not. Anything else and Commit
+// refuses before it mutates a thing.
 func refuseForeignEntries(root *os.Root) error {
 	entries, err := readDir(root, ".")
 	if err != nil {
@@ -321,16 +322,8 @@ func refuseForeignEntries(root *os.Root) error {
 			if !e.Type().IsRegular() {
 				return fmt.Errorf("%s is not a file and no manifest claims it, so weft will not delete it", e.Name())
 			}
-			b, err := root.ReadFile(e.Name())
-			if err != nil {
+			if err := refuseForeignFile(root, e.Name()); err != nil {
 				return err
-			}
-			// Either the file starts with weft's magic, or — for a write torn
-			// shorter than the magic itself — the magic starts with the file. An
-			// empty file, which is what a crash before close leaves, is the
-			// second case.
-			if !bytes.HasPrefix(b, segMagic) && !bytes.HasPrefix(segMagic, b) {
-				return fmt.Errorf("%s was not written by weft and no manifest claims it, so weft will not delete it", e.Name())
 			}
 		case !strings.HasPrefix(e.Name(), segPrefix):
 			continue
@@ -344,14 +337,45 @@ func refuseForeignEntries(root *os.Root) error {
 				return err
 			}
 			for _, f := range inner {
-				// The name alone is not enough: the RemoveAll that clears this
-				// directory is recursive, so a *directory* called meta or docs
-				// would take everything beneath it along.
+				// The name alone is not enough, in either direction: the RemoveAll
+				// that clears this directory is recursive, so a *directory* called
+				// meta or docs would take everything beneath it along, and a plain
+				// file under one of those names is only weft's if it says so.
 				if !slices.Contains(segFiles, f.Name()) || !f.Type().IsRegular() {
 					return fmt.Errorf("%s holds %s, which weft never wrote, and no manifest claims it, so weft will not delete it", e.Name(), f.Name())
 				}
+				if err := refuseForeignFile(root, filepath.Join(e.Name(), f.Name())); err != nil {
+					return err
+				}
 			}
 		}
+	}
+	return nil
+}
+
+// refuseForeignFile reports a file under a name weft reserves whose first bytes
+// are not the start of a weft frame.
+//
+// segWriter creates each file exclusively and buffers until close, so what a
+// crashed commit leaves is an empty file or the head of the frame it was writing
+// — either way a prefix of the magic, which is all this reads. The magic is the
+// ownership signal and the only one available: the kind byte says which section
+// a file is, not whose it is, and a torn write may stop before reaching it. A
+// frame that is intact enough to carry the magic but broken past it is still
+// weft's own debris, and Open's checksum is what refuses it as an index.
+func refuseForeignFile(root *os.Root, name string) error {
+	f, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	head := make([]byte, len(segMagic))
+	n, err := io.ReadFull(f, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return err
+	}
+	if !bytes.HasPrefix(segMagic, head[:n]) {
+		return fmt.Errorf("%s was not written by weft and no manifest claims it, so weft will not delete it", name)
 	}
 	return nil
 }
