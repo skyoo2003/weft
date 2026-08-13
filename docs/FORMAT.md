@@ -198,7 +198,7 @@ plausible but breaks an invariant a scorer relies on.
 | A non-final block that is not full | Block and posting counts would stop agreeing |
 | A block whose first DocID does not exceed the previous block's last | The block continued a delta chain instead of starting absolute |
 | A segment directory or section file that resolves outside the index directory | Both readers work through an `os.Root`, so a symlink planted where a segment belongs is refused by the OS, not by a check that a rename could race |
-| A plain file standing where the manifest names a segment directory, or a directory standing where one of its section files belongs | A manifest naming a segment has already said this directory is an index, so an entry of the wrong kind is a foreign or damaged layout. Reported as `ErrCorrupt` rather than the raw `ENOTDIR` or `EISDIR`, alongside the missing-directory and missing-file cases. An entry of the right kind that is genuinely there and still will not open is the filesystem refusing us, not corruption, and reports as itself |
+| An entry of the wrong kind at any path in the layout: a plain file or a symlink where the manifest names a segment directory, a directory or a symlink where one of its section files belongs, a directory or a symlink at `MANIFEST` itself | An entry of the wrong kind is a foreign or damaged layout, and every path gets the same judgement — including the entry point, whose raw `EISDIR` would otherwise be neither `ErrCorrupt` nor `fs.ErrNotExist`, leaving a caller with no branch to take. Reported as `ErrCorrupt` rather than the raw `ENOTDIR`, `EISDIR` or path-escape error, alongside the missing-directory and missing-file cases. The kind is asked with `Lstat`, not `Stat`, because `Stat` follows the very link in question. An entry of the right kind that is genuinely there and still will not open is the filesystem refusing us, not corruption, and reports as itself |
 | A manifest whose generation already names the segment the next commit would write | `Commit` clears a half-written segment directory before writing it; aimed at the live segment that clears the published commit |
 | A generation of `0` or `MaxUint64` | The counter advances one commit at a time from a first commit that publishes `1`, so neither end is a state a writer produced. `0` describes a commit that never happened: accepting it would load a foreign layout, and let the next `Commit` publish over it and then sweep away a `seg-000000` weft never wrote. `MaxUint64` is what `Commit`'s `generation + 1` would wrap to zero on, aiming the pre-write `RemoveAll` at `seg-000000` and then publishing a generation below the one it replaced |
 
@@ -216,7 +216,12 @@ a full re-tokenization of the corpus on every `Open`.
 ## 6. Atomicity and durability
 
 `Commit` writes the segment's four files, fsyncs each, fsyncs the segment
-directory, then renames a temporary manifest over `MANIFEST`.
+directory, fsyncs the index directory so the segment directory's own entry is
+durable before anything names it, then renames a temporary manifest over
+`MANIFEST` and fsyncs the index directory again. Syncing only the inside of the
+segment would leave the rename free to land first, and a manifest naming a
+directory whose entry never made it is the mixed state the rename exists to rule
+out.
 
 **Guaranteed against process death, on POSIX.** The rename is atomic there, so a
 crash at any point leaves either the previous generation or the new one — never a

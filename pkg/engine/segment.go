@@ -67,6 +67,35 @@ var (
 // as the bounds on Index.Doc.
 const maxInt = int(^uint(0) >> 1)
 
+// maxDocCount is the document ceiling both decoders range against. DocIDs are
+// dense from 0, so the count shares DocID's uint32 ceiling — the same limit Add
+// enforces on the write side.
+//
+// The min runs in uint64, not int, for the reason Add's own ceiling comment
+// gives: an untyped MaxUint32 beside an int operand becomes an int, which does
+// not fit on a 32-bit target and stops the package compiling under GOARCH=386
+// or GOARCH=arm. Widened, the constant folds to maxInt there, which is the
+// right answer — an int that narrow cannot address more documents than that.
+const maxDocCount = int(min(uint64(maxInt), math.MaxUint32))
+
+// segSection names one file inside a segment directory and the kind byte its
+// frame carries.
+type segSection struct {
+	name string
+	kind byte
+}
+
+// segSections are the four files a segment directory holds, in write order, and
+// the only entries weft's writer ever creates inside one. The writer, the
+// reader and Commit's ownership check all read this one list, so milestone 3
+// adding a section is a single edit rather than four that can drift apart.
+var segSections = []segSection{
+	{metaFile, kindMeta},
+	{docsFile, kindDocs},
+	{postingsFile, kindPostings},
+	{termsFile, kindTerms},
+}
+
 // ---------------------------------------------------------------------------
 // writing
 // ---------------------------------------------------------------------------
@@ -139,17 +168,8 @@ func (w *segWriter) close() error {
 // Only the in-memory encoding happens under the lock; the disk writes in
 // close run after it is released.
 func (ix *Index) writeSegment(segRoot *os.Root) error {
-	sections := []struct {
-		name string
-		kind byte
-	}{
-		{metaFile, kindMeta},
-		{docsFile, kindDocs},
-		{postingsFile, kindPostings},
-		{termsFile, kindTerms},
-	}
-	ws := make([]*segWriter, len(sections))
-	for i, s := range sections {
+	ws := make([]*segWriter, len(segSections))
+	for i, s := range segSections {
 		w, err := newSegWriter(segRoot, s.name, s.kind)
 		if err != nil {
 			for _, open := range ws[:i] {
@@ -179,7 +199,7 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 			for _, rest := range ws[i+1:] {
 				rest.f.Close()
 			}
-			return fmt.Errorf("%s: %w", sections[i].name, err)
+			return fmt.Errorf("%s: %w", segSections[i].name, err)
 		}
 	}
 	return nil
@@ -371,16 +391,22 @@ func (r *segReader) done() error {
 // absent index: it reports ErrCorrupt rather than fs.ErrNotExist, so a caller
 // whose "nothing committed here yet" branch starts a fresh index cannot be
 // handed a half-deleted segment and quietly overwrite it. An entry that is not
-// a regular file — a directory, whose read fails with EISDIR — is the same
-// judgement, and gets the same classification as the plain file Open refuses
-// where a segment directory belongs: the manifest already called this directory
-// an index, so a foreign layout inside it is damage rather than absence. A
-// regular file that still will not open is the filesystem refusing us, not
-// corruption, and reports as itself.
+// a regular file — a directory, whose read fails with EISDIR, or a symlink,
+// whose read fails because the root refuses to follow it out of the index
+// directory — is the same judgement, and gets the same classification as the
+// plain file Open refuses where a segment directory belongs: the manifest
+// already called this directory an index, so a foreign layout inside it is
+// damage rather than absence. A regular file that still will not open is the
+// filesystem refusing us, not corruption, and reports as itself.
+//
+// The kind question is asked with Lstat rather than Stat, because Stat follows
+// the very link that made the read fail: it either resolves out of the root and
+// fails too, leaving a planted symlink reported as a raw path error, or it
+// resolves to a regular file and calls the link one.
 func openSection(root *os.Root, name string, kind byte) (*segReader, error) {
 	b, err := root.ReadFile(name)
 	if err != nil {
-		fi, serr := root.Stat(name)
+		fi, serr := root.Lstat(name)
 		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.Mode().IsRegular()) {
 			return nil, fmt.Errorf("%s: the manifest names this segment but no section file stands here: %w", name, ErrCorrupt)
 		}
@@ -431,9 +457,7 @@ func parseSection(name string, b []byte, kind byte) (*segReader, error) {
 // are cross-checked against the docs file by Open — meta is the snapshot BM25
 // trusts, so it does not get to disagree with the documents it describes.
 func decodeMeta(r *segReader) (docCount, totalLen, vecDim int, err error) {
-	// DocIDs are dense from 0, so the doc count shares DocID's uint32 ceiling —
-	// the same limit Add enforces on the write side.
-	if docCount, err = r.intn("doc count", min(maxInt, math.MaxUint32)); err != nil {
+	if docCount, err = r.intn("doc count", maxDocCount); err != nil {
 		return 0, 0, 0, err
 	}
 	if totalLen, err = r.intn("total length", maxInt); err != nil {
@@ -454,7 +478,7 @@ func decodeMeta(r *segReader) (docCount, totalLen, vecDim int, err error) {
 // documents, and the decoder re-validating is what keeps that promise true
 // for restored corpora.
 func decodeDocs(r *segReader) (*Index, error) {
-	n, err := r.intn("document count", min(maxInt, math.MaxUint32))
+	n, err := r.intn("document count", maxDocCount)
 	if err != nil {
 		return nil, err
 	}

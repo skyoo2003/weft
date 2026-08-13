@@ -542,8 +542,8 @@ func TestUnsortedTermsAreRefused(t *testing.T) {
 func segmentFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	files := []string{filepath.Join(dir, manifestName)}
-	for _, name := range []string{metaFile, docsFile, postingsFile, termsFile} {
-		files = append(files, filepath.Join(dir, segDirName(1), name))
+	for _, s := range segSections {
+		files = append(files, filepath.Join(dir, segDirName(1), s.name))
 	}
 	return files
 }

@@ -176,7 +176,8 @@ func TestCommitRefusesACorruptManifest(t *testing.T) {
 // and reporting it as absence would let a caller overwrite a recoverable
 // index without ever seeing an error.
 func TestMissingSectionIsCorruptNotAbsent(t *testing.T) {
-	for _, name := range []string{metaFile, docsFile, postingsFile, termsFile} {
+	for _, s := range segSections {
+		name := s.name
 		t.Run(name, func(t *testing.T) {
 			dir, segDir := commitTiny(t)
 			if err := os.Remove(filepath.Join(segDir, name)); err != nil {
@@ -418,8 +419,57 @@ func TestSymlinkedSegmentIsRefused(t *testing.T) {
 		t.Fatalf("the index being linked to is not loadable, so this test proves nothing: %v", err)
 	}
 
-	if _, err := Open(dir); err == nil {
-		t.Fatal("Open followed a symlink out of the index directory and loaded another index")
+	// Refusing is half of it. The refusal also has to read as ErrCorrupt: a
+	// symlink standing where a segment belongs is a foreign layout, and Open
+	// documents foreign layouts as corruption. Reported raw, the caller
+	// branching on errors.Is(err, ErrCorrupt) falls through to "unknown error"
+	// for the one case the root exists to catch.
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("symlinked segment: got %v, want ErrCorrupt", err)
+	}
+
+	// The same question one level down: a section file linked out of the
+	// segment directory.
+	honest := t.TempDir()
+	rewriteSection(t, filepath.Join(honest, manifestName), kindManifest, func(w *segWriter) {
+		w.uvarint(1)
+		w.uvarint(1)
+		w.str(segDirName(1))
+	})
+	if err := os.Mkdir(filepath.Join(honest, segDirName(1)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range segSections {
+		if err := os.Symlink(filepath.Join(victimSeg, s.name), filepath.Join(honest, segDirName(1), s.name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Open(honest); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("symlinked section files: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestAnEntryOfTheWrongKindAtTheManifestIsCorrupt extends the classification the
+// section files and the segment directory already get to the entry point. A
+// directory named MANIFEST is a foreign layout, and reported raw it is neither
+// ErrCorrupt nor fs.ErrNotExist — so Open's caller has no branch to take, and
+// Commit's "no manifest means a first commit" does not recognise it either.
+func TestAnEntryOfTheWrongKindAtTheManifestIsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, manifestName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Open(dir)
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("a directory at MANIFEST: got %v, want ErrCorrupt", err)
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a directory at MANIFEST also reads as fs.ErrNotExist: %v", err)
+	}
+	ix := New()
+	addAll(t, ix, []Document{{Key: "a", Text: "x"}})
+	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Commit over a directory at MANIFEST: got %v, want ErrCorrupt", err)
 	}
 }
 
@@ -429,7 +479,8 @@ func TestSymlinkedSegmentIsRefused(t *testing.T) {
 // damaged layout too. Left unwrapped, the raw EISDIR would leave
 // errors.Is(err, ErrCorrupt) false, contrary to what Open documents.
 func TestADirectoryWhereASectionBelongsIsCorrupt(t *testing.T) {
-	for _, name := range segFiles {
+	for _, s := range segSections {
+		name := s.name
 		t.Run(name, func(t *testing.T) {
 			dir, segDir := commitTiny(t)
 			path := filepath.Join(segDir, name)
@@ -491,7 +542,8 @@ func TestGenerationZeroIsRefused(t *testing.T) {
 // is somebody else's — and the RemoveAll that clears the target segment is
 // recursive, so accepting it deletes everything beneath.
 func TestFirstCommitRefusesADirectoryInsideASegmentName(t *testing.T) {
-	for _, name := range segFiles {
+	for _, s := range segSections {
+		name := s.name
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			bystander := filepath.Join(dir, segDirName(1), name, "vacation-photos")
@@ -540,7 +592,8 @@ func TestFirstCommitRefusesAForeignSectionFile(t *testing.T) {
 		return path
 	}
 
-	for _, name := range segFiles {
+	for _, s := range segSections {
+		name := s.name
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := plant(t, dir, name, []byte(bystander))

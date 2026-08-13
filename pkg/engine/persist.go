@@ -112,8 +112,12 @@ func (ix *Index) Commit(dir string) error {
 		return fmt.Errorf("commit %s: %w", seg, err)
 	}
 	// The segment directory's entries need to reach disk before the manifest
-	// claims they exist.
+	// claims they exist — and so does the segment directory's own entry in dir.
+	// Syncing only the inside leaves the rename free to land first, and a
+	// manifest naming a directory whose entry never made it is exactly the
+	// mixed state the rename exists to rule out.
 	syncDir(segRoot)
+	syncDir(root)
 
 	// The temp manifest is created exclusively, so a leftover from a crashed
 	// commit has to be cleared here rather than truncated open. Removing a
@@ -177,11 +181,13 @@ func Open(dir string) (*Index, error) {
 	if err != nil {
 		// Same reasoning as openSection: the manifest named it, so a segment
 		// that is missing — or is a plain file standing where its directory
-		// belongs, which is a foreign layout and not an index of ours — is
-		// damage rather than an index that was never written. A directory that
-		// is genuinely there and still will not open is the filesystem
-		// refusing us, not corruption, and reports as itself.
-		fi, serr := root.Stat(segs[0])
+		// belongs, or a symlink the root refuses to follow out of the index
+		// directory, both foreign layouts and not an index of ours — is damage
+		// rather than an index that was never written. A directory that is
+		// genuinely there and still will not open is the filesystem refusing
+		// us, not corruption, and reports as itself. Lstat, not Stat, for the
+		// reason openSection gives: Stat follows the link in question.
+		fi, serr := root.Lstat(segs[0])
 		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.IsDir()) {
 			return nil, fmt.Errorf("open %s: the manifest names this segment but no directory stands there: %w", segs[0], ErrCorrupt)
 		}
@@ -189,22 +195,13 @@ func Open(dir string) (*Index, error) {
 	}
 	defer segRoot.Close()
 
-	metaR, err := openSection(segRoot, metaFile, kindMeta)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
+	rs := make([]*segReader, len(segSections))
+	for i, s := range segSections {
+		if rs[i], err = openSection(segRoot, s.name, s.kind); err != nil {
+			return nil, fmt.Errorf("open %s: %w", segs[0], err)
+		}
 	}
-	docsR, err := openSection(segRoot, docsFile, kindDocs)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
-	}
-	postR, err := openSection(segRoot, postingsFile, kindPostings)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
-	}
-	termsR, err := openSection(segRoot, termsFile, kindTerms)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
-	}
+	metaR, docsR, postR, termsR := rs[0], rs[1], rs[2], rs[3]
 
 	docCount, totalLen, vecDim, err := decodeMeta(metaR)
 	if err != nil {
@@ -240,6 +237,18 @@ func Open(dir string) (*Index, error) {
 func readManifest(root *os.Root) (gen uint64, segs []string, err error) {
 	b, err := root.ReadFile(manifestName)
 	if err != nil {
+		// An entry of the wrong kind at the entry point is classified the way
+		// openSection classifies one at a section's path, and for the same
+		// reason: a directory or a symlink standing here is a foreign layout,
+		// not an index that was never written, and reporting the raw EISDIR
+		// would leave it neither ErrCorrupt nor fs.ErrNotExist — so Open's
+		// caller gets no branch to take and Commit's "no manifest means a first
+		// commit" reads it as neither. A manifest that is genuinely absent
+		// still fails the Lstat and still reports fs.ErrNotExist, which is what
+		// that branch is for.
+		if fi, lerr := root.Lstat(manifestName); lerr == nil && !fi.Mode().IsRegular() {
+			return 0, nil, fmt.Errorf("%s: not a regular file: %w", manifestName, ErrCorrupt)
+		}
 		return 0, nil, err
 	}
 	r, err := parseSection(manifestName, b, kindManifest)
@@ -284,10 +293,6 @@ func readManifest(root *os.Root) (gen uint64, segs []string, err error) {
 	}
 	return gen, segs, nil
 }
-
-// segFiles are the four section files a segment directory holds, and the only
-// entries weft's writer ever creates inside one.
-var segFiles = []string{metaFile, docsFile, postingsFile, termsFile}
 
 // refuseForeignEntries establishes that a directory with no manifest is
 // weft's to overwrite, before Commit deletes anything in it.
@@ -341,7 +346,8 @@ func refuseForeignEntries(root *os.Root) error {
 				// that clears this directory is recursive, so a *directory* called
 				// meta or docs would take everything beneath it along, and a plain
 				// file under one of those names is only weft's if it says so.
-				if !slices.Contains(segFiles, f.Name()) || !f.Type().IsRegular() {
+				known := slices.ContainsFunc(segSections, func(s segSection) bool { return s.name == f.Name() })
+				if !known || !f.Type().IsRegular() {
 					return fmt.Errorf("%s holds %s, which weft never wrote, and no manifest claims it, so weft will not delete it", e.Name(), f.Name())
 				}
 				if err := refuseForeignFile(root, filepath.Join(e.Name(), f.Name())); err != nil {
