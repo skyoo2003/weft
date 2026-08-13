@@ -1,5 +1,7 @@
 # weft
 
+[![CI](https://github.com/skyoo2003/weft/actions/workflows/ci.yml/badge.svg)](https://github.com/skyoo2003/weft/actions/workflows/ci.yml)
+
 > The weft thread. The warp threads never touch each other; one weft crosses and binds them all.
 
 A search engine where ranking signals are interchangeable. Go, from scratch, standard library only.
@@ -113,7 +115,7 @@ Dependencies point inward. `engine` imports no weft package; `fusion` imports on
 ## Development
 
 ```bash
-make            # build + vet + test
+make            # fmt + build + vet + test — the same gate CI runs
 make arch       # the three assertions above
 make deps       # zero dependencies, and fusion sees no scorer
 make run        # interactive demo

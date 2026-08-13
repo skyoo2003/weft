@@ -1,0 +1,28 @@
+name: CI
+
+# The gate is `make all`, not a list of commands copied from the Makefile.
+# What passes locally and what CI judges must be the same thing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  all:
+    name: make all
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod is the single source of truth for the Go version.
+          go-version-file: go.mod
+
+      # fmt + build + vet + test -race. No module cache: zero external
+      # dependencies means there is nothing to cache.
+      - run: make all
