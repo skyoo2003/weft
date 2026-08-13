@@ -1,6 +1,19 @@
-.PHONY: all build vet test arch deps run example clean
+.PHONY: all fmt build vet test arch deps run example clean
 
-all: build vet test
+all: fmt build vet test
+
+# go vet says nothing about formatting, so drift would otherwise surface in
+# review instead of before the commit. gofmt's exit status carries as much as
+# its output: a file it cannot parse prints nothing to stdout, which would read
+# as clean. Build, vet and test would not catch it either if the file is behind
+# a build tag for another platform.
+fmt:
+	@files=$$(gofmt -l .) || { echo "FAIL: gofmt errored"; exit 1; }; \
+	if [ -n "$$files" ]; then \
+		echo "FAIL: not gofmt'd:"; echo "$$files"; exit 1; \
+	else \
+		echo "OK: gofmt clean"; \
+	fi
 
 build:
 	go build ./...
@@ -9,7 +22,7 @@ vet:
 	go vet ./...
 
 # -race by default: scorer/text has a concurrent-writer test that only means
-# anything under the detector, and there is no CI to run it anywhere else.
+# anything under the detector.
 test:
 	go test -race ./...
 
