@@ -142,15 +142,6 @@ func (ix *Index) Add(d Document) (DocID, error) {
 		return 0, fmt.Errorf("add %q: %w", d.Key, ErrDuplicateKey)
 	}
 
-	if len(d.Vector) > 0 {
-		if ix.vecDim == 0 {
-			ix.vecDim = len(d.Vector)
-		} else if len(d.Vector) != ix.vecDim {
-			return 0, fmt.Errorf("add %q: vector has %d dims, corpus has %d: %w",
-				d.Key, len(d.Vector), ix.vecDim, ErrDimMismatch)
-		}
-	}
-
 	// DocID is uint32, so this conversion truncates silently past 2^32
 	// documents: the id wraps to 0 and every posting, key and link written
 	// afterwards addresses document 0 instead. Doc and DocLen already compare
@@ -162,9 +153,31 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// does not fit on a 32-bit target: the package stops compiling entirely
 	// under GOARCH=386. Widened, the comparison is simply never true there,
 	// which is the right answer — an int that narrow cannot reach the limit.
-	if uint64(len(ix.docs)) > math.MaxUint32 {
-		return 0, fmt.Errorf("add %q: index is full at %d documents", d.Key, uint64(math.MaxUint32)+1)
+	//
+	// The comparison is >=, not >, so the ceiling is 2^32-1 documents rather
+	// than 2^32: one lower than DocID alone would allow, and the number
+	// FORMAT.md publishes. The doc count on disk is a uvarint the reader ranges
+	// against MaxUint32, so accepting one more here would build an index that
+	// commits and then cannot be reopened.
+	//
+	// Checked before the vector width below, not after: that branch is the one
+	// place Add mutates the index before it can still fail, and a rejected Add
+	// leaving ix.vecDim set to the width of a document that was never stored
+	// would make Commit write a meta the docs file cannot back — a segment that
+	// commits and then refuses to reopen.
+	if uint64(len(ix.docs)) >= math.MaxUint32 {
+		return 0, fmt.Errorf("add %q: index is full at %d documents", d.Key, uint64(math.MaxUint32))
 	}
+
+	if len(d.Vector) > 0 {
+		if ix.vecDim == 0 {
+			ix.vecDim = len(d.Vector)
+		} else if len(d.Vector) != ix.vecDim {
+			return 0, fmt.Errorf("add %q: vector has %d dims, corpus has %d: %w",
+				d.Key, len(d.Vector), ix.vecDim, ErrDimMismatch)
+		}
+	}
+
 	id := DocID(len(ix.docs))
 	ix.docs = append(ix.docs, d)
 	ix.byKey[d.Key] = id

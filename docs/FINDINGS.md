@@ -159,7 +159,7 @@ The general fix is for `DocID` to carry its namespace, which milestone 2 needs a
 3. **Two places depend on `DocID` increasing densely** — the tiebreak in `engine.TopK`, and postings staying sorted because appends are monotonic. Deletion and segment merge break that invariant; design tombstones and generations first.
 4. **Make BM25 collection statistics atomic per commit.** `N`, `avgdl` and `docLen` are collection-wide, so "one commit makes all scorers' data visible atomically" must include the statistics snapshot, or a query landing mid-commit produces inconsistent scores. Easy to atomize document visibility and forget the statistics.
 5. **Evaluation dataset** — settled in [DATASETS.md](DATASETS.md): milestone 4 is viable and milestone 2's scope is unaffected.
-6. **Run one round of community research.** Zero user interviews so far.
+6. **Community research: one round done, desk-only** — [RESEARCH.md](RESEARCH.md). The bleve-closedness assumption is verified at source level (fusion is kind-closed: `1 FTS + N kNN` streams). The strongest counter-finding: embeddable Lucene already has open N-signal ranking, so the gap weft fills is Go-specific, not capability-first. User interviews remain zero.
 
 ---
 
@@ -173,3 +173,94 @@ The general fix is for `DocID` to carry its namespace, which milestone 2 needs a
 | Is harmonic decay the right shape for recency? | `1/(1 + age/HalfLife)` replaced `2^(-age/HalfLife)`, which underflowed to zero past ~88 years and let insertion order stand in for recency. Both orderings are identical wherever the exponential is representable, so the swap is rank-neutral and the fused demo output did not move — which also means nothing here measures which tail is better. Age is computed from the timestamps rather than with `Sub` for the same reason: a `time.Duration` saturates at ±292 years, which is the same tie one era further out. Each operand is then widened to `float64` before the subtraction, since Unix seconds span more than `int64` and a wrapped difference reads as a future date, which scores the oldest possible document 1.0. |
 | Does CJK tokenization matter? | `engine.Tokenize` collapses CJK runs into one token — a known wrong answer milestone 1 did not need to be right about. Same pressure point as §2.2. |
 | Is multi-month solo development sustainable? | Milestone 1 finished well under estimate because of the in-memory and standard-library-only constraints. That says milestone 1 was easy and nothing more; persistence and segment merge are the real test. |
+
+---
+
+# Milestone 2 — Persistence
+
+**Verdict: the pass lines hold.** An index restored from disk is
+indistinguishable from the index that was committed, and a commit is atomic
+against process death. Evidence: `pkg/engine/restore_test.go`,
+`persist_test.go`, `segment_test.go`; the format spec is
+[FORMAT.md](FORMAT.md).
+
+## 1. Result
+
+**Restore equivalence.** Four scorers plus `fusion.Fuse` produce bit-identical
+rankings — same documents, same order, same `float64` scores — before a
+`Commit` and after an `Open`, across a query set covering text-only, hybrid,
+seeded, empty-result and out-of-range-k queries (`TestRestoredIndexRanksIdentically`).
+Exact score equality is the strong form of the claim: it holds only because
+postings order, document lengths and collection statistics survived the disk
+exactly.
+
+**Commit atomicity.** A segment written but never named by a MANIFEST is
+indistinguishable from one that never existed, and gets swept
+(`TestUnmanifestedSegmentIsInvisible`). Commit refuses to write over a corrupt
+manifest rather than guess a generation. The commit point is one rename.
+
+**The D-001 rot check became structural.** D-001 required tests to verify the
+unread block metadata; the decoder now re-derives `maxDocID`, `maxTF` and
+`minDocLen` from every block's contents on every `Open` and refuses the file
+on disagreement — rot cannot wait for a test run. On top sit a lying-file
+matrix (twenty checksum-valid files each violating one semantic rule),
+exhaustive byte-flip and truncation sweeps over every file, and fuzzing over
+every decoder (2M+ executions, zero panics).
+
+**The architecture was not touched.** `pkg/scorer/*` and `pkg/fusion/*` diff
+against main is zero lines; `make arch` stays green; external dependencies
+stay zero. The engine's exported API grew by exactly four names — `Commit`,
+`Open`, `ErrCorrupt`, `ErrBadVersion` — all recorded in the golden file as
+assertion 2 intended: a visible edit, not a silent one.
+
+## 2. What §4 asked for, and what it got
+
+| §4 item | Disposition |
+|---|---|
+| 1. Postings format per D-001 | Done. Blocks of ≤128 with the metadata triple, delta-encoded, blocks independently decodable. |
+| 2. `Links` keyed by document key | Done. Keys on disk, never DocIDs; dangling links survive restore unresolved. |
+| 3. DocID density vs deletion/merge | **Designed, deliberately not built.** The manifest carries a generation number and a segment *list*; that is the place tombstones and multi-segment state will live. No Delete API exists, so density is never violated in v1. |
+| 4. BM25 statistics atomic per commit | Done. The whole segment is encoded under one read lock, and `Open` cross-checks meta against the documents it describes. |
+| 6. Community research | Done before this milestone — [RESEARCH.md](RESEARCH.md). |
+
+**§3.4 (DocID namespace) is deferred to milestone 3, on purpose.** A v1 store
+is one segment rewritten wholesale per commit, so there is no second namespace
+for a DocID to collide with. Multi-segment reading is what forces the issue,
+and it arrives together with deletion and merge — solving it now would mean
+designing against a guess, the same error D-001 declined.
+
+## 3. Known costs
+
+### 3.1 A commit rewrites the whole corpus
+
+O(corpus) per `Commit`, marked with a `ponytail:` comment on the method. The
+repayment trigger is milestone 3, where corpus size is the point; the manifest
+being a list means incremental segments change the format's contents, not the
+format.
+
+### 3.2 Every Open verifies everything
+
+Decoder verification is O(index) per `Open`. Free today — `Open` is eager and
+already reads every byte — but milestone 3's lazy loader cannot verify what it
+does not load. The checks will have to move: per-block on first touch, or into
+an explicit scrub. Leaving them out is not an option; they are what makes the
+D-001 metadata trustworthy at milestone 5.
+
+### 3.3 The 6-byte header is part of the format
+
+The terms index records absolute file offsets, so the frame header's size is
+load-bearing. Cheap while the version fits one varint byte (through 127);
+version 128 would be a format change anyway.
+
+## 4. Carried into milestone 3
+
+1. **Multi-segment reading, DocID namespacing (§3.4) and tombstones travel
+   together.** They are one design problem — a global DocID becomes
+   (segment, local id) the moment two segments are live — and the manifest's
+   segment list is where it starts.
+2. **Re-house the decoder's verification before lazy loading.** See §3.2.
+3. **The fsync boundary is declared, not proven.** FORMAT.md scopes power-loss
+   durability to best-effort. If a milestone ever claims more, it owes a
+   torn-write test harness, not a stronger sentence.
+4. Successive commits churn the whole directory (write new generation, delete
+   old). Fine at in-memory scale; incremental segments make it moot.
