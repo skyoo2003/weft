@@ -22,7 +22,10 @@ jobs:
         with:
           # go.mod is the single source of truth for the Go version.
           go-version-file: go.mod
+          # Zero external dependencies means no go.sum, and the cache is on by
+          # default: it warns on every run looking for a file that will never
+          # exist. Nothing to cache, so ask for nothing.
+          cache: false
 
-      # fmt + build + vet + test -race. No module cache: zero external
-      # dependencies means there is nothing to cache.
+      # fmt + build + vet + test -race.
       - run: make all

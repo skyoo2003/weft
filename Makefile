@@ -3,9 +3,12 @@
 all: fmt build vet test
 
 # go vet says nothing about formatting, so drift would otherwise surface in
-# review instead of before the commit.
+# review instead of before the commit. gofmt's exit status carries as much as
+# its output: a file it cannot parse prints nothing to stdout, which would read
+# as clean. Build, vet and test would not catch it either if the file is behind
+# a build tag for another platform.
 fmt:
-	@files=$$(gofmt -l .); \
+	@files=$$(gofmt -l .) || { echo "FAIL: gofmt errored"; exit 1; }; \
 	if [ -n "$$files" ]; then \
 		echo "FAIL: not gofmt'd:"; echo "$$files"; exit 1; \
 	else \
