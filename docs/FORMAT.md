@@ -198,9 +198,9 @@ plausible but breaks an invariant a scorer relies on.
 | A non-final block that is not full | Block and posting counts would stop agreeing |
 | A block whose first DocID does not exceed the previous block's last | The block continued a delta chain instead of starting absolute |
 | A segment directory or section file that resolves outside the index directory | Both readers work through an `os.Root`, so a symlink planted where a segment belongs is refused by the OS, not by a check that a rename could race |
-| A plain file standing where the manifest names a segment directory | A manifest naming a segment has already said this directory is an index, so the entry not being a directory is a foreign or damaged layout. Reported as `ErrCorrupt` rather than the raw `ENOTDIR`, alongside the missing-directory case. A directory that is genuinely there and still will not open is the filesystem refusing us, not corruption, and reports as itself |
+| A plain file standing where the manifest names a segment directory, or a directory standing where one of its section files belongs | A manifest naming a segment has already said this directory is an index, so an entry of the wrong kind is a foreign or damaged layout. Reported as `ErrCorrupt` rather than the raw `ENOTDIR` or `EISDIR`, alongside the missing-directory and missing-file cases. An entry of the right kind that is genuinely there and still will not open is the filesystem refusing us, not corruption, and reports as itself |
 | A manifest whose generation already names the segment the next commit would write | `Commit` clears a half-written segment directory before writing it; aimed at the live segment that clears the published commit |
-| A generation of `MaxUint64` | The counter advances one commit at a time, so the largest value it can hold is one no writer reached. It is also what `Commit`'s `generation + 1` would wrap to zero on, aiming the pre-write `RemoveAll` at `seg-000000` and then publishing a generation below the one it replaced |
+| A generation of `0` or `MaxUint64` | The counter advances one commit at a time from a first commit that publishes `1`, so neither end is a state a writer produced. `0` describes a commit that never happened: accepting it would load a foreign layout, and let the next `Commit` publish over it and then sweep away a `seg-000000` weft never wrote. `MaxUint64` is what `Commit`'s `generation + 1` would wrap to zero on, aiming the pre-write `RemoveAll` at `seg-000000` and then publishing a generation below the one it replaced |
 
 **What a reader deliberately does not check** is that a term matches the text of
 the documents it names: nothing re-tokenizes `Text` to compare per-document term
@@ -245,12 +245,17 @@ every `seg-*` entry it finds — its own target before writing it, the rest in t
 sweep afterwards — and a manifest is what proves those names are weft's own debris.
 With no manifest there is nothing to say that `seg-000001` is debris rather than a
 caller's directory sitting under a name weft happens to reserve, so `Commit` aimed
-at a home or documents directory would recursively delete data it never wrote. A
-commit that crashed before its rename must still be recoverable, so the test is
-what such a commit leaves behind rather than mere absence: a `seg-*` entry may
-exist, but only as a real directory holding nothing but section files. Anything
-else — a stray file inside it, or a symlink standing at the name — and the commit
-refuses before it mutates anything at all.
+at a home or documents directory would recursively delete data it never wrote. The
+same goes for `MANIFEST.tmp`, the other name `Commit` deletes on sight. A commit
+that crashed before its rename must still be recoverable, so the test is what such
+a commit leaves behind rather than mere absence: a `seg-*` entry may exist, but
+only as a real directory holding nothing but regular section files, and
+`MANIFEST.tmp` may exist, but only holding what the writer leaves — nothing, since
+it buffers until close, or a prefix of the frame it was writing. Anything else — a
+stray file inside the segment, a *directory* named `meta`, which the recursive
+clearing would take everything beneath, a symlink standing at either name, or a
+temp manifest without weft's magic — and the commit refuses before it mutates
+anything at all.
 
 One writer at a time. `Commit` is safe alongside `Add` and queries — it takes the
 same read lock a query does — but not alongside another `Commit` on the same

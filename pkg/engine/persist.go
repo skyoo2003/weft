@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -80,7 +81,7 @@ func (ix *Index) Commit(dir string) error {
 		gen = 0
 		// No manifest means nothing here is published. It does not mean this
 		// directory is weft's.
-		if err := refuseForeignSegments(root); err != nil {
+		if err := refuseForeignEntries(root); err != nil {
 			return fmt.Errorf("commit %s: %w", dir, err)
 		}
 	} else if err != nil {
@@ -88,7 +89,7 @@ func (ix *Index) Commit(dir string) error {
 	}
 
 	// readManifest has already established that the live segment is named for
-	// gen and that gen+1 does not wrap, and refuseForeignSegments has done the
+	// gen and that gen+1 does not wrap, and refuseForeignEntries has done the
 	// same job for a directory with no manifest at all, so the directory cleared
 	// below is this commit's own debris and never the published one.
 	seg := segDirName(gen + 1)
@@ -268,13 +269,16 @@ func readManifest(root *os.Root) (gen uint64, segs []string, err error) {
 		return 0, nil, fmt.Errorf("%s: generation %d names %q; format v1 writes exactly one segment, called %s: %w",
 			manifestName, gen, segs, want, ErrCorrupt)
 	}
-	// Generation counts commits, one at a time, so the largest value a uint64
-	// holds is one no writer ever reached. Refusing it here is also what keeps
-	// Commit's gen+1 from wrapping to zero: a wrapped generation would aim the
-	// pre-write RemoveAll at seg-000000 and then publish a generation lower than
-	// the one it replaced, breaking the strictly increasing counter the format
-	// rests on.
-	if gen == math.MaxUint64 {
+	// Generation counts commits one at a time from a first commit that publishes
+	// 1, so neither end of the counter is a state a writer produced. Zero
+	// describes a commit that never happened: accepting it would load a foreign
+	// v1 layout, and let the next Commit publish over it and then sweep away a
+	// seg-000000 weft never wrote. MaxUint64 is the other end, and refusing it is
+	// also what keeps Commit's gen+1 from wrapping back onto zero — a wrapped
+	// generation would aim the pre-write RemoveAll at seg-000000 and then publish
+	// a generation lower than the one it replaced, breaking the strictly
+	// increasing counter the format rests on.
+	if gen == 0 || gen == math.MaxUint64 {
 		return 0, nil, fmt.Errorf("%s: generation %d, which no sequence of commits could reach: %w", manifestName, gen, ErrCorrupt)
 	}
 	return gen, segs, nil
@@ -284,7 +288,7 @@ func readManifest(root *os.Root) (gen uint64, segs []string, err error) {
 // entries weft's writer ever creates inside one.
 var segFiles = []string{metaFile, docsFile, postingsFile, termsFile}
 
-// refuseForeignSegments establishes that a directory with no manifest is
+// refuseForeignEntries establishes that a directory with no manifest is
 // weft's to overwrite, before Commit deletes anything in it.
 //
 // Commit removes every seg-* entry it finds — this generation's target before
@@ -294,32 +298,58 @@ var segFiles = []string{metaFile, docsFile, postingsFile, termsFile}
 // weft happens to reserve, and a first Commit aimed at, say, a home directory
 // would recursively delete data it never wrote.
 //
+// The same holds for MANIFEST.tmp, the other name Commit deletes on sight.
+//
 // A commit that crashed before its rename must still be recoverable, so the
 // test is what such a commit leaves behind rather than mere absence: a seg-*
-// entry may exist, but only as a real directory holding nothing but section
-// files. Anything else and Commit refuses before it mutates a thing.
-func refuseForeignSegments(root *os.Root) error {
+// entry may exist, but only as a real directory holding nothing but regular
+// section files, and MANIFEST.tmp may exist, but only holding what segWriter
+// leaves — nothing, since it buffers until close, or a prefix of the frame it
+// was writing when the machine died. Anything else and Commit refuses before it
+// mutates a thing.
+func refuseForeignEntries(root *os.Root) error {
 	entries, err := readDir(root, ".")
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), segPrefix) {
+		switch {
+		case e.Name() == manifestName+".tmp":
+			// A symlink is not a regular file here — ReadDir reports the link
+			// itself — so one planted at this name is somebody else's, which is
+			// also what stops the read below from following it.
+			if !e.Type().IsRegular() {
+				return fmt.Errorf("%s is not a file and no manifest claims it, so weft will not delete it", e.Name())
+			}
+			b, err := root.ReadFile(e.Name())
+			if err != nil {
+				return err
+			}
+			// Either the file starts with weft's magic, or — for a write torn
+			// shorter than the magic itself — the magic starts with the file. An
+			// empty file, which is what a crash before close leaves, is the
+			// second case.
+			if !bytes.HasPrefix(b, segMagic) && !bytes.HasPrefix(segMagic, b) {
+				return fmt.Errorf("%s was not written by weft and no manifest claims it, so weft will not delete it", e.Name())
+			}
+		case !strings.HasPrefix(e.Name(), segPrefix):
 			continue
-		}
-		// A symlink is not a directory here — ReadDir reports the link itself —
-		// so one planted at a segment's name is somebody else's, exactly as it
-		// is for the manifest's temp file.
-		if !e.IsDir() {
+		// Again: a symlink is not a directory here, so one standing at a
+		// segment's name is somebody else's.
+		case !e.IsDir():
 			return fmt.Errorf("%s is not a segment directory and no manifest claims it, so weft will not delete it", e.Name())
-		}
-		inner, err := readDir(root, e.Name())
-		if err != nil {
-			return err
-		}
-		for _, f := range inner {
-			if !slices.Contains(segFiles, f.Name()) {
-				return fmt.Errorf("%s holds %s, which weft never wrote, and no manifest claims it, so weft will not delete it", e.Name(), f.Name())
+		default:
+			inner, err := readDir(root, e.Name())
+			if err != nil {
+				return err
+			}
+			for _, f := range inner {
+				// The name alone is not enough: the RemoveAll that clears this
+				// directory is recursive, so a *directory* called meta or docs
+				// would take everything beneath it along.
+				if !slices.Contains(segFiles, f.Name()) || !f.Type().IsRegular() {
+					return fmt.Errorf("%s holds %s, which weft never wrote, and no manifest claims it, so weft will not delete it", e.Name(), f.Name())
+				}
 			}
 		}
 	}

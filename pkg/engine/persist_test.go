@@ -423,6 +423,150 @@ func TestSymlinkedSegmentIsRefused(t *testing.T) {
 	}
 }
 
+// TestADirectoryWhereASectionBelongsIsCorrupt is the section-level twin of the
+// test above. A manifest naming a segment has said this directory is an index,
+// so a directory standing where one of its four files belongs is a foreign or
+// damaged layout too. Left unwrapped, the raw EISDIR would leave
+// errors.Is(err, ErrCorrupt) false, contrary to what Open documents.
+func TestADirectoryWhereASectionBelongsIsCorrupt(t *testing.T) {
+	for _, name := range segFiles {
+		t.Run(name, func(t *testing.T) {
+			dir, segDir := commitTiny(t)
+			path := filepath.Join(segDir, name)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Open(dir)
+			if !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("a directory at %s: got %v, want ErrCorrupt", name, err)
+			}
+			if errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("a directory at %s also reads as fs.ErrNotExist: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestGenerationZeroIsRefused covers the other end of the counter. The first
+// commit publishes generation 1, so a checksum-valid manifest claiming 0 —
+// naming seg-000000, which is what makes it survive the name check — describes a
+// state no sequence of commits could produce. Accepting it lets Open load a
+// foreign format-v1 layout, and lets Commit publish over it and sweep away a
+// directory weft never wrote.
+func TestGenerationZeroIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	rewriteSection(t, filepath.Join(dir, manifestName), kindManifest, func(w *segWriter) {
+		w.uvarint(0)
+		w.uvarint(1)
+		w.str(segDirName(0))
+	})
+	bystander := filepath.Join(dir, segDirName(0), "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(bystander), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bystander, []byte("not weft's"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ix := New()
+	addAll(t, ix, []Document{{Key: "a", Text: "must not supersede a state weft never wrote"}})
+	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Commit: got %v, want ErrCorrupt", err)
+	}
+	if _, err := os.Stat(bystander); err != nil {
+		t.Fatalf("the swept directory was not weft's to sweep: %v", err)
+	}
+	// readManifest is shared, so the same impossible counter is refused on read.
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestFirstCommitRefusesADirectoryInsideASegmentName closes the gap a name-only
+// ownership check leaves. weft's writer puts nothing but the four section files
+// in a segment directory, so a *directory* called meta, docs, postings or terms
+// is somebody else's — and the RemoveAll that clears the target segment is
+// recursive, so accepting it deletes everything beneath.
+func TestFirstCommitRefusesADirectoryInsideASegmentName(t *testing.T) {
+	for _, name := range segFiles {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			bystander := filepath.Join(dir, segDirName(1), name, "vacation-photos")
+			if err := os.MkdirAll(filepath.Dir(bystander), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(bystander, []byte("not weft's"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			ix := New()
+			addAll(t, ix, []Document{{Key: "a", Text: "x"}})
+			if err := ix.Commit(dir); err == nil {
+				t.Fatalf("Commit claimed a directory holding a %s directory weft never wrote", name)
+			}
+			if _, err := os.Stat(bystander); err != nil {
+				t.Fatalf("Commit recursively deleted a directory it does not own: %v", err)
+			}
+		})
+	}
+}
+
+// TestFirstCommitRefusesAForeignTempManifest extends the ownership test to the
+// one other name weft reserves. Commit clears MANIFEST.tmp before writing its
+// own, and with no MANIFEST there is nothing to prove that file is weft's
+// either. What a crashed commit leaves is the yardstick: segWriter buffers until
+// close, so its debris is an empty file or a prefix of weft's frame — and that
+// much still has to be overwritable, or a crash would wedge the directory.
+func TestFirstCommitRefusesAForeignTempManifest(t *testing.T) {
+	commitInto := func(t *testing.T, dir string) error {
+		t.Helper()
+		ix := New()
+		addAll(t, ix, []Document{{Key: "a", Text: "x"}})
+		return ix.Commit(dir)
+	}
+	tmp := manifestName + ".tmp"
+
+	t.Run("foreign", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, tmp)
+		const bystander = "somebody's notes, under a name weft happens to reserve"
+		if err := os.WriteFile(path, []byte(bystander), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := commitInto(t, dir); err == nil {
+			t.Fatal("Commit claimed a directory holding a temp manifest weft never wrote")
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Commit deleted a file it does not own: %v", err)
+		}
+		if string(got) != bystander {
+			t.Fatalf("the bystander file now holds %q", got)
+		}
+		// A refused commit mutates nothing at all, not even the parts it got to.
+		if names := dirNames(t, dir); !slices.Equal(names, []string{tmp}) {
+			t.Fatalf("a refused commit left something behind: %v", names)
+		}
+	})
+
+	// A commit that died between creating the temp manifest and writing it out.
+	t.Run("own debris", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, tmp), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := commitInto(t, dir); err != nil {
+			t.Fatalf("Commit over its own unpublished debris: %v", err)
+		}
+		if _, err := Open(dir); err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+	})
+}
+
 func TestManifestNamingAnEscapePathIsRefused(t *testing.T) {
 	// A doctored manifest must not be able to point the reader outside dir.
 	dir := t.TempDir()

@@ -370,12 +370,20 @@ func (r *segReader) done() error {
 // A section the manifest names but that is not on disk is damage, not an
 // absent index: it reports ErrCorrupt rather than fs.ErrNotExist, so a caller
 // whose "nothing committed here yet" branch starts a fresh index cannot be
-// handed a half-deleted segment and quietly overwrite it.
+// handed a half-deleted segment and quietly overwrite it. An entry that is not
+// a regular file — a directory, whose read fails with EISDIR — is the same
+// judgement, and gets the same classification as the plain file Open refuses
+// where a segment directory belongs: the manifest already called this directory
+// an index, so a foreign layout inside it is damage rather than absence. A
+// regular file that still will not open is the filesystem refusing us, not
+// corruption, and reports as itself.
 func openSection(root *os.Root, name string, kind byte) (*segReader, error) {
 	b, err := root.ReadFile(name)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("%s: the manifest names this segment but the file is missing: %w", name, ErrCorrupt)
-	} else if err != nil {
+	if err != nil {
+		fi, serr := root.Stat(name)
+		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.Mode().IsRegular()) {
+			return nil, fmt.Errorf("%s: the manifest names this segment but no section file stands here: %w", name, ErrCorrupt)
+		}
 		return nil, err
 	}
 	return parseSection(name, b, kind)
