@@ -210,10 +210,34 @@ func ReadQrels(path string) (map[string]map[string]int, error) {
 	return out, nil
 }
 
+// QueryVector is one line of query-vectors.jsonl: the embedding, and the query
+// text it was computed from.
+//
+// Text is carried rather than discarded because the id is not enough to pair a
+// vector with a query. Ids are short and stable across regenerations of the query
+// set — trec-covid numbers them "1" to "50" — so a file generated from an older
+// snapshot pairs cleanly by id and evaluates embeddings of different questions
+// under the current qrels, with nothing wrong in the coverage count to see. The
+// text is the only field that changes when the question does.
+type QueryVector struct {
+	Text string
+	Vec  []float32
+}
+
 // ReadQueryVectors reads a query-vectors.jsonl into query id -> vector.
 //
 // Produced by testdata/gen_query_vectors.py; see that script for which model and
 // why the pairing with the document vectors has to be verified rather than assumed.
+// This function checks that a record is usable at all; whether it belongs to *this*
+// query set is the caller's check, against the text (cmd/weft-eval loadQueries).
+//
+// Two ways a vector can be present and still carry no opinion, both rejected here
+// rather than downstream, where they are indistinguishable from a vector scorer
+// that honestly ranked nothing: empty, and all zero. The all-zero case is the
+// quieter one — pkg/scorer/vector treats a zero norm as no opinion because cosine
+// is undefined there, so full coverage gets reported for a file under which the
+// text+vector arm is exactly text, walking straight past the all-or-none check in
+// loadQueries that exists to catch that.
 //
 // There is no non-finite guard here, unlike the one on document vectors in
 // parseS2Batch, and the difference is worth stating because a missing guard usually
@@ -226,14 +250,14 @@ func ReadQrels(path string) (map[string]map[string]int, error) {
 // It matters because a NaN query vector would be worse than a rejected one — every
 // cosine becomes NaN, TopK sorts NaN last, and the vector scorer would hand fusion
 // a confident stream of the corpus's highest DocIDs.
-func ReadQueryVectors(path string) (map[string][]float32, error) {
+func ReadQueryVectors(path string) (map[string]QueryVector, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open query vectors: %w", err)
 	}
 	defer f.Close()
 
-	out := make(map[string][]float32)
+	out := make(map[string]QueryVector)
 	s := scanLines(f)
 	for line := 1; s.Scan(); line++ {
 		raw := s.Bytes()
@@ -241,8 +265,9 @@ func ReadQueryVectors(path string) (map[string][]float32, error) {
 			continue
 		}
 		var rec struct {
-			ID  string    `json:"id"`
-			Vec []float32 `json:"vec"`
+			ID   string    `json:"id"`
+			Text string    `json:"text"`
+			Vec  []float32 `json:"vec"`
 		}
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			return nil, fmt.Errorf("%s line %d: %w: %v", path, line, ErrBadRecord, err)
@@ -250,11 +275,29 @@ func ReadQueryVectors(path string) (map[string][]float32, error) {
 		if rec.ID == "" {
 			return nil, fmt.Errorf("%s line %d: %w", path, line, ErrMissingID)
 		}
+		// A record with no text cannot be checked against the query set at all, so it
+		// is refused rather than admitted as an unverifiable vector. gen_query_vectors.py
+		// has always written this field; a file missing it did not come from that script.
+		if rec.Text == "" {
+			return nil, fmt.Errorf("%s line %d: query %q has no text to verify the pairing against: %w "+
+				"(regenerate with testdata/gen_query_vectors.py)", path, line, rec.ID, ErrBadRecord)
+		}
 		if len(rec.Vec) == 0 {
 			return nil, fmt.Errorf("%s line %d: query %q has an empty vector: %w",
 				path, line, rec.ID, ErrBadRecord)
 		}
-		out[rec.ID] = rec.Vec
+		nonzero := false
+		for _, v := range rec.Vec {
+			if v != 0 {
+				nonzero = true
+				break
+			}
+		}
+		if !nonzero {
+			return nil, fmt.Errorf("%s line %d: query %q has an all-zero vector, which the vector "+
+				"scorer reads as no opinion: %w", path, line, rec.ID, ErrBadRecord)
+		}
+		out[rec.ID] = QueryVector{Text: rec.Text, Vec: rec.Vec}
 	}
 	if err := s.Err(); err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)

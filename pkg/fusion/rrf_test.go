@@ -4,6 +4,7 @@ package fusion
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -323,5 +324,69 @@ func TestDuplicateDocWithinOneStreamAccumulates(t *testing.T) {
 	}
 	if got[0].Doc != 1 {
 		t.Fatalf("Fuse = %v, want doc 1 first", docs(got))
+	}
+}
+
+// TestFuseWeightedLargeWeightsDoNotOverflow is the regression for weights that are
+// each individually in contract and collectively are not.
+//
+// Every term is sw/(RRFk+rank), so a weight near math.MaxFloat64 makes one term
+// about MaxFloat64/61 — finite, with room to spare. Summing them is what runs out:
+// around 62 streams the total passes MaxFloat64 and becomes +Inf, every document the
+// streams agree on lands there together, and TopK settles them on DocID. Nothing in
+// the call is out of contract — finite non-negative weights, any number of streams —
+// so no guard inside fuse can catch it; scaleDown removes the headroom problem
+// before the accumulation starts.
+//
+// The fixture puts the winner at the higher DocID on purpose. With doc 1 ranked
+// first the collapsed order and the correct order are the same list, and the test
+// would pass on a ranking that had been destroyed.
+func TestFuseWeightedLargeWeightsDoNotOverflow(t *testing.T) {
+	const n = 100
+	streams := make([][]engine.Candidate, n)
+	weights := make([]float64, n)
+	for i := range streams {
+		streams[i] = []engine.Candidate{{Doc: 2, Score: 9}, {Doc: 1, Score: 8}}
+		weights[i] = math.MaxFloat64
+	}
+	got := FuseWeighted(weights...)(streams, 2)
+	if !equal(docs(got), 2, 1) {
+		t.Fatalf("FuseWeighted(MaxFloat64 x %d) = %v, want [2 1]: doc 2 is ranked first "+
+			"in every stream", n, docs(got))
+	}
+	for _, c := range got {
+		if math.IsInf(c.Score, 0) {
+			t.Fatalf("doc %d scored %v; the fused score overflowed", c.Doc, c.Score)
+		}
+	}
+}
+
+// TestFuseWeightedIsScaleInvariant pins the property scaleDown relies on: only the
+// ratios between weights decide the order, so dividing them all by the largest is a
+// no-op for ranking. If this fails, scaleDown is not a safe transformation and the
+// overflow has to be handled some other way.
+func TestFuseWeightedIsScaleInvariant(t *testing.T) {
+	streams := weightStreams()
+	small := docs(FuseWeighted(1, 0.5)(streams, 6))
+	for _, scale := range []float64{2, 10, 1e6, 1e300} {
+		got := docs(FuseWeighted(scale, scale/2)(streams, 6))
+		if !equal(got, small...) {
+			t.Errorf("FuseWeighted(%v, %v) = %v, want %v (same ratio)", scale, scale/2, got, small)
+		}
+	}
+}
+
+// TestFuseWeightedLeavesSmallWeightsAlone is the compatibility guard on scaleDown.
+// Every weight set this repository actually uses has a maximum of 1 —
+// FuseWeighted(1, 1, w) in the milestone 4 sweep, FuseWeighted(1, 1, 0.1, 1) in the
+// example — so scaling must not touch them, or every published number moves for a
+// reason unrelated to the measurement.
+func TestFuseWeightedLeavesSmallWeightsAlone(t *testing.T) {
+	for _, w := range [][]float64{{1, 1}, {1, 0.5}, {1, 1, 0.1}, {0.5, 0.25}} {
+		before := slices.Clone(w)
+		scaleDown(w)
+		if !slices.Equal(w, before) {
+			t.Errorf("scaleDown(%v) = %v, want it untouched", before, w)
+		}
 	}
 }

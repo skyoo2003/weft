@@ -143,7 +143,7 @@ func prepare(ctx context.Context, args []string) error {
 
 	// 2. Resume. The output is append-only JSONL, so what is already in it is
 	// exactly what does not need refetching.
-	done, good, err := doneKeys(outPath)
+	done, models, good, err := doneKeys(outPath)
 	if err != nil {
 		return err
 	}
@@ -171,6 +171,11 @@ func prepare(ctx context.Context, args []string) error {
 	}
 	if len(want) == 0 {
 		log.Printf("nothing to fetch; %s is complete", outPath)
+		// Reported on the way out as well as at the end of a fetch. This is the run an
+		// operator makes to confirm the cache is finished, and it is the only one that
+		// sees every record — so it is the one place a model mismatch introduced by
+		// some earlier interrupted run is guaranteed to surface.
+		reportModels(models)
 		return nil
 	}
 
@@ -253,6 +258,7 @@ func prepare(ctx context.Context, args []string) error {
 	}
 	if len(targets) == 0 {
 		log.Printf("nothing left to fetch; %s is complete", outPath)
+		reportModels(models)
 		return nil
 	}
 
@@ -263,8 +269,10 @@ func prepare(ctx context.Context, args []string) error {
 			client.Pace, batches, estimate(len(targets)))
 	}
 
+	// models is seeded from the cache, not started empty: this run's own batches are
+	// added to what earlier runs already wrote, so the tally covers the whole file
+	// rather than the tail this invocation happened to fetch.
 	var fetched, missing, withVec, withRefs, rejected, edges int
-	models := make(map[string]int)
 	start := time.Now()
 	for i := 0; i < len(targets); i += eval.S2BatchLimit {
 		end := min(i+eval.S2BatchLimit, len(targets))
@@ -290,6 +298,9 @@ func prepare(ctx context.Context, args []string) error {
 			} else {
 				rec.CorpusID, rec.Refs, rec.Vector = p.CorpusID, p.Refs, p.Vector
 				if len(p.Vector) > 0 {
+					// Written to the record as well as counted, so the tally can be
+					// rebuilt by a later run that did not fetch this batch.
+					rec.Model = p.Model
 					withVec++
 					models[p.Model]++
 				}
@@ -320,39 +331,62 @@ func prepare(ctx context.Context, args []string) error {
 	log.Printf("  written    %d", fetched)
 	log.Printf("  not found  %d", missing)
 	log.Printf("  vectors    %d (%d rejected as non-finite)", withVec, rejected)
-	// Provenance, printed rather than assumed. Every published vector number is only
-	// as comparable as the model behind it, and the query vectors are generated
-	// separately against eval.S2Model.
-	for _, m := range sortedKeys(models) {
-		if m == eval.S2Model {
-			log.Printf("  model      %-24s %d", m, models[m])
-			continue
-		}
-		log.Printf("  model      %-24s %d  WARNING: not %s, so these vectors are in a "+
-			"different embedding space from the query vectors", m, models[m], eval.S2Model)
-	}
+	reportModels(models)
 	log.Printf("  citing     %d documents, %d edges", withRefs, edges)
 	return nil
 }
 
-// doneKeys reads the keys already present in an append-only S2Record JSONL, and
-// returns the byte offset just past the last record that decoded cleanly.
+// reportModels prints the embedding-model tally for every vector in the cache.
+//
+// Provenance, printed rather than assumed. Every published vector number is only as
+// comparable as the model behind it, and the query vectors are generated separately
+// against eval.S2Model, so two models in one cache means the vector arm — the
+// baseline the whole graph delta is measured against — is nonsense.
+//
+// The empty model is its own case and not a mismatch. It is what a record written
+// before eval.S2Record carried the field reads back as, so it says the provenance
+// was never recorded, which is weaker than S2Model and different from wrong.
+func reportModels(models map[string]int) {
+	for _, m := range sortedKeys(models) {
+		switch m {
+		case eval.S2Model:
+			log.Printf("  model      %-24s %d", m, models[m])
+		case "":
+			log.Printf("  model      %-24s %d  no provenance recorded (cached before the model "+
+				"field existed); rerun prepare against a fresh %s to restore it",
+				"(unrecorded)", models[m], s2File)
+		default:
+			log.Printf("  model      %-24s %d  WARNING: not %s, so these vectors are in a "+
+				"different embedding space from the query vectors", m, models[m], eval.S2Model)
+		}
+	}
+}
+
+// doneKeys reads the keys already present in an append-only S2Record JSONL. It
+// returns those keys, a tally of the embedding model behind every cached vector,
+// and the byte offset just past the last record that decoded cleanly.
 //
 // A truncated final line is tolerated rather than fatal: it is the expected shape
 // of an interrupted run, and the key it belongs to simply gets fetched again. The
 // offset is what lets the caller drop that fragment before appending, which is the
 // difference between a resumable file and one that quietly stops being readable.
-func doneKeys(path string) (map[string]bool, int64, error) {
+//
+// The model tally rides along on this pass because it is the only pass prepare
+// makes over what it already holds, and provenance a resumed run cannot see is
+// provenance nothing checks — see eval.S2Record.Model. Records with no vector are
+// not counted: they belong to no embedding space.
+func doneKeys(path string) (map[string]bool, map[string]int, int64, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string]bool{}, 0, nil
+		return map[string]bool{}, map[string]int{}, 0, nil
 	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("open %s: %w", path, err)
+		return nil, nil, 0, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 
 	done := make(map[string]bool)
+	models := make(map[string]int)
 	var good int64
 	dec := json.NewDecoder(f)
 	for {
@@ -369,6 +403,9 @@ func doneKeys(path string) (map[string]bool, int64, error) {
 		good = dec.InputOffset()
 		if rec.Key != "" {
 			done[rec.Key] = true
+		}
+		if len(rec.Vector) > 0 {
+			models[rec.Model]++
 		}
 	}
 
@@ -387,12 +424,12 @@ func doneKeys(path string) (map[string]bool, int64, error) {
 	// the start of a record that never finished.
 	if good > 0 {
 		if _, err := f.Seek(good, io.SeekStart); err != nil {
-			return nil, 0, fmt.Errorf("seek %s: %w", path, err)
+			return nil, nil, 0, fmt.Errorf("seek %s: %w", path, err)
 		}
 		var buf [16]byte
 		n, err := f.Read(buf[:])
 		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, 0, fmt.Errorf("read %s: %w", path, err)
+			return nil, nil, 0, fmt.Errorf("read %s: %w", path, err)
 		}
 		for _, b := range buf[:n] {
 			if b != '\n' && b != '\r' && b != ' ' && b != '\t' {
@@ -401,7 +438,7 @@ func doneKeys(path string) (map[string]bool, int64, error) {
 			good++
 		}
 	}
-	return done, good, nil
+	return done, models, good, nil
 }
 
 func estimate(docs int) time.Duration {
@@ -413,7 +450,12 @@ func estimate(docs int) time.Duration {
 // ---------------------------------------------------------------- build
 
 func build(ctx context.Context, args []string) error {
-	data := dataFlags("build", args, nil)
+	var partial bool
+	data := dataFlags("build", args, func(fs *flag.FlagSet) {
+		fs.BoolVar(&partial, "partial", false,
+			"build even though the Semantic Scholar cache does not cover every document "+
+				"(the vector and graph arms then measure a corpus that is partly text-only)")
+	})
 
 	corpusPath := filepath.Join(*data, corpusFile)
 	s2Path := filepath.Join(*data, s2File)
@@ -433,7 +475,7 @@ func build(ctx context.Context, args []string) error {
 		"the lowest cord_uid holds the mapping)", len(byCorpusID), duplicated)
 
 	ix := engine.New()
-	var added, withVec, withLinks, links, dangling, dimSkipped int
+	var added, withVec, withLinks, links, dangling, dimSkipped, uncached int
 	dim := 0
 
 	err = eval.ReadCorpus(corpusPath, func(d eval.CorpusDoc) error {
@@ -447,7 +489,11 @@ func build(ctx context.Context, args []string) error {
 			// is measured against.
 			Text: d.Title + " " + d.Text,
 		}
-		if r, ok := recs[d.ID]; ok {
+		r, cached := recs[d.ID]
+		if !cached {
+			uncached++
+		}
+		if cached {
 			if n := len(r.Vector); n > 0 {
 				if dim == 0 {
 					dim = n
@@ -489,6 +535,34 @@ func build(ctx context.Context, args []string) error {
 	log.Printf("  vectors    %d (dim %d, %d skipped for width)", withVec, dim, dimSkipped)
 	log.Printf("  linked     %d documents, %d in-corpus edges", withLinks, links)
 	log.Printf("  dangling   %d references outside the corpus (skipped at traversal by design)", dangling)
+
+	// A document the cache says nothing about is not the same as a document the
+	// cache says has nothing. prepare writes a record for every key it asks about,
+	// including a bare tombstone for the ones with no Semantic Scholar side at all,
+	// so a finished prepare covers the corpus exactly. A key missing from the cache
+	// therefore means prepare did not finish — `-limit`, an interrupt, or a cache
+	// from an older corpus — and the document silently enters the index with no
+	// vector and no links.
+	//
+	// Nothing downstream can tell that apart from a document the graph genuinely
+	// cannot reach, and the run still labels its arms text+vector and
+	// text+vector+graph. That is precisely how docs/EVAL.md section 4.1 produced a
+	// confident measurement of a corpus that was 40% absent, so it fails here, before
+	// the commit, rather than being counted in a table later. -partial is for
+	// deliberately smoke-testing the pipeline on a slice.
+	if uncached > 0 {
+		pct := 100 * float64(uncached) / float64(added)
+		if !partial {
+			return fmt.Errorf("%d of %d corpus documents (%.1f%%) have no record in %s, so they would "+
+				"be indexed with no vector and no links while the run still reports vector and graph "+
+				"arms; finish `weft-eval prepare` (it resumes), or pass -partial to build the slice "+
+				"deliberately", uncached, added, pct, s2Path)
+		}
+		log.Printf("WARNING: -partial: %d of %d documents (%.1f%%) are text-only because %s has no",
+			uncached, added, pct, s2Path)
+		log.Printf("WARNING: record for them. The vector and graph arms measured on this index are")
+		log.Printf("WARNING: NOT comparable to a full build and must not be published.")
+	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)

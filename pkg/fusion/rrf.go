@@ -66,6 +66,14 @@ func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
 // them +Inf; either way those documents compare equal, TopK ties them on DocID, and
 // the fused order quietly becomes corpus insertion order.
 //
+// Only the ratios between weights matter. Weights larger than 1 are scaled down so
+// the largest is 1, which leaves the fused order unchanged and keeps a large weight
+// over many streams from overflowing the accumulated score to +Inf — see scaleDown.
+// FuseWeighted(2, 1) and FuseWeighted(1, 0.5) are therefore the same Fuser, and a
+// caller reading Candidate.Score off the result is reading a number whose scale it
+// did not choose. Score has never been comparable across fusions anyway; the ranking
+// is the output.
+//
 // A weight with no corresponding stream is ignored. Positional coupling cuts both
 // ways: a caller that drops or reorders a scorer without editing its weights gets a
 // different ranking and no complaint, so the two lists belong next to each other at
@@ -89,8 +97,52 @@ func FuseWeighted(weights ...float64) engine.Fuser {
 	// Cloned because the caller is free to reuse or mutate the slice it passed,
 	// and a Fuser outlives the call that built it.
 	w := slices.Clone(weights)
+	scaleDown(w)
 	return func(streams [][]engine.Candidate, k int) []engine.Candidate {
 		return fuse(streams, k, w)
+	}
+}
+
+// scaleDown divides the weights by the largest of them, in place, when that is
+// greater than 1.
+//
+// Only the ratios between weights affect the fused order — every score is a sum of
+// wᵢ/(RRFk + rank) terms, so scaling all the weights scales every score by the same
+// factor and TopK sorts the same list. What the scaling buys is a bound. Each term
+// is at most maxW/(RRFk+1), so len(streams) of them sum to at most
+// len(streams)·maxW/61; with maxW near math.MaxFloat64 that overflows to +Inf at
+// around 62 streams, and every document the streams agree on lands there together,
+// compares equal, and is settled by TopK on DocID. That is the same collapse to
+// insertion order the NaN and +Inf weight guards prevent, arriving from weights
+// each of which is individually finite, non-negative and entirely in contract.
+// After scaling maxW is exactly 1, no term exceeds 1/61, and reaching +Inf would
+// take more than 1e310 streams.
+//
+// Two things it deliberately does not do. It does not scale *up*: weights at or
+// below 1 already cannot overflow, and leaving them untouched keeps every existing
+// call bit-for-bit what it was — FuseWeighted(1, 1, 0.1) is the shape callers
+// actually write, and no published measurement moves. And it does not renormalize
+// out-of-contract values: NaN and ±Inf are excluded from the maximum but left in
+// the slice, because dividing them changes nothing about what they are and fuse
+// still has to fold them to 0.
+//
+// A weight can underflow to 0 here, and that is honest rather than lossy: it takes
+// a ratio past 1e308 to the largest weight, at which point the stream's every
+// contribution was already further below the leader than float64 can represent.
+func scaleDown(w []float64) {
+	maxW := 0.0
+	for _, v := range w {
+		// NaN fails every comparison and is skipped for free; +Inf would win and has
+		// to be named. Both are folded to 0 by fuse regardless.
+		if v > maxW && !math.IsInf(v, 1) {
+			maxW = v
+		}
+	}
+	if maxW <= 1 {
+		return
+	}
+	for i := range w {
+		w[i] /= maxW
 	}
 }
 

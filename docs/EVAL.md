@@ -243,6 +243,20 @@ not verified; this was the same class of error one level out, and it landed anyw
 Every arm number in this document is now reported with the coverage it was measured
 at.
 
+**And the check is in the code, not only in the prose.** Reporting coverage relies on
+someone reading the number; the failure above happened with the coverage sitting in
+the log. `weft-eval build` now refuses to write an index at all unless the Semantic
+Scholar cache holds a record for every corpus document — `prepare` writes a tombstone
+even for the 8,495 documents it can find nothing for, so a finished preparation covers
+the corpus exactly and a gap can only mean the job did not finish. Building a slice on
+purpose is still available behind `-partial`, which prints that the arms it produces
+must not be published. Two adjacent holes closed with it: `query-vectors.jsonl` is now
+checked against `queries.jsonl` by *text* rather than paired on ids alone, since ids
+are stable across regenerations of the query set and a file from an older snapshot
+covers every query while embedding different questions; and an all-zero query vector
+is rejected rather than counted as coverage, because the vector scorer reads a zero
+norm as no opinion and `text+vector` would silently be `text`.
+
 ## 5. The data
 
 ### 5.1 Snapshot and provenance
@@ -747,6 +761,13 @@ go run ./cmd/weft-eval prepare          # ~1h35m, rate limited, resumable
 /tmp/weft-ref-venv/bin/python internal/eval/testdata/gen_query_vectors.py
 go run ./cmd/weft-eval build            # index + Commit + reopen equivalence check
 ```
+
+`build` fails rather than producing a partial index if `prepare` has not finished —
+including after a `prepare -limit` smoke test. Rerun `prepare` (it resumes from the
+append-only cache), or pass `-partial` to build the slice deliberately and get the
+warning that its arms are not publishable. `prepare` also reports the embedding model
+behind every vector *in the whole cache*, not just the batches that run fetched, so an
+interrupted preparation cannot hide two embedding spaces in one index.
 
 Bootstrap seed 20260814 and the frozen constants are compiled in, so `make eval`
 reprints the intervals in this document rather than approximations of them.

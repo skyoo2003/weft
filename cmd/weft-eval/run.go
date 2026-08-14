@@ -158,7 +158,18 @@ func loadQueries(dir string) ([]eval.Query, error) {
 			Qrels: rel,
 		}
 		if v, ok := vecs[q.ID]; ok {
-			eq.Query.Vector = v
+			// Paired by id, then checked by text. Ids are stable and short — trec-covid
+			// numbers its queries "1" to "50" — so a vector file generated before the
+			// query set was last edited matches every id and covers every query, and the
+			// all-or-none check below passes on embeddings of different questions. The
+			// text is what the generator writes for this, and it is only worth writing
+			// if something reads it.
+			if v.Text != q.Text {
+				return nil, fmt.Errorf("query %s in %s was embedded from %q, but %s now reads %q; "+
+					"the vector file is from an older query set (regenerate with "+
+					"testdata/gen_query_vectors.py)", q.ID, vecPath, v.Text, queriesFile, q.Text)
+			}
+			eq.Query.Vector = v.Vec
 			withVec++
 		}
 		out = append(out, eq)
@@ -230,6 +241,17 @@ func run(ctx context.Context, args []string) error {
 		fs.IntVar(&iters, "iters", bootstrapIters, "bootstrap resamples")
 		fs.Float64Var(&rankConst, "rrfk", fusion.RRFk, "RRF rank constant")
 	})
+
+	// Checked before the index is opened, so a typo costs a message rather than a
+	// minute. rrf has no error to return — it builds a Fuser — so the flag is the
+	// only place this can be caught. A negative constant is not merely unusual: at
+	// -1 the rank-1 weight is 1/0, every document a stream ranks first scores +Inf,
+	// they compare equal, and TopK settles them on DocID. NaN and ±Inf produce the
+	// same collapse from their own direction, and in all three cases the run
+	// completes and prints the result under an "RRFk=" heading naming the value.
+	if math.IsNaN(rankConst) || math.IsInf(rankConst, 0) || rankConst < 0 {
+		return fmt.Errorf("-rrfk=%v: the RRF rank constant must be finite and non-negative", rankConst)
+	}
 
 	ix, err := openIndex(*data)
 	if err != nil {

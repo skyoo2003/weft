@@ -74,11 +74,27 @@ type S2Paper struct {
 
 // S2Record is one corpus document's joined graph and vector data, as written to
 // the resumable prepare cache.
+//
+// Model is stored beside the vector rather than tallied in memory because this
+// cache is resumable and a tally is not. prepare is an hours-long job that is
+// expected to be interrupted and rerun; a run that dies mid-fetch prints no
+// summary, so the models behind the batches it did write are lost, and the run that
+// finishes the job reports only the batches it fetched itself. If the endpoint
+// answered an earlier batch with a model other than S2Model, the final report comes
+// out clean and build combines two embedding spaces in one index — invalidating the
+// vector arm the graph delta is measured against, with nothing in any output to say
+// so. Persisted, the provenance of every cached vector outlives the interruption
+// that lost the tally.
+//
+// Absent in a cache written before this field existed, where it reads back as "" and
+// means the provenance was never recorded — which is not the same as a wrong model
+// and is not reported as one.
 type S2Record struct {
 	Key      string    `json:"key"` // cord_uid
 	CorpusID string    `json:"corpus_id,omitempty"`
 	Refs     []string  `json:"refs,omitempty"`
 	Vector   []float32 `json:"vec,omitempty"`
+	Model    string    `json:"model,omitempty"`
 }
 
 // s2Response mirrors only the fields S2Fields asks for.

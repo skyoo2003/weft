@@ -213,8 +213,14 @@ func TestReadQueryVectors(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d vectors, want 2", len(got))
 	}
-	if want := []float32{0.1, -0.2}; !slices.Equal(got["1"], want) {
-		t.Errorf(`got["1"] = %v, want %v`, got["1"], want)
+	if want := []float32{0.1, -0.2}; !slices.Equal(got["1"].Vec, want) {
+		t.Errorf(`got["1"].Vec = %v, want %v`, got["1"].Vec, want)
+	}
+	// The text is kept, not discarded. It is the only field that distinguishes a
+	// vector generated for this query from one generated for whatever question wore
+	// this id in an earlier snapshot of the query set.
+	if got["1"].Text != "a" {
+		t.Errorf(`got["1"].Text = %q, want "a"`, got["1"].Text)
 	}
 }
 
@@ -225,7 +231,10 @@ func TestReadQueryVectors(t *testing.T) {
 // finite vector, the guard has to come back.
 func TestReadQueryVectorsCannotProduceNonFinite(t *testing.T) {
 	// 1e300 is a valid finite float64 and out of range for float32.
-	path := writeFile(t, "query-vectors.jsonl", `{"id": "1", "vec": [1e300, 2]}`+"\n")
+	// Text supplied so the rejection can only be the range check: without it the
+	// record would be refused as unverifiable and the test would pass for the wrong
+	// reason, with the same sentinel error.
+	path := writeFile(t, "query-vectors.jsonl", `{"id": "1", "text": "a", "vec": [1e300, 2]}`+"\n")
 	got, err := ReadQueryVectors(path)
 	if !errors.Is(err, ErrBadRecord) {
 		t.Fatalf("error = %v (vectors %v), want ErrBadRecord from encoding/json's range check", err, got)
@@ -240,8 +249,16 @@ func TestReadQueryVectorsRejectsBadData(t *testing.T) {
 	}{
 		{"not json", "{oops\n", ErrBadRecord},
 		{"no id", `{"vec": [1, 2]}` + "\n", ErrMissingID},
-		{"empty vector", `{"id": "1", "vec": []}` + "\n", ErrBadRecord},
+		{"empty vector", `{"id": "1", "text": "a", "vec": []}` + "\n", ErrBadRecord},
 		{"no vector field", `{"id": "1", "text": "a"}` + "\n", ErrBadRecord},
+		// No text means the file cannot be checked against the query set at all, and
+		// ids are too stable to pair on alone.
+		{"no text", `{"id": "1", "vec": [1, 2]}` + "\n", ErrBadRecord},
+		// Present, well-formed, and no opinion: the vector scorer reads a zero norm as
+		// an abstention, so this file reports full coverage for a text+vector arm that
+		// is exactly text.
+		{"all-zero vector", `{"id": "1", "text": "a", "vec": [0, 0, 0]}` + "\n", ErrBadRecord},
+		{"all-zero vector, signed", `{"id": "1", "text": "a", "vec": [0, -0.0]}` + "\n", ErrBadRecord},
 		{"empty file", "", ErrEmptyDataset},
 	}
 	for _, tc := range tests {
