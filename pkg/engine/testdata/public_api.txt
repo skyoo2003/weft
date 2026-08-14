@@ -1,0 +1,44 @@
+# ../fusion
+const RRFk = 60.0
+func Fuse([][]engine.Candidate, int) []engine.Candidate
+package fusion
+
+# ../scorer/graph
+const MaxDepth = 3
+const SeedN = 5
+func New(*engine.Index, engine.Scorer) *Scorer
+func NewIncludingSeeds(*engine.Index, engine.Scorer) *Scorer
+method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method Scorer.Name() string
+package graph
+type Scorer struct
+Scorer has unexported fields
+
+# ../scorer/recency
+const HalfLife = 30 * 24 * time.Hour
+func New(*engine.Index) *Scorer
+func NewAt(*engine.Index, time.Time) *Scorer
+method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method Scorer.Name() string
+package recency
+type Scorer struct
+Scorer has unexported fields
+
+# ../scorer/text
+const B = 0.75
+const K1 = 1.2
+func New(*engine.Index) *Scorer
+method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method Scorer.Name() string
+package text
+type Scorer struct
+Scorer has unexported fields
+
+# ../scorer/vector
+func New(*engine.Index) *Scorer
+method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method Scorer.Name() string
+package vector
+type Scorer struct
+Scorer has unexported fields
+var ErrDimMismatch = errors.New("vector: dimension mismatch")

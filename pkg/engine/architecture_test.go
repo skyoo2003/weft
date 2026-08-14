@@ -19,9 +19,11 @@ package engine_test
 
 import (
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -198,7 +200,93 @@ func TestNeitherEngineNorFusionImportsAScorer(t *testing.T) {
 //	WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/
 func TestEngineAPISurfaceIsUnchanged(t *testing.T) {
 	got := strings.Join(exportedAPI(t, "."), "\n") + "\n"
-	golden := filepath.Join("testdata", "engine_api.txt")
+	checkGolden(t, "engine_api.txt", got,
+		"engine's exported API changed. A new scorer needing a new Document field is a real "+
+			"engine cost. Record it in docs/FINDINGS.md, then refresh with WEFT_UPDATE_GOLDEN=1.")
+}
+
+// TestPublicAPISurfaceIsUnchanged covers the public surface the engine golden
+// leaves out.
+//
+// engine is not all of it. examples/basic imports fusion and four scorer
+// packages and calls their constructors directly, so renaming graph.New or
+// changing fusion.Fuse's signature breaks an embedder exactly as an engine
+// change would. CHANGELOG.md says a release with no entry is a release with
+// nothing for a caller to do; without this test that claim covers one package
+// out of six and is silently false for the other five.
+//
+// Directories are discovered rather than listed, so a fifth scorer joins this
+// golden the moment the package exists — unlike the scorer slices above, which
+// are edited by hand. Adding a scorer therefore shows up here as new exported
+// API, which is the intended cost: it is an addition a caller can see.
+//
+//	WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/
+func TestPublicAPISurfaceIsUnchanged(t *testing.T) {
+	var lines []string
+	for _, dir := range publicPackageDirs(t) {
+		lines = append(lines, "# "+filepath.ToSlash(dir))
+		lines = append(lines, exportedAPI(t, dir)...)
+		lines = append(lines, "")
+	}
+	checkGolden(t, "public_api.txt", strings.Join(lines, "\n"),
+		"A caller builds these directly — see examples/basic. If this change gives them work "+
+			"to do, CHANGELOG.md needs the entry whose absence would otherwise deny it.")
+}
+
+// publicPackageDirs returns every importable package under pkg/ except engine,
+// which has a golden of its own. Discovery rather than a fixed list: a scorer
+// that exists and is watched by nothing is the gap this exists to close.
+//
+// Walked to any depth rather than read one level down, because the depth is not
+// something the layout promises. Packages sit at pkg/<name> and pkg/scorer/<name>
+// today; milestone 3's ANN scorer could as easily arrive as pkg/ann/hnsw, and a
+// pair of hardcoded roots would record its parent as an empty package and never
+// look inside — the CHANGELOG's claim to cover every package under pkg/ going
+// quietly false in exactly the way this test exists to prevent. A directory is a
+// package here when it holds a non-test .go file; anything else is only a path.
+func publicPackageDirs(t *testing.T) []string {
+	t.Helper()
+	// The walk starts at pkg/, so engine is one level down from it.
+	enginePkgDir := filepath.Join("..", "engine")
+	seen := map[string]bool{}
+	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir():
+			// testdata holds the goldens themselves, and nothing under it is a
+			// package. engine is not pruned here: it is one package with a golden
+			// of its own, not a subtree that has one, and engine_api.txt reads only
+			// the files directly in it. Skipping the directory would take a future
+			// pkg/engine/storage with it.
+			if d.Name() == "testdata" {
+				return fs.SkipDir
+			}
+		case strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go"):
+			if dir := filepath.Dir(path); dir != enginePkgDir {
+				seen[dir] = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDir(..): %v", err)
+	}
+	dirs := make([]string, 0, len(seen))
+	for dir := range seen {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+// checkGolden compares got against testdata/name, or rewrites it when
+// WEFT_UPDATE_GOLDEN is set. hint is what the caller says the change costs;
+// without it a golden failure reports only that bytes differ, which is the one
+// thing the printed diff already says.
+func checkGolden(t *testing.T, name, got, hint string) {
+	t.Helper()
+	golden := filepath.Join("testdata", name)
 
 	if os.Getenv("WEFT_UPDATE_GOLDEN") != "" {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
@@ -216,9 +304,7 @@ func TestEngineAPISurfaceIsUnchanged(t *testing.T) {
 		t.Fatalf("ReadFile(%s): %v — regenerate with WEFT_UPDATE_GOLDEN=1", golden, err)
 	}
 	if got != string(want) {
-		t.Errorf("engine's exported API changed.\n--- recorded\n%s\n--- current\n%s\n"+
-			"A new scorer needing a new Document field is a real engine cost. Record it in "+
-			"docs/FINDINGS.md, then refresh with WEFT_UPDATE_GOLDEN=1.", want, got)
+		t.Errorf("%s is out of date.\n--- recorded\n%s\n--- current\n%s\n%s", golden, want, got, hint)
 	}
 }
 
@@ -239,7 +325,8 @@ func exportedAPI(t *testing.T, dir string) []string {
 		t.Fatalf("ReadDir(%s): %v", dir, err)
 	}
 	fset := token.NewFileSet()
-	var blocks [][]string
+	var files []*ast.File
+	tags := map[*ast.File]string{}
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -249,6 +336,21 @@ func exportedAPI(t *testing.T, dir string) []string {
 		if err != nil {
 			t.Fatalf("ParseFile(%s): %v", name, err)
 		}
+		files = append(files, f)
+		tags[f] = buildTag(t, dir, name)
+	}
+	if len(files) == 0 {
+		t.Fatalf("%s holds no non-test .go file", dir)
+	}
+
+	// The package clause, once: Go allows a directory only one. It is not
+	// derivable from the directory name and it is what a caller writes. Renaming
+	// package text to package lexical while leaving the directory alone keeps
+	// every declaration below byte-identical and stops text.New from compiling.
+	values := packageValues(files)
+	blocks := [][]string{{"package " + files[0].Name.Name}}
+	for _, f := range files {
+		tag := tags[f]
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
@@ -256,23 +358,28 @@ func exportedAPI(t *testing.T, dir string) []string {
 					continue
 				}
 				if d.Recv == nil {
-					blocks = append(blocks, []string{"func " + d.Name.Name + signature(d.Type)})
+					blocks = append(blocks, []string{"func " + d.Name.Name + signature(d.Type) + tag})
 				} else if recv := receiverName(d.Recv); ast.IsExported(recv) {
-					blocks = append(blocks, []string{"method " + recv + "." + d.Name.Name + signature(d.Type)})
+					blocks = append(blocks, []string{"method " + recv + "." + d.Name.Name + signature(d.Type) + tag})
 				}
 			case *ast.GenDecl:
-				for _, spec := range d.Specs {
+				for si, spec := range d.Specs {
 					switch s := spec.(type) {
 					case *ast.TypeSpec:
 						if !s.Name.IsExported() {
 							continue
 						}
-						blocks = append(blocks, typeAPI(s.Name.Name, s.Type))
+						block := typeAPI(s.Name.Name, s.Assign.IsValid(), s.TypeParams, s.Type)
+						block[0] += tag
+						blocks = append(blocks, block)
 					case *ast.ValueSpec:
-						for _, n := range s.Names {
-							if n.IsExported() {
-								blocks = append(blocks, []string{d.Tok.String() + " " + n.Name})
+						for i, n := range s.Names {
+							if !n.IsExported() {
+								continue
 							}
+							api, exprs := valueAPI(d, si, i)
+							line := d.Tok.String() + " " + n.Name + api + expand(exprs, values) + tag
+							blocks = append(blocks, []string{line})
 						}
 					}
 				}
@@ -295,10 +402,20 @@ func exportedAPI(t *testing.T, dir string) []string {
 // up its contract. Member types are recorded alongside member names, because
 // retyping Document.Vector or adding a parameter to Fuser changes what engine
 // promises without changing a single name.
-func typeAPI(name string, expr ast.Expr) []string {
+func typeAPI(name string, alias bool, tparams *ast.FieldList, expr ast.Expr) []string {
+	// A type parameter list is part of the declaration a caller instantiates.
+	// Narrowing Box[T any] to Box[T comparable] stops Box[[]byte] compiling
+	// everywhere it is already written, and nothing below the head would move.
+	head := "type " + name + typeParams(tparams)
+	if alias {
+		// type X = T and type X T are different promises: only the alias lets a
+		// T reach a parameter of type X without a conversion. Dropping the "="
+		// would make that break look like no change at all.
+		head += " ="
+	}
 	switch t := expr.(type) {
 	case *ast.StructType:
-		out := []string{"type " + name + " struct"}
+		out := []string{head + " struct"}
 		unexported := false
 		for _, fld := range t.Fields.List {
 			if len(fld.Names) == 0 {
@@ -338,7 +455,16 @@ func typeAPI(name string, expr ast.Expr) []string {
 		// Recording method signatures is what makes that cost visible, and
 		// recording embedded interfaces covers the Streamer extension sketched in
 		// docs/FINDINGS.md section 3.1.
-		out := []string{"type " + name + " interface"}
+		//
+		// Unexported methods are recorded here where an unexported struct field
+		// is not, and the asymmetry is what a caller can observe. A struct's
+		// first unexported field takes away unkeyed literals and the second
+		// takes nothing more, so one marker says all of it. An interface's first
+		// unexported method takes away implementing it at all — nobody outside
+		// the package can write a method whose name they cannot spell — and
+		// sealing engine.Scorer would end the extension path this repository is
+		// built on without moving a single exported name.
+		out := []string{head + " interface"}
 		for _, m := range t.Methods.List {
 			ft, ok := m.Type.(*ast.FuncType)
 			if !ok {
@@ -346,9 +472,7 @@ func typeAPI(name string, expr ast.Expr) []string {
 				continue
 			}
 			for _, n := range m.Names {
-				if n.IsExported() {
-					out = append(out, "method "+name+"."+n.Name+signature(ft))
-				}
+				out = append(out, "method "+name+"."+n.Name+signature(ft))
 			}
 		}
 		return out
@@ -357,18 +481,202 @@ func typeAPI(name string, expr ast.Expr) []string {
 		// Fuser's signature is part of the contract, and it goes through the same
 		// name-stripping as a func declaration: renaming its streams parameter is
 		// no more a contract change here than it is there.
-		return []string{"type " + name + " func" + signature(t)}
+		return []string{head + " func" + signature(t)}
 
 	default:
 		// A defined type: DocID's width is part of the contract.
-		return []string{"type " + name + " " + types.ExprString(expr)}
+		return []string{head + " " + types.ExprString(expr)}
 	}
+}
+
+// valueAPI renders what a caller can observe about the i'th name in a const or
+// var declaration beyond its name: the declared type, or when there is none the
+// expression the type is inferred from.
+//
+// A name alone is not the contract. Writing a type onto an untyped constant —
+// K1 = 1.2 becoming K1 float64 = 1.2 — stops `var f float32 = text.K1` from
+// compiling while nothing about the name changes, and the same goes for a
+// sentinel error narrowed from error to a concrete type. Neither has a
+// signature to record, so the declaration itself is what stands in for one.
+//
+// The inferred case records the whole expression, which means an error's
+// message is in the golden and editing one trips it. That is the intended
+// reading, not noise: these strings are what a caller sees at runtime, and the
+// same rule that asks whether a signature change costs anything asks it here.
+func valueAPI(d *ast.GenDecl, si, i int) (string, []ast.Expr) {
+	s := d.Specs[si].(*ast.ValueSpec)
+	var (
+		out   string
+		exprs []ast.Expr
+	)
+	if s.Type != nil {
+		out, exprs = " "+types.ExprString(s.Type), append(exprs, s.Type)
+	}
+	// The type does not stand in for the value once both exist. const K1 float64
+	// = 1.2 becoming 1.3 re-ranks every caller's results and leaves the declared
+	// type exactly where it was, so recording the type alone would let precisely
+	// the change this file is here to catch through.
+	if i < len(s.Values) {
+		return out + " = " + types.ExprString(s.Values[i]), append(exprs, s.Values[i])
+	}
+	if s.Type != nil {
+		return out, exprs
+	}
+	// A continuation line in a const block, which has neither of its own: it
+	// repeats the last spec that had one, and iota is its position in the block.
+	// Both halves are recorded because both can move alone. Inserting a blank or
+	// unexported constant above an exported one leaves the repeated expression
+	// identical while renumbering it — a released value change that would
+	// otherwise reach callers with the golden unmoved.
+	for j := si - 1; j >= 0; j-- {
+		prev, ok := d.Specs[j].(*ast.ValueSpec)
+		if !ok || i >= len(prev.Values) {
+			continue
+		}
+		out, exprs = " = "+types.ExprString(prev.Values[i])+" (iota "+strconv.Itoa(si)+")", []ast.Expr{prev.Values[i]}
+		if prev.Type != nil {
+			out = " " + types.ExprString(prev.Type) + out
+			exprs = append(exprs, prev.Type)
+		}
+		return out, exprs
+	}
+	return "", nil
+}
+
+// packageValues maps each unexported package-level constant and variable to what
+// valueAPI records for it, so expand can follow a reference into one.
+func packageValues(files []*ast.File) map[string]string {
+	out := map[string]string{}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			d, ok := decl.(*ast.GenDecl)
+			if !ok || (d.Tok != token.CONST && d.Tok != token.VAR) {
+				continue
+			}
+			for si, spec := range d.Specs {
+				s, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, n := range s.Names {
+					if n.IsExported() || n.Name == "_" {
+						continue
+					}
+					if api, _ := valueAPI(d, si, i); api != "" {
+						out[n.Name] = strings.TrimSpace(api)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// expand records the unexported package-level values an exported declaration is
+// written in terms of.
+//
+// const RRFk = k puts the number a caller's ranking depends on in k, where
+// nothing exported names it: k goes 60 to 61, every result reorders, and the
+// line above it never moves. Recording k's own declaration alongside it closes
+// that, and it goes one level deep on purpose — a private constant defined from
+// a second private constant is a shape no package here has, and following it
+// would mean deciding what to do about a cycle that Go has already rejected.
+func expand(exprs []ast.Expr, values map[string]string) string {
+	seen := map[string]bool{}
+	var found []string
+	var visit func(ast.Node) bool
+	visit = func(n ast.Node) bool {
+		// The Sel in X.Sel belongs to whatever X is — time.Hour is not this
+		// package's Hour — so only X is worth walking into.
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			ast.Inspect(sel.X, visit)
+			return false
+		}
+		id, ok := n.(*ast.Ident)
+		if !ok || seen[id.Name] {
+			return true
+		}
+		if v, ok := values[id.Name]; ok {
+			seen[id.Name] = true
+			found = append(found, id.Name+" "+v)
+		}
+		return true
+	}
+	for _, e := range exprs {
+		ast.Inspect(e, visit)
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	sort.Strings(found)
+	return " (" + strings.Join(found, "; ") + ")"
+}
+
+// apiContexts are the platforms these goldens describe.
+//
+// Every file here is unconstrained today, so every context takes every file and
+// no declaration carries a marker. The moment one does not, the difference is
+// the point: moving an exported declaration from foo_linux.go to foo_windows.go
+// leaves its text identical while taking the symbol away from every Linux
+// caller, and a golden that treats each non-test .go file as unconditionally
+// importable records that break as no change at all.
+//
+// Three platforms rather than all of them, because the list is what the golden
+// claims to speak for and a claim about platforms nobody builds is not worth the
+// file it is written in. A file excluded from all three is recorded as such.
+var apiContexts = []string{"linux/amd64", "darwin/arm64", "windows/amd64"}
+
+// buildTag marks a file that some apiContexts entry does not take, and is empty
+// for a file all of them take.
+func buildTag(t *testing.T, dir, name string) string {
+	t.Helper()
+	var in []string
+	for _, c := range apiContexts {
+		goos, goarch, _ := strings.Cut(c, "/")
+		// A copy: MatchFile reads GOOS, GOARCH and the tag lists off the context
+		// it is called on, and the point is to ask about a platform other than
+		// the one running the test. CgoEnabled is pinned rather than inherited
+		// for the same reason — an answer that depends on the host machine is
+		// not something a golden can record.
+		ctx := build.Default
+		ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = goos, goarch, false
+		ok, err := ctx.MatchFile(dir, name)
+		if err != nil {
+			t.Fatalf("MatchFile(%s): %v", filepath.Join(dir, name), err)
+		}
+		if ok {
+			in = append(in, c)
+		}
+	}
+	if len(in) == len(apiContexts) {
+		return ""
+	}
+	return " [" + strings.Join(in, " ") + "]"
+}
+
+// typeParams renders a type parameter list, names included: unlike a parameter
+// name, a type parameter's name is written by whoever instantiates the type.
+func typeParams(fl *ast.FieldList) string {
+	if fl == nil || len(fl.List) == 0 {
+		return ""
+	}
+	var out []string
+	for _, f := range fl.List {
+		var names []string
+		for _, n := range f.Names {
+			names = append(names, n.Name)
+		}
+		out = append(out, strings.TrimSpace(strings.Join(names, ", ")+" "+types.ExprString(f.Type)))
+	}
+	return "[" + strings.Join(out, ", ") + "]"
 }
 
 // signature renders a function's parameter and result types, dropping the
 // leading "func" keyword so the line reads "func Search(...) (...)".
 func signature(ft *ast.FuncType) string {
-	s := "(" + strings.Join(fieldTypes(ft.Params), ", ") + ")"
+	// Type parameters come before the parentheses and are the caller's problem
+	// in a way parameter names are not: they decide what may be passed at all.
+	s := typeParams(ft.TypeParams) + "(" + strings.Join(fieldTypes(ft.Params), ", ") + ")"
 	switch res := fieldTypes(ft.Results); len(res) {
 	case 0:
 	case 1:

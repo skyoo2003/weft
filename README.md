@@ -36,6 +36,8 @@ Milestones 1 and 2 passed. **Not usable in production:** every commit rewrites t
 | 5 | Performance — p99 including GC pauses | Not started |
 | 6 | External contribution readiness | Not started |
 
+No tag yet; the first will be `v0.1.0`. Until then `go get` resolves to a pseudo-version naming a commit, which is the honest state — a tag would give you a shorter name without changing anything the warning above says. [CHANGELOG](CHANGELOG.md) is where a version tells you whether you have work to do, and it records three things only: the exported API of every package under `pkg/`, the on-disk format version, and the minimum Go version. The milestone numbers in this table are not among them.
+
 ## Quick start
 
 ```bash
@@ -83,7 +85,7 @@ results, err := engine.Search(ctx, q, 10, fusion.Fuse, scorers...)
 `make arch` verifies this mechanically:
 
 - **Fusion is invariant to scorer count** — three and four scorers use the same call expression; compiling is the proof.
-- **A new scorer is cheap** — `scorer/recency` is 99 implementation lines against a 100-line budget, and `fusion/` needs no change. Whatever a scorer costs `engine` shows up in `pkg/engine/testdata/engine_api.txt`, which records member types, parameter and result types, declaration order, and whether a struct has become unkeyed-literal-hostile by gaining an unexported field — everything a caller has to satisfy, and nothing that only spelling would change ([FINDINGS §1](docs/FINDINGS.md)).
+- **A new scorer is cheap** — `scorer/recency` is 99 implementation lines against a 100-line budget, and `fusion/` needs no change. Whatever a scorer costs `engine` shows up in `pkg/engine/testdata/engine_api.txt`, which records member types, parameter and result types, declaration order, the package clause, the value a constant is declared from, and whether a struct has become unkeyed-literal-hostile by gaining an unexported field — everything a caller has to satisfy, and nothing that only spelling would change ([FINDINGS §1](docs/FINDINGS.md)).
 - **Fusion cannot see scorers** — `go list -deps ./pkg/fusion` names no `scorer/*` package.
 
 The third assertion carries the weight. `Fuse` never reads `Candidate.Score`, only rank: BM25 is unbounded, cosine is `[-1,1]`, graph proximity is `(0,1]`, so comparing scores across scorers would need per-scorer normalization — and knowing how to normalize means knowing which scorer produced the score.
@@ -122,7 +124,7 @@ make run        # interactive demo
 make example    # minimal example
 ```
 
-2,059 implementation lines, 3,354 test lines, **zero external dependencies**. Go 1.26+.
+2,396 implementation lines under `pkg/`, 4,352 test lines, **zero external dependencies**. Go 1.26+.
 
 ## Limitations
 

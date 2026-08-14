@@ -26,7 +26,7 @@ engine.Search(ctx, q, 5, fusion.Fuse, four...)   // + recency
 
 Compiling alone proved insufficient — a scorer returning nothing passes it too. The corpus therefore holds a document (`lonely`) that matches no query term, carries no vector and is linked from nowhere, so only recency sees it. Three scorers must not surface it; four must.
 
-**Assertion 2 — a new scorer is cheap.** `pkg/scorer/recency` is 93 implementation lines against a 100-line budget, and `fusion/` needed no change at all.
+**Assertion 2 — a new scorer is cheap.** `pkg/scorer/recency` is 99 implementation lines against a 100-line budget, and `fusion/` needed no change at all.
 
 The engine side is not zero, and an earlier version of this document claimed it was. `Document.Time` exists only for the recency scorer and was written before that scorer existed, so the figure was flattered by pre-provisioning the field. Stated generally: a scorer needing new input data has to read it from `engine.Document`, because scorers may not keep their own store (§2.2). **The engine cost of a new input type is one field on `Document`.** A scorer reusing existing fields costs nothing there.
 
