@@ -119,16 +119,27 @@ func dataFlags(name string, args []string, extra func(*flag.FlagSet)) *string {
 func prepare(ctx context.Context, args []string) error {
 	var apiKey string
 	var limit int
+	var anySnapshot bool
 	data := dataFlags("prepare", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&apiKey, "api-key", os.Getenv("S2_API_KEY"),
 			"Semantic Scholar API key (optional; raises the rate limit)")
 		fs.IntVar(&limit, "limit", 0,
 			"stop after this many documents (0 = all); for smoke-testing the pipeline")
+		snapshotFlag(fs, &anySnapshot)
 	})
 
 	corpusPath := filepath.Join(*data, corpusFile)
 	metaPath := filepath.Join(*data, metadataFile)
 	outPath := filepath.Join(*data, s2File)
+
+	// Before anything is written. This command's output is a cache that later commands
+	// trust as a record of what was asked, so a truncated metadata file here becomes a
+	// corpus recorded as permanently unjoinable — see the snapshot table.
+	if !anySnapshot {
+		if err := verifySnapshot(*data, corpusFile, metadataFile); err != nil {
+			return err
+		}
+	}
 
 	// 1. Corpus ids. Reading these first means a missing or truncated corpus fails
 	// before an hours-long fetch rather than during it.
@@ -488,16 +499,26 @@ func estimate(docs int) time.Duration {
 // ---------------------------------------------------------------- build
 
 func build(ctx context.Context, args []string) error {
-	var partial bool
+	var partial, anySnapshot bool
 	data := dataFlags("build", args, func(fs *flag.FlagSet) {
 		fs.BoolVar(&partial, "partial", false,
 			"build even though the Semantic Scholar cache does not cover every document "+
 				"(the vector and graph arms then measure a corpus that is partly text-only)")
+		snapshotFlag(fs, &anySnapshot)
 	})
 
 	corpusPath := filepath.Join(*data, corpusFile)
 	s2Path := filepath.Join(*data, s2File)
 	dir := filepath.Join(*data, indexDir)
+
+	// Checked here as well as in prepare, because the index is what the arms are
+	// measured over and a corpus file that changed between the two would produce one
+	// silently built from different documents than the cache was fetched for.
+	if !anySnapshot {
+		if err := verifySnapshot(*data, corpusFile); err != nil {
+			return err
+		}
+	}
 
 	// The Semantic Scholar side is loaded first so every document can be added
 	// complete. Add takes a whole Document, and attaching links in a second pass
@@ -728,6 +749,17 @@ func readS2Records(path string) (map[string]eval.S2Record, error) {
 				path, len(out)+1, dec.InputOffset(), eval.ErrBadRecord, err)
 		}
 		if rec.Key != "" {
+			// A repeated key is refused rather than overwritten. prepare emits exactly one
+			// record per document — it skips what the cache already holds — so a second
+			// record for one key means the file was assembled from more than one cache, and
+			// the later one wins by nothing but file position. That is not a harmless
+			// duplicate: a tombstone written after a full record discards a vector and a
+			// reference list while the coverage gate still counts the document as cached, so
+			// the graph and the vector arm both shrink with nothing in the log to show it.
+			if _, dup := out[rec.Key]; dup {
+				return nil, fmt.Errorf("%s: %q appears twice: %w (two caches concatenated? "+
+					"rerun `weft-eval prepare` against one of them)", path, rec.Key, eval.ErrBadRecord)
+			}
 			out[rec.Key] = rec
 		}
 	}

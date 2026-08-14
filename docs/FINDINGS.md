@@ -328,8 +328,9 @@ one level up from the engine, which is where it would have been cheapest to quie
 break.
 
 **Assertion 3 — the graph signal regresses, robustly.** −0.1202 against the
-pre-registered baseline, CI far from zero, sign stable across 28 configurations
-including over-fetch to depth 100 and rank constants from 1 to 200.
+pre-registered baseline, CI far from zero, sign stable across 28 configurations of that
+same pair — over-fetch to depth 100, rank constants from 1 to 200 — with the interval
+excluding zero in every one of them.
 
 ## 2. What the architecture bought, in numbers
 
@@ -341,12 +342,14 @@ k ∈ [1,5] and m ∈ {2,3,10}. The `ponytail:` marker at `search.go:112` that n
 milestone 4 as its repayment trigger is **withdrawn rather than repaid**: the ceiling
 it described was reachable from outside all along ([D-004](DECISIONS.md)).
 
-**One check the engine cannot make became free.** `Search` documents an unchecked
-precondition — every scorer must read the same index, because `DocID` is
+**Half of one check the engine cannot make became free.** `Search` documents an
+unchecked precondition — every scorer must read the same index, because `DocID` is
 index-relative (milestone 1 §3.4) — and checking it there would need a method asking a
 scorer which index it holds, the one change that breaks every implementation. The
-harness resolves every fused `DocID` to a key anyway, so it gets the check for nothing
-and returns `ErrForeignDocID`.
+harness resolves every fused `DocID` to a key anyway, so it gets a bound check for
+nothing and returns `ErrForeignDocID`. A bound check only: IDs are dense from zero, so a
+foreign index of similar size returns IDs that resolve here to unrelated documents and
+produce a plausible nDCG over the wrong keys. §3.4 stays open; this narrows it.
 
 **Milestone 2 was exercised on a real corpus for the first time.** 171,332 documents
 committed in 2.2 s, reopened in 979 ms, document count and average length matching.
@@ -495,8 +498,10 @@ unmeasured, and this is where that is recorded.
 ## 7. Weighted fusion — the thing this milestone actually found
 
 Sections 3 and 5.10 of [EVAL.md](EVAL.md) rule out the rank constant and fusion depth
-as explanations for the graph arm's regression. Both change how ranks are damped, not
-how much each stream counts. So the equal vote itself was tested: a `Fuser` variant
+as explanations for the graph arm's regression — 28 configurations of each, on the
+binding pair, no sign flip and no interval reaching zero. Both change how ranks are
+damped, not how much each stream counts; depth narrows the gap to 0.0218 at its closest
+and does it by lifting the baseline as much as the graph arm. So the equal vote itself was tested: a `Fuser` variant
 multiplying each stream by a weight, text and vector held at 1.0, only the graph
 stream moving.
 

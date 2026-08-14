@@ -50,7 +50,7 @@ TREC-COVID, 50 queries, 171,332 documents, 579,720 in-corpus citation edges from
 | `text + vector` | **0.6233** |
 | `text + vector + graph` | 0.5031 |
 
-**Graph proximity does not improve ranking.** Under equal-weight fusion it costs 0.1202 nDCG@10 (95% CI [−0.1521, −0.0886]), and the sign does not flip across 28 configurations of the RRF rank constant and fusion depth.
+**Graph proximity does not improve ranking.** Under equal-weight fusion it costs 0.1202 nDCG@10 (95% CI [−0.1521, −0.0886]), and across 28 configurations of the RRF rank constant and fusion depth the sign never flips and no interval reaches zero.
 
 **But that −0.1202 belonged to the fusion operator, not to the graph.** Giving the graph stream half a vote instead of a full one erases all but 0.0019 of the regression. No weight beats the baseline: from 0.1 downward the arm *is* the baseline, delta exactly zero. So the accurate statement is the flatter one: the graph signal is not harmful information, it is not information.
 
@@ -179,7 +179,7 @@ CI runs `make all` plus four targets kept out of it because each costs a tool to
 
 `make eval` needs data that is not in the repository. [EVAL.md §7](docs/EVAL.md) lists the downloads and the one-time `weft-eval prepare` step.
 
-2,396 implementation lines under `pkg/`, 4,352 test lines, **zero external dependencies**. Go 1.26+.
+2,626 implementation lines under `pkg/`, 4,701 test lines, **zero external dependencies**. Go 1.26+. The evaluation harness in `internal/eval` and `cmd/weft-eval` is another 3,173 and 2,109; it ships no API and is not part of the library.
 
 ## Limitations
 

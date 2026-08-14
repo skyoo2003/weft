@@ -28,15 +28,22 @@ var (
 	ErrQueryID    = errors.New("eval: query id is empty")
 	ErrDuplicateQ = errors.New("eval: duplicate query id")
 
-	// ErrForeignDocID reports a fused DocID the index does not know. This is the
-	// namespace hazard engine.Search documents and deliberately leaves unchecked
-	// (docs/FINDINGS.md section 3.4) — a scorer built against a different index
-	// returns ids from another namespace, and they resolve against neither
-	// corpus. Search cannot check it without asking a scorer which index it
-	// reads, which is the one method that would break the Scorer interface. Here
-	// it is checkable for free: the harness has to resolve every DocID to a key
-	// anyway to look it up in qrels. Caught, it is one error; missed, it is an
-	// nDCG computed over keys belonging to other documents.
+	// ErrForeignDocID reports a fused DocID this index cannot resolve. It is a bound
+	// check and nothing more, which is worth saying plainly because it sits next to the
+	// namespace hazard engine.Search documents and leaves unchecked (docs/FINDINGS.md
+	// section 3.4) and could be read as closing it.
+	//
+	// It does not. DocIDs are assigned from zero in insertion order, so a scorer built
+	// against a *different* index of similar size returns ids that are in range here,
+	// resolve to unrelated documents, and produce an nDCG over the wrong keys with no
+	// error at all. What this catches is the subset that lands outside the bound — a
+	// smaller foreign index, or a stale scorer against a corpus that has shrunk.
+	//
+	// The rest cannot be caught from here. It would take asking a scorer which index it
+	// reads, which is the one method that would break every Scorer implementation, so
+	// the precondition stays the caller's: pass every scorer the same index. This check
+	// is free, because the harness has to resolve each DocID to a key for qrels anyway,
+	// and free is the whole argument for it. It is not a guarantee.
 	ErrForeignDocID = errors.New("eval: fused DocID is not in this index")
 
 	// ErrForeignQrelDoc reports a relevant judgment naming a document the index

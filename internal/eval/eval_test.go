@@ -197,7 +197,11 @@ func TestEvaluateRejectsMisconfiguration(t *testing.T) {
 			want: ErrOverfetchRange,
 		},
 		{
-			name: "a DocID from another index is caught, not scored",
+			// Out of range for a five-document index, which is the only part of the
+			// namespace hazard this catches: a foreign index of similar size returns
+			// in-range ids that resolve here to unrelated documents and score without
+			// complaint. See ErrForeignDocID.
+			name: "a DocID beyond this index is caught, not scored",
 			arm: Arm{Name: "foreign", Fuse: fusion.Fuse, Scorers: []engine.Scorer{
 				fixedScorer{name: "foreign", cands: []engine.Candidate{{Doc: 4242, Score: 1}}},
 			}},

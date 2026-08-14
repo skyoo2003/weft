@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,7 +204,7 @@ func TestPrepareRefusesAJoinWithNoEvidenceItCanWork(t *testing.T) {
 		metadataFile: metadata,
 	})
 
-	err := prepare(context.Background(), []string{"-data", dir})
+	err := prepare(context.Background(), []string{"-data", dir, "-any-snapshot"})
 	if err == nil {
 		t.Fatal("prepare succeeded against metadata matching no document in the corpus; it " +
 			"would tombstone the whole corpus and let build publish empty vector and graph arms")
@@ -219,7 +221,7 @@ func TestPrepareRefusesAJoinWithNoEvidenceItCanWork(t *testing.T) {
 		metadataFile: metadata,
 		s2File:       `{"key":"a","corpus_id":"100"}` + "\n",
 	})
-	if err := prepare(context.Background(), []string{"-data", dir}); err != nil {
+	if err := prepare(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
 		t.Fatalf("prepare with prior evidence of a working join: %v", err)
 	}
 	cache, err := scanS2Cache(filepath.Join(dir, s2File))
@@ -249,6 +251,23 @@ func TestReadS2RecordsAcceptsTombstones(t *testing.T) {
 	}
 	if r := recs["b"]; r.CorpusID != "7" || len(r.Refs) != 1 {
 		t.Errorf("record read back as %+v, want CorpusID 7 with one ref", r)
+	}
+}
+
+// TestReadS2RecordsRejectsADuplicateKey: prepare writes one record per document, so a
+// second record for a key means two caches were concatenated and the later one wins on
+// file position alone. The damaging order is this one — a full record followed by a
+// tombstone — because it drops a vector and a reference list while the coverage gate
+// still counts the document as cached.
+func TestReadS2RecordsRejectsADuplicateKey(t *testing.T) {
+	path := writeCache(t, `{"key":"a","corpus_id":"7","refs":["9"],"vec":[1,2]}`+"\n"+`{"key":"a"}`+"\n")
+
+	recs, err := readS2Records(path)
+	if err == nil {
+		t.Fatalf("readS2Records accepted a duplicate key; a is %+v, silently the later record", recs["a"])
+	}
+	if !errors.Is(err, eval.ErrBadRecord) {
+		t.Errorf("error = %v, want ErrBadRecord", err)
 	}
 }
 
@@ -306,6 +325,49 @@ func TestS2RecordRoundTripsTheModel(t *testing.T) {
 	}
 }
 
+// TestVerifySnapshotCatchesTruncationAndSameLengthEdits covers both halves of the
+// pinned check, because each catches a different accident. Size catches the one that
+// actually happens — an interrupted download of a 1.6 GB file, or a different release —
+// and catches it from a stat rather than by hashing gigabytes. The hash catches what
+// size cannot see: a file edited in place, where a published number would come from
+// bytes nobody downloaded.
+//
+// The expected size is read out of the table rather than written here, so this test
+// cannot drift from the pin it is checking.
+func TestVerifySnapshotCatchesTruncationAndSameLengthEdits(t *testing.T) {
+	var want int64
+	for _, s := range snapshot {
+		if s.name == queriesFile {
+			want = s.size
+		}
+	}
+	if want == 0 {
+		t.Fatalf("%s is not in the snapshot table", queriesFile)
+	}
+
+	dir := evalDir(t, map[string]string{queriesFile: "{}\n"})
+	err := verifySnapshot(dir, queriesFile)
+	if err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Errorf("truncated file: error = %v, want it to report the size", err)
+	}
+
+	// Same length, different content: only the hash separates these.
+	if err := os.WriteFile(filepath.Join(dir, queriesFile),
+		bytes.Repeat([]byte("x"), int(want)), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	err = verifySnapshot(dir, queriesFile)
+	if err == nil || !strings.Contains(err.Error(), "sha256") {
+		t.Errorf("same-size edit: error = %v, want it to report the hash", err)
+	}
+
+	// A name that is not pinned is a mistake in this command, not a bad input, and must
+	// not read as a passing check.
+	if err := verifySnapshot(dir, s2File); err == nil {
+		t.Error("an unpinned name verified successfully")
+	}
+}
+
 // evalDir lays out a minimal -data directory: one file per entry, parents created.
 func evalDir(t *testing.T, files map[string]string) string {
 	t.Helper()
@@ -340,7 +402,7 @@ func TestBuildRefusesAnIncompleteCache(t *testing.T) {
 		s2File:     `{"key":"a"}` + "\n", // b was never asked about
 	})
 
-	err := build(context.Background(), []string{"-data", dir})
+	err := build(context.Background(), []string{"-data", dir, "-any-snapshot"})
 	if err == nil {
 		t.Fatal("build succeeded on a cache covering 1 of 2 documents; it must refuse, " +
 			"or half the corpus enters the index text-only under a text+vector+graph label")
@@ -351,7 +413,7 @@ func TestBuildRefusesAnIncompleteCache(t *testing.T) {
 
 	// The same build is allowed when it is asked for, because smoke-testing the
 	// pipeline on a slice is a real use — it just must not be the default.
-	if err := build(context.Background(), []string{"-data", dir, "-partial"}); err != nil {
+	if err := build(context.Background(), []string{"-data", dir, "-partial", "-any-snapshot"}); err != nil {
 		t.Fatalf("build -partial: %v", err)
 	}
 }
@@ -365,7 +427,7 @@ func TestBuildAcceptsATombstoneOnlyCache(t *testing.T) {
 		corpusFile: twoDocCorpus,
 		s2File:     `{"key":"a"}` + "\n" + `{"key":"b"}` + "\n",
 	})
-	if err := build(context.Background(), []string{"-data", dir}); err != nil {
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
 		t.Fatalf("build over a complete tombstone-only cache: %v", err)
 	}
 }

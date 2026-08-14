@@ -107,14 +107,25 @@ def read_jsonl(path: str):
 
 def verify(n: int) -> int:
     """Compare locally computed document vectors against Semantic Scholar's."""
+    # Corpus keys first, so the sample can only contain documents whose text is actually
+    # here. The cache is allowed to hold records for documents outside this corpus — it
+    # can come from a larger or older one, and `weft-eval build` reports and ignores those
+    # — and sampling before checking membership meant the corpus pass below found fewer
+    # texts than keys, verifying less than asked without saying so, or nothing at all and
+    # failing on an empty list of similarities instead of reporting anything.
+    corpus_keys = {rec["_id"] for rec in read_jsonl(CORPUS)}
     have: dict[str, list[float]] = {}
     for rec in read_jsonl(S2):
-        if rec.get("vec"):
+        if rec.get("vec") and rec["key"] in corpus_keys:
             have[rec["key"]] = rec["vec"]
-        if len(have) >= n:
-            break
+            if len(have) >= n:
+                break
     if not have:
-        print(f"no vectors in {S2}; run `weft-eval prepare` first", file=sys.stderr)
+        print(
+            f"no vectors in {S2} for any document in {CORPUS}; run `weft-eval prepare` first, "
+            "or check that the cache and the corpus describe the same snapshot",
+            file=sys.stderr,
+        )
         return 1
 
     tok, model = load_model(DOC_ADAPTER)

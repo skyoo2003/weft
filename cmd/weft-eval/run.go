@@ -235,12 +235,23 @@ func openIndex(dir string) (*engine.Index, error) {
 func run(ctx context.Context, args []string) error {
 	var k, overfetch, iters int
 	var rankConst float64
+	var anySnapshot bool
 	data := dataFlags("run", args, func(fs *flag.FlagSet) {
 		fs.IntVar(&k, "k", frozenK, "rank cut")
 		fs.IntVar(&overfetch, "overfetch", frozenOverfetch, "ask each scorer for k*this")
 		fs.IntVar(&iters, "iters", bootstrapIters, "bootstrap resamples")
 		fs.Float64Var(&rankConst, "rrfk", fusion.RRFk, "RRF rank constant")
+		snapshotFlag(fs, &anySnapshot)
 	})
+
+	// The judged inputs, before the index is opened. A qrels file cut at a row boundary
+	// reads as a clean prefix and lifts every arm by an unreported amount — see the
+	// snapshot table.
+	if !anySnapshot {
+		if err := verifySnapshot(*data, queriesFile, qrelsFile); err != nil {
+			return err
+		}
+	}
 
 	// Checked before the index is opened, so a typo costs a message rather than a
 	// minute. rrf has no error to return — it builds a Fuser — so the flag is the
@@ -349,11 +360,19 @@ func topMoves(base, arm map[string]float64, n int) []move {
 
 func sweep(ctx context.Context, args []string) error {
 	var k, iters int
+	var anySnapshot bool
 	data := dataFlags("sweep", args, func(fs *flag.FlagSet) {
 		fs.IntVar(&k, "k", frozenK, "rank cut")
 		fs.IntVar(&iters, "iters", 2000,
 			"bootstrap resamples per configuration (lower than the headline: this is a sign check, not a published interval)")
+		snapshotFlag(fs, &anySnapshot)
 	})
+
+	if !anySnapshot {
+		if err := verifySnapshot(*data, queriesFile, qrelsFile); err != nil {
+			return err
+		}
+	}
 
 	ix, err := openIndex(*data)
 	if err != nil {
@@ -369,34 +388,43 @@ func sweep(ctx context.Context, args []string) error {
 	rankConsts := []float64{1, 10, 20, 40, fusion.RRFk, 100, 200}
 	overfetches := []int{1, 2, 5, 10}
 
-	// Swept against the text-only baseline, not the binding pre-registered pair.
+	// Both pairs, every cell. The binding pair is the one section 4 rule 2 names and is
+	// what the verdict below is read from; the text-only pair stays because its 28 cells
+	// are published in docs/EVAL.md section 5.10, and because a second framing of the
+	// same signal is worth having.
 	//
-	// Two reasons, and the second is the honest one. The clean reason: a single-stream
-	// baseline is provably invariant across this grid, which is what lets it be
-	// measured once below instead of 28 times. The honest reason: this was the binding
-	// comparison when the sweep was written, the amendment that made it binding was
-	// later withdrawn (see the arm names above), and re-running the grid against
-	// text+vector would cost an hour to re-derive a sign that is already negative in
-	// both framings — −0.1839 here, −0.1202 there.
-	//
-	// So this establishes that the graph delta's sign is stable under the fusion
-	// constants nobody tuned. It does not establish that for the exact pair section 4
-	// rule 2 names. docs/EVAL.md section 5.10 states the same limitation.
-	fmt.Printf("\nsign stability of %s - %s at nDCG@%d\n\n", armTextGraph, armTextBase, k)
-	fmt.Printf("  %8s %10s %10s %10s %22s %s\n", "RRFk", "overfetch", "base", "graph", "delta 95% CI", "sign")
-
-	// The baseline is measured once, not 28 times. armTextBase is a single stream, so
-	// fusion assigns it scores strictly decreasing in rank whatever the rank constant
-	// is, and TopK hands the same order back; over-fetching only appends candidates
-	// past the cut. Its nDCG@k is therefore identical in every cell of this table —
-	// re-deriving it 27 more times doubles the slowest job in the milestone to
-	// reprint a constant.
-	baseRun, err := eval.Evaluate(ctx, ix, qs, armsFor(ix, fusion.Fuse, 1)[armTextBase], k)
+	// It used to be the text-only pair alone, on the grounds that the sign was already
+	// negative in both framings at the frozen point and that re-running the grid would
+	// cost an hour. Two things were wrong with that. The verdict line printed "rule 2
+	// holds" from evidence about a neighbouring comparison, which is exactly the kind of
+	// claim this harness exists to prevent. And the hour was a guess: text+vector fuses
+	// two streams so it has to be measured per cell rather than once, which triples the
+	// evaluations, and the whole grid still finishes well inside it.
+	baseText, err := eval.Evaluate(ctx, ix, qs, armsFor(ix, fusion.Fuse, 1)[armTextBase], k)
 	if err != nil {
 		return err
 	}
 
-	flips, total, firstSign := 0, 0, 0
+	// One cell of the grid, for one pair.
+	type cell struct {
+		rc        float64
+		of        int
+		base, arm float64
+		iv        eval.Interval
+		sign      int
+		flipped   bool
+	}
+	signOf := func(iv eval.Interval) int {
+		switch {
+		case iv.ContainsZero():
+			return 0
+		case iv.Delta > 0:
+			return 1
+		}
+		return -1
+	}
+
+	var bindingCells, textCells []cell
 	for _, rc := range rankConsts {
 		for _, of := range overfetches {
 			fuse := engine.Fuser(fusion.Fuse)
@@ -404,50 +432,89 @@ func sweep(ctx context.Context, args []string) error {
 				fuse = rrf(rc)
 			}
 			arms := armsFor(ix, fuse, of)
-			graphRun, err := eval.Evaluate(ctx, ix, qs, arms[armTextGraph], k)
+
+			// text+vector is not invariant across this grid the way text is: it fuses two
+			// streams, so both the rank constant and the fetch depth move it. Measuring it
+			// once and reusing it is the shortcut that made the old table cheap and the old
+			// claim wrong.
+			vecBase, err := eval.Evaluate(ctx, ix, qs, arms[armVecBase], k)
 			if err != nil {
 				return err
 			}
-			iv, err := eval.BootstrapCI(baseRun.PerQuery, graphRun.PerQuery, iters, bootstrapSeed)
+			vecGraph, err := eval.Evaluate(ctx, ix, qs, arms[armVecGraph], k)
+			if err != nil {
+				return err
+			}
+			textGraph, err := eval.Evaluate(ctx, ix, qs, arms[armTextGraph], k)
 			if err != nil {
 				return err
 			}
 
-			sign := 0
-			switch {
-			case iv.ContainsZero():
-				sign = 0
-			case iv.Delta > 0:
-				sign = 1
-			default:
-				sign = -1
+			ivBind, err := eval.BootstrapCI(vecBase.PerQuery, vecGraph.PerQuery, iters, bootstrapSeed)
+			if err != nil {
+				return err
 			}
-			label := map[int]string{1: "+", 0: "0 (CI spans zero)", -1: "-"}[sign]
-			total++
-			switch {
-			case firstSign == 0 && sign != 0:
-				firstSign = sign
-			case sign != 0 && firstSign != 0 && sign != firstSign:
-				flips++
-				label += "  FLIP"
+			ivText, err := eval.BootstrapCI(baseText.PerQuery, textGraph.PerQuery, iters, bootstrapSeed)
+			if err != nil {
+				return err
 			}
-			fmt.Printf("  %8v %10d %10.4f %10.4f   [%+.4f, %+.4f] %s\n",
-				rc, of, baseRun.NDCG, graphRun.NDCG, iv.Lo, iv.Hi, label)
+			bindingCells = append(bindingCells,
+				cell{rc, of, vecBase.NDCG, vecGraph.NDCG, ivBind, signOf(ivBind), false})
+			textCells = append(textCells,
+				cell{rc, of, baseText.NDCG, textGraph.NDCG, ivText, signOf(ivText), false})
 		}
 	}
 
-	fmt.Printf("\n%d configurations, %d sign flips\n", total, flips)
+	// A flip is a sign that disagrees with the first sign the grid established, in grid
+	// order. Marked before printing, and counted per pair: a flip in one framing is not
+	// a flip in the other, and collapsing them would hide which one moved.
+	flips := func(cells []cell) (int, int) {
+		first, n := 0, 0
+		for i := range cells {
+			switch {
+			case cells[i].sign == 0:
+			case first == 0:
+				first = cells[i].sign
+			case cells[i].sign != first:
+				cells[i].flipped = true
+				n++
+			}
+		}
+		return first, n
+	}
+	bindFirst, bindFlips := flips(bindingCells)
+	_, textFlips := flips(textCells)
+
+	printCells := func(title, base, arm string, cells []cell) {
+		fmt.Printf("\n%s: sign stability of %s - %s at nDCG@%d\n\n", title, arm, base, k)
+		fmt.Printf("  %8s %10s %10s %10s %22s %s\n", "RRFk", "overfetch", "base", "arm", "delta 95% CI", "sign")
+		for _, c := range cells {
+			label := map[int]string{1: "+", 0: "0 (CI spans zero)", -1: "-"}[c.sign]
+			if c.flipped {
+				label += "  FLIP"
+			}
+			fmt.Printf("  %8v %10d %10.4f %10.4f   [%+.4f, %+.4f] %s\n",
+				c.rc, c.of, c.base, c.arm, c.iv.Lo, c.iv.Hi, label)
+		}
+	}
+	printCells("BINDING", armVecBase, armVecGraph, bindingCells)
+	printCells("COMPARISON", armTextBase, armTextGraph, textCells)
+
+	fmt.Printf("\n%d configurations, %d sign flips on the binding pair, %d on the comparison pair\n",
+		len(bindingCells), bindFlips, textFlips)
 	switch {
-	case flips > 0:
+	case bindFlips > 0:
 		fmt.Println("VERDICT INPUT: the sign is not stable. docs/EVAL.md section 4 rule 2 fails.")
-	case firstSign == 0:
+	case bindFirst == 0:
 		// No configuration established a sign at all. Reporting that as stability
 		// would read "rule 2 holds" off a table that established nothing — the same
 		// mistake as reading a wide interval as agreement.
 		fmt.Println("VERDICT INPUT: every interval spans zero, so no configuration established a")
 		fmt.Println("sign. That is not stability; docs/EVAL.md section 4 rule 2 is undetermined.")
 	default:
-		fmt.Println("VERDICT INPUT: no sign flip across the sweep. docs/EVAL.md section 4 rule 2 holds.")
+		fmt.Printf("VERDICT INPUT: no sign flip across the sweep on the pair rule 2 names (%s - %s).\n",
+			armVecGraph, armVecBase)
+		fmt.Println("docs/EVAL.md section 4 rule 2 holds.")
 	}
 	fmt.Println()
 	return nil
@@ -476,10 +543,18 @@ func sweep(ctx context.Context, args []string) error {
 // copy, so the library API is what the published number came from.
 func weights(ctx context.Context, args []string) error {
 	var k, iters int
+	var anySnapshot bool
 	data := dataFlags("weights", args, func(fs *flag.FlagSet) {
 		fs.IntVar(&k, "k", frozenK, "rank cut")
 		fs.IntVar(&iters, "iters", bootstrapIters, "bootstrap resamples")
+		snapshotFlag(fs, &anySnapshot)
 	})
+
+	if !anySnapshot {
+		if err := verifySnapshot(*data, queriesFile, qrelsFile); err != nil {
+			return err
+		}
+	}
 
 	ix, err := openIndex(*data)
 	if err != nil {
@@ -564,10 +639,18 @@ func weights(ctx context.Context, args []string) error {
 // duplicated here.
 func diagnose(ctx context.Context, args []string) error {
 	var deep, k int
+	var anySnapshot bool
 	data := dataFlags("diagnose", args, func(fs *flag.FlagSet) {
 		fs.IntVar(&deep, "deep", 1_000_000, "k to request, large enough not to truncate the frontier")
 		fs.IntVar(&k, "k", frozenK, "the cut whose tie group is measured")
+		snapshotFlag(fs, &anySnapshot)
 	})
+
+	if !anySnapshot {
+		if err := verifySnapshot(*data, queriesFile, qrelsFile); err != nil {
+			return err
+		}
+	}
 
 	// Checked here rather than at the cut below, where min(k, len(cands))-1 would
 	// index -1 and panic on the first query that produced any candidate. The other
@@ -581,6 +664,18 @@ func diagnose(ctx context.Context, args []string) error {
 		// non-positive k, so every query reports "no reachable neighbour" and the
 		// table reads as a graph with no edges at all.
 		return fmt.Errorf("-deep is %d, want > 0", deep)
+	}
+	// The arbitrary column counts candidates that tie the cut score and lost their slot
+	// to a lower DocID, and it can only see them beyond the cut. Requesting a stream no
+	// deeper than the cut truncates the tie group at exactly the point being measured,
+	// so every query reports zero and the run concludes that nothing was decided by the
+	// tiebreak — the reassuring answer, from a depth that could not have found the
+	// alarming one. The default is 1,000,000 for that reason; this rejects a flag that
+	// quietly undoes it.
+	if deep <= k {
+		return fmt.Errorf("-deep is %d and -k is %d: the frontier has to run past the cut for a "+
+			"tie group crossing it to be visible at all, or every query reports zero slots "+
+			"decided by DocID whatever the graph did", deep, k)
 	}
 
 	ix, err := openIndex(*data)

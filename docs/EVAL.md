@@ -71,15 +71,27 @@ break it, so it is stated as a precondition on `Arm.Fuse`.
 injected as an `engine.Fuser`, so a sweep defines its own variant locally. This is
 the first place milestone 1's dependency direction pays a measurable dividend.
 
-### 2.2 One check the engine cannot make, and the harness can
+### 2.2 Half a check the engine cannot make, for free
 
 `engine.Search` documents an unchecked precondition: every scorer must read the
 same index, because `DocID` is index-relative ([FINDINGS](FINDINGS.md) section
 3.4). Checking it there would require asking a scorer which index it reads — the
 one method that would break every `Scorer` implementation. The harness has to
-resolve every fused `DocID` to a key anyway, so it gets the check for free and
-returns `ErrForeignDocID`. Missed, that failure mode produces an nDCG computed
-over keys belonging to other documents; caught, it is one error.
+resolve every fused `DocID` to a key anyway, so a bound check costs nothing, and
+it returns `ErrForeignDocID`.
+
+**It is a bound check, not the precondition.** IDs are dense from zero, so a scorer
+built against a different index of similar size returns IDs that are *in* range,
+resolve to unrelated documents here, and produce an nDCG over the wrong keys with no
+error — the silent wrong answer, still unclosed. What the check catches is the subset
+that falls outside the bound: a smaller foreign index, or a stale scorer against a
+corpus that has shrunk. Worth having because it is free; not worth calling enforcement.
+
+The qrels side of the same pairing problem *is* closed, by the same free lookup: every
+judged document with a positive grade is resolved against the index before any arm runs
+(`ErrForeignQrelDoc`). That one cannot surface as a wrong lookup at all — an absent
+judged document never appears in a ranking, it just stays in the ideal one, raising the
+denominator for every arm equally — so nothing but this check would have reported it.
 
 ## 3. Reference comparisons — done before any arm number
 
@@ -268,6 +280,30 @@ norm as no opinion and `text+vector` would silently be `text`.
 | Citation graph | Semantic Scholar `/graph/v1/paper/batch`, `references.externalIds`, fetched 2026-08-14 | — | **none needed** |
 | Vectors | the same endpoint, `embedding.specter_v2`, 768 dimensions | — | **none needed** |
 
+**The downloads are pinned, not merely named.** A release named in prose is not a
+release checked, and both ways that matters end in a complete-looking run rather than an
+error: a `metadata.csv` truncated by an interrupted 1.6 GB download joins whatever prefix
+arrived and lets `prepare` record the documents it never mentioned as permanently
+unjoinable, and a `qrels/test.tsv` truncated at a row boundary reads as a clean prefix
+and lifts every arm's nDCG by an unreported amount. So the four downloaded files are
+verified by size and content hash — size first, because that catches the real accident
+from a `stat` instead of hashing gigabytes — before `prepare` writes anything and before
+`run`, `sweep`, `weights` or `diagnose` prints anything.
+
+| File | Bytes | sha256 |
+|---|---|---|
+| `trec-covid/corpus.jsonl` | 221,370,065 | `aded6989…04ed00d7` |
+| `trec-covid/queries.jsonl` | 16,552 | `78f4b76b…783b208c` |
+| `trec-covid/qrels/test.tsv` | 980,831 | `10669ab7…2798982b` |
+| `metadata.csv` | 1,648,942,196 | `ec2e3c55…2bf31ae5` |
+
+The full values are in `cmd/weft-eval/snapshot.go`, which is the authority; the prefixes
+above are for recognising them. `s2.jsonl` and `query-vectors.jsonl` are deliberately not
+pinned — they are generated from API responses and a local model, and what covers them is
+`prepare`'s model tally, `build`'s coverage gate and the query-vector text pairing.
+`-any-snapshot` skips the check for a deliberately different corpus, and says in its own
+help text that numbers measured that way are not the ones this document publishes.
+
 Two things here differ from what the plan assumed, both in the cheaper direction.
 
 **No API key is required.** The plan listed a Semantic Scholar key as a blocker.
@@ -295,6 +331,14 @@ checking this rather than assuming it, because the columns differ between releas
 | `pmcid` → `PMCID:` | 230 |
 | **resolved** | **165,192 of 171,332 (96.4%)** |
 | no usable identifier | 6,140 — indexed, but with no edges and no vector |
+
+Those 6,140 are not documents the release lists without an identifier. Scanning all
+1,056,660 rows for them: **every corpus document that appears in this release has an
+identifier**, so the 6,140 are simply absent from it — the BEIR corpus is dated
+2021-02-11 and the metadata release 2022-06-02. That matters beyond bookkeeping, because
+it is why a truncated metadata file cannot be detected from the join alone: a document the
+file never mentions is the normal case, not a signal, which is what §5.1's hash pin is
+for.
 
 ### 5.3 The index
 
@@ -514,35 +558,58 @@ before and after must be measured so the contribution stays attributable.
 ### 5.10 Sweep: the sign does not flip, and it is negative everywhere
 
 `RRFk` ∈ {1, 10, 20, 40, 60, 100, 200} × over-fetch ∈ {1, 2, 5, 10}, 28
-configurations, `text+graph` against `text`, 2,000 resamples each.
+configurations, 2,000 resamples each — **both pairs**: the binding
+`text+vector+graph` against `text+vector`, and `text+graph` against `text` for
+comparison.
 
-| | Value |
-|---|---|
-| Configurations | 28 |
-| Sign flips | **0** |
-| Delta range | −0.1762 to −0.1895 |
-| CI upper bound, worst case | **−0.1261** (never reaches zero) |
-| Baseline, all configurations | 0.5826 (unaffected — the graph arm is what varies) |
+| | Binding pair | Comparison pair |
+|---|---|---|
+| Configurations | 28 | 28 |
+| Sign flips | **0** | **0** |
+| Cells where the graph arm is ahead | **0** | **0** |
+| CI upper bound, worst case | **−0.0065** (never reaches zero) | **−0.1261** |
+| Widest gap | 0.4916 vs 0.6189 at `RRFk`=1, over-fetch 1 | 0.3931 vs 0.5826 |
+| Narrowest gap | 0.6829 vs 0.7047 at `RRFk`=60, over-fetch 10 | 0.4064 vs 0.5826 |
+| Baseline across the grid | 0.6189 → 0.7091 | 0.5826, invariant |
+
+The comparison column reproduces what this section published before the binding pair
+was added — delta range −0.1762 to −0.1895, worst-case CI upper bound −0.1261 — so the
+grid was extended, not re-measured.
 
 Over-fetching to depth 100 does not rescue it, and neither does collapsing the rank
 constant to 1 or raising it to 200. Section 4 rule 2 is satisfied in the sense that
 matters least: the sign is perfectly stable, and it is stably negative.
 
 Two things this rules out. The result is not an artifact of `RRFk = 60`, which
-[DATASETS.md](DATASETS.md) section 3 requirement 4 warned about. And it is not an
-artifact of shallow streams — the over-fetch column exists because deeper fusion is
-known to help RRF, and here it changes the fourth decimal.
+[DATASETS.md](DATASETS.md) section 3 requirement 4 warned about: at the frozen depth the
+binding delta is identical for every rank constant from 10 to 200, and −0.1273 at 1.
 
-**One limitation, stated rather than buried.** This grid sweeps `text+graph` against
-`text`, not the binding `text+vector+graph` against `text+vector`. It was written
-while section 4.1's amendment was in force and the text-only pair was the binding one;
-the amendment was withdrawn and the grid was not re-run. The sign is negative in both
-framings at the frozen point — −0.1839 here, −0.1202 for the binding pair — so the
-conclusion is unaffected, but section 4's rule 2 is satisfied by evidence about a
-neighbouring comparison rather than the exact one it names. Re-running it against the
-binding pair costs about an hour and would forfeit the shortcut that makes it
-affordable: a single-stream baseline is provably invariant across this grid, so it is
-measured once instead of 28 times, and `text+vector` is not single-stream.
+And it is not an artifact of shallow streams, though this is where the binding grid
+answers differently from the comparison grid, so it is worth stating precisely. Depth is
+the one knob that moves the binding delta materially — the gap narrows from 0.1273 to
+0.0218 as over-fetch goes from 1 to 10 — and it narrows because *both* arms gain, not
+because the graph stream starts contributing: the baseline gains as much. On the
+comparison pair the same column changes only the fourth decimal, because a single-stream
+baseline cannot deepen. Either way no cell brings the interval to zero.
+
+**The limitation this section used to state is now measured away.** The grid swept only
+`text+graph` against `text`, because that was the binding pair when it was written (§4.1's
+amendment, later withdrawn) and because re-running it against `text+vector` looked like an
+hour's work: `text` is a single stream and provably invariant across the grid, so it is
+measured once instead of 28 times, and `text+vector` has no such shortcut. Meanwhile the
+command printed "rule 2 holds" from a pair rule 2 does not name — the kind of claim this
+document exists to catch, and it took a review to catch it. The estimate was also wrong:
+tripling the evaluations costs 14 minutes, not an hour. Rule 2 is now satisfied by the
+comparison it actually names.
+
+**What the binding grid shows that the text-only grid could not.** Over-fetching lifts
+the baseline itself — `text+vector` runs from 0.6233 at the frozen depth to 0.7091 at
+`RRFk`=200, over-fetch 10 — because both of its streams get deeper, where the text-only
+baseline was flat by construction. The frozen configuration is therefore not the best
+one for the baseline arm, and the published 0.6233 is conservative in the direction that
+matters least: the graph arm improves too, and never catches up. The gap narrows with
+depth, from 0.1273 at the shallowest cell to 0.0218 at the closest, and the interval
+still excludes zero in all 28 cells.
 
 ### 5.11 Weighted fusion: the regression was fusion's, and the graph still contributes nothing
 
@@ -671,7 +738,7 @@ as weft implements it does not improve nDCG@10.**
 | Section 4 condition | Result |
 |---|---|
 | 1. Frozen: paired 95% CI for `+graph` − baseline excludes zero and is positive | **FAILS** — excludes zero and is *negative*: −0.1202, [−0.1521, −0.0886] |
-| 2. Stable: the sign does not flip across the sweep | Holds — 0 flips in 28 configurations, negative throughout |
+| 2. Stable: the sign does not flip across the sweep | Holds — 0 flips in 28 configurations **of the pair this rule names**, negative throughout, closest interval [−0.0380, −0.0065] |
 | Best case under any fusion weight (section 5.11) | **+0.0000** — no weight beats the baseline; below 0.1 the arm *is* the baseline |
 
 Condition 1 fails, which is the "no" branch. Per the PRD and [D-004](DECISIONS.md) the
@@ -781,6 +848,17 @@ for every document it asks about, so a metadata release that joins to nothing wo
 have recorded the entire corpus as asked-and-unjoinable and satisfied the gate with a
 cache that never joined once; a zero-match join is now refused unless something already
 in the cache proves the join can work at all.
+
+The remaining pairings are between a file and the release it claims to be, and those are
+the hashes in section 5.1. Three smaller refusals close the same shape of hole in the
+inputs each command reads: a repeated key in `s2.jsonl` (concatenated caches — a later
+tombstone would discard a vector and a reference list while coverage still counted the
+document), a repeated query/document pair in the qrels carrying a *different* grade
+(concatenated assessment rounds — the ground truth would depend on row order; an
+identical repeat is still fine), and a repeated id in `query-vectors.jsonl`. `diagnose`
+additionally requires `-deep` to exceed `-k`, because the tie group it measures is only
+visible past the cut and a shallower frontier reports zero arbitrary slots for every
+query whatever the graph did.
 
 Bootstrap seed 20260814 and the frozen constants are compiled in, so `make eval`
 reprints the intervals in this document rather than approximations of them.
