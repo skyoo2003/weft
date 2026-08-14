@@ -35,12 +35,12 @@ body:
       placeholder: |
         Example:
 
-        ix := engine.NewIndex()
-        ix.Add(engine.Document{ID: "a", Text: "ranking fusion"})
-        err := ix.Add(engine.Document{ID: "b", Vector: []float64{1, 0}})
+        ix := engine.New()
+        ix.Add(engine.Document{Key: "a", Vector: []float32{1, 0, 0}})
+        _, err := ix.Add(engine.Document{Key: "b", Vector: []float32{1, 0}})
 
-        Expected: ErrDimMismatch.
-        Got: panic in pkg/engine/index.go:176.
+        Expected: err wraps ErrDimMismatch, because the corpus is 3 wide.
+        Got: err was nil and the index now holds two widths.
     validations:
       required: true
 
