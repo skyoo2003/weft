@@ -245,19 +245,26 @@ func TestPublicAPISurfaceIsUnchanged(t *testing.T) {
 // package here when it holds a non-test .go file; anything else is only a path.
 func publicPackageDirs(t *testing.T) []string {
 	t.Helper()
+	// The walk starts at pkg/, so engine is one level down from it.
+	enginePkgDir := filepath.Join("..", "engine")
 	seen := map[string]bool{}
 	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
 		switch {
 		case err != nil:
 			return err
 		case d.IsDir():
-			// engine is covered by engine_api.txt, and testdata holds the goldens
-			// themselves. Neither is skipped at the root, which is pkg/ itself.
-			if path != ".." && (d.Name() == "engine" || d.Name() == "testdata") {
+			// testdata holds the goldens themselves, and nothing under it is a
+			// package. engine is not pruned here: it is one package with a golden
+			// of its own, not a subtree that has one, and engine_api.txt reads only
+			// the files directly in it. Skipping the directory would take a future
+			// pkg/engine/storage with it.
+			if d.Name() == "testdata" {
 				return fs.SkipDir
 			}
 		case strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go"):
-			seen[filepath.Dir(path)] = true
+			if dir := filepath.Dir(path); dir != enginePkgDir {
+				seen[dir] = true
+			}
 		}
 		return nil
 	})
@@ -339,17 +346,17 @@ func exportedAPI(t *testing.T, dir string) []string {
 					blocks = append(blocks, []string{"method " + recv + "." + d.Name.Name + signature(d.Type)})
 				}
 			case *ast.GenDecl:
-				for _, spec := range d.Specs {
+				for si, spec := range d.Specs {
 					switch s := spec.(type) {
 					case *ast.TypeSpec:
 						if !s.Name.IsExported() {
 							continue
 						}
-						blocks = append(blocks, typeAPI(s.Name.Name, s.Type))
+						blocks = append(blocks, typeAPI(s.Name.Name, s.Assign.IsValid(), s.Type))
 					case *ast.ValueSpec:
 						for i, n := range s.Names {
 							if n.IsExported() {
-								blocks = append(blocks, []string{d.Tok.String() + " " + n.Name + valueAPI(s, i)})
+								blocks = append(blocks, []string{d.Tok.String() + " " + n.Name + valueAPI(d, si, i)})
 							}
 						}
 					}
@@ -373,10 +380,17 @@ func exportedAPI(t *testing.T, dir string) []string {
 // up its contract. Member types are recorded alongside member names, because
 // retyping Document.Vector or adding a parameter to Fuser changes what engine
 // promises without changing a single name.
-func typeAPI(name string, expr ast.Expr) []string {
+func typeAPI(name string, alias bool, expr ast.Expr) []string {
+	head := "type " + name
+	if alias {
+		// type X = T and type X T are different promises: only the alias lets a
+		// T reach a parameter of type X without a conversion. Dropping the "="
+		// would make that break look like no change at all.
+		head += " ="
+	}
 	switch t := expr.(type) {
 	case *ast.StructType:
-		out := []string{"type " + name + " struct"}
+		out := []string{head + " struct"}
 		unexported := false
 		for _, fld := range t.Fields.List {
 			if len(fld.Names) == 0 {
@@ -416,7 +430,7 @@ func typeAPI(name string, expr ast.Expr) []string {
 		// Recording method signatures is what makes that cost visible, and
 		// recording embedded interfaces covers the Streamer extension sketched in
 		// docs/FINDINGS.md section 3.1.
-		out := []string{"type " + name + " interface"}
+		out := []string{head + " interface"}
 		for _, m := range t.Methods.List {
 			ft, ok := m.Type.(*ast.FuncType)
 			if !ok {
@@ -435,11 +449,11 @@ func typeAPI(name string, expr ast.Expr) []string {
 		// Fuser's signature is part of the contract, and it goes through the same
 		// name-stripping as a func declaration: renaming its streams parameter is
 		// no more a contract change here than it is there.
-		return []string{"type " + name + " func" + signature(t)}
+		return []string{head + " func" + signature(t)}
 
 	default:
 		// A defined type: DocID's width is part of the contract.
-		return []string{"type " + name + " " + types.ExprString(expr)}
+		return []string{head + " " + types.ExprString(expr)}
 	}
 }
 
@@ -457,17 +471,32 @@ func typeAPI(name string, expr ast.Expr) []string {
 // message is in the golden and editing one trips it. That is the intended
 // reading, not noise: these strings are what a caller sees at runtime, and the
 // same rule that asks whether a signature change costs anything asks it here.
-func valueAPI(s *ast.ValueSpec, i int) string {
-	switch {
-	case s.Type != nil:
+func valueAPI(d *ast.GenDecl, si, i int) string {
+	s := d.Specs[si].(*ast.ValueSpec)
+	if s.Type != nil {
 		return " " + types.ExprString(s.Type)
-	case i < len(s.Values):
-		return " = " + types.ExprString(s.Values[i])
-	default:
-		// A continuation line in an iota block: no type and no expression of its
-		// own, so the name is genuinely all there is to record.
-		return ""
 	}
+	if i < len(s.Values) {
+		return " = " + types.ExprString(s.Values[i])
+	}
+	// A continuation line in a const block, which has neither of its own: it
+	// repeats the last spec that had one, and iota is its position in the block.
+	// Both halves are recorded because both can move alone. Inserting a blank or
+	// unexported constant above an exported one leaves the repeated expression
+	// identical while renumbering it — a released value change that would
+	// otherwise reach callers with the golden unmoved.
+	for j := si - 1; j >= 0; j-- {
+		prev, ok := d.Specs[j].(*ast.ValueSpec)
+		if !ok || i >= len(prev.Values) {
+			continue
+		}
+		out := " = " + types.ExprString(prev.Values[i]) + " (iota " + strconv.Itoa(si) + ")"
+		if prev.Type != nil {
+			out = " " + types.ExprString(prev.Type) + out
+		}
+		return out
+	}
+	return ""
 }
 
 // signature renders a function's parameter and result types, dropping the

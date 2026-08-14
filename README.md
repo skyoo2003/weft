@@ -36,7 +36,7 @@ Milestones 1 and 2 passed. **Not usable in production:** every commit rewrites t
 | 5 | Performance — p99 including GC pauses | Not started |
 | 6 | External contribution readiness | Not started |
 
-No tag yet; the first will be `v0.1.0`. Until then `go get` resolves to a pseudo-version naming a commit, which is the honest state — a tag would give you a shorter name without changing anything the warning above says. [CHANGELOG](CHANGELOG.md) is where a version tells you whether you have work to do, and it records three things only: `engine`'s exported API, the on-disk format version, and the minimum Go version. The milestone numbers in this table are not among them.
+No tag yet; the first will be `v0.1.0`. Until then `go get` resolves to a pseudo-version naming a commit, which is the honest state — a tag would give you a shorter name without changing anything the warning above says. [CHANGELOG](CHANGELOG.md) is where a version tells you whether you have work to do, and it records three things only: the exported API of every package under `pkg/`, the on-disk format version, and the minimum Go version. The milestone numbers in this table are not among them.
 
 ## Quick start
 
@@ -124,7 +124,7 @@ make run        # interactive demo
 make example    # minimal example
 ```
 
-2,396 implementation lines under `pkg/`, 4,149 test lines, **zero external dependencies**. Go 1.26+.
+2,396 implementation lines under `pkg/`, 4,178 test lines, **zero external dependencies**. Go 1.26+.
 
 ## Limitations
 
