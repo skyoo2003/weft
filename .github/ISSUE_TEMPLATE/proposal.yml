@@ -1,0 +1,76 @@
+name: Proposal
+description: A scorer, a feature, or a design change — open this before writing it
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is not a permission slip. It exists so you find out early whether
+        the thing you are about to build is already recorded as rejected in
+        [DECISIONS.md](https://github.com/skyoo2003/weft/blob/main/docs/DECISIONS.md)
+        or as unverified in
+        [FINDINGS.md](https://github.com/skyoo2003/weft/blob/main/docs/FINDINGS.md).
+
+        Small changes do not need this. Open a pull request.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: >-
+        The problem before the solution. A proposal that starts with the design
+        is hard to disagree with in the right place.
+      placeholder: |
+        Example:
+
+        Graph seeds are fixed at SeedN = 5 and "top n from text", and FINDINGS
+        records that neither number has been measured. Anyone tuning recall has
+        no way to try a different seed strategy without editing the scorer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: What you want to build
+      description: >-
+        Enough to tell whether it touches engine/ or fusion/. If it only adds a
+        package under scorer/, say so — that is the cheap case by design.
+    validations:
+      required: true
+
+  - type: input
+    id: relates
+    attributes:
+      label: Related limitation or milestone
+      description: >-
+        Which row of README's Limitations table, or which milestone (3 scale,
+        4 quality, 5 performance, 6 contribution readiness), this belongs to.
+        Write "neither" if it is genuinely new.
+      placeholder: Milestone 4 — graph seeds unverified
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        **If this adds a scorer**, one thing is not automatic. The import-graph
+        assertion covers your package the moment it exists, but
+        `TestAddingAFourthScorerDoesNotChangeTheCallShape` and
+        `TestAnyNumberOfScorersFuses` name the four scorers in the tree by hand.
+        Nothing runs yours until you add it to those two slices in
+        `pkg/engine/architecture_test.go`.
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            I checked DECISIONS.md and this is not something already decided
+            against.
+          required: true
+        - label: >-
+            If this contradicts a DECISIONS.md or FINDINGS.md entry, I understand
+            that document is part of the change.
+          required: false

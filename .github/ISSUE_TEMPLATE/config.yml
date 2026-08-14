@@ -1,0 +1,23 @@
+# Questions get a blank issue rather than a form. There is no Discussions tab and
+# no chat channel by choice, so the tracker is the only place to ask, and making
+# someone fill a form to ask a question would close the last door.
+blank_issues_enabled: true
+
+contact_links:
+  - name: Reporting a vulnerability
+    url: https://github.com/skyoo2003/weft/blob/main/SECURITY.md
+    about: Not here. Email the maintainer, and please do not open a public issue.
+
+  - name: Known limitations
+    url: https://github.com/skyoo2003/weft/blob/main/README.md#limitations
+    about: >-
+      Corpus must fit in memory, no deletion, no CJK tokenization, no query
+      language. Nine of these are documented and deliberate.
+
+  - name: Already decided against
+    url: https://github.com/skyoo2003/weft/blob/main/docs/DECISIONS.md
+    about: Choices expensive to reverse, with the reasoning that settled them.
+
+  - name: Measured, and not yet measured
+    url: https://github.com/skyoo2003/weft/blob/main/docs/FINDINGS.md
+    about: What the milestones actually proved, and which numbers are still guesses.

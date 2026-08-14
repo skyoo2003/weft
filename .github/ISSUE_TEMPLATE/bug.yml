@@ -1,0 +1,69 @@
+name: Bug report
+description: Something behaves differently from what the documentation says
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: nine known limitations are listed in
+        [README — Limitations](https://github.com/skyoo2003/weft/blob/main/README.md#limitations),
+        and a report about one of them is not a bug. The corpus having to fit in
+        memory, no deletion, no CJK tokenization and no query language are all
+        there on purpose.
+
+        A vulnerability is not a bug report. It goes to
+        [SECURITY.md](https://github.com/skyoo2003/weft/blob/main/SECURITY.md).
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: >-
+        There are no releases yet, so the commit SHA is the only way to name a
+        version. `git rev-parse --short HEAD`.
+      placeholder: 036b91a
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: What happened
+      description: >-
+        The input, the calling sequence, and what you expected instead. A failing
+        test or a main.go someone can run beats a description of one.
+      placeholder: |
+        Example:
+
+        ix := engine.New()
+        ix.Add(engine.Document{Key: "a", Vector: []float32{1, 0, 0}})
+        _, err := ix.Add(engine.Document{Key: "b", Vector: []float32{1, 0}})
+
+        Expected: err wraps ErrDimMismatch, because the corpus is 3 wide.
+        Got: err was nil and the index now holds two widths.
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Go version and OS
+      description: >-
+        Output of `go version`. OS matters more than it looks: durability stops
+        at fsync with no platform write barrier (FORMAT.md section 6), so
+        persistence bugs can be platform-specific.
+      placeholder: go version go1.26.0 darwin/arm64
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before submitting
+      options:
+        - label: This is not one of the documented limitations in README.
+          required: true
+        - label: >-
+            I ran `make all` on the commit above and it passed, so this is not a
+            broken checkout.
+          required: false

@@ -41,9 +41,13 @@ No CLA and no DCO sign-off. Contributions are under [Apache-2.0](LICENSE), the l
 
 ## Before a large change
 
-Open an issue first. Not for permission — to find out whether the thing you are about to build is already recorded as rejected in [docs/DECISIONS.md](docs/DECISIONS.md) or as unverified in [docs/FINDINGS.md](docs/FINDINGS.md).
+Open a [proposal](https://github.com/skyoo2003/weft/issues/new?template=proposal.yml) first. Not for permission — to find out whether the thing you are about to build is already recorded as rejected in [docs/DECISIONS.md](docs/DECISIONS.md) or as unverified in [docs/FINDINGS.md](docs/FINDINGS.md).
 
 Neither document repeats anything readable from the code. If a change contradicts one of them, that document is part of the change.
+
+Bugs have [their own form](https://github.com/skyoo2003/weft/issues/new?template=bug.yml), and it asks for a commit SHA because there is nothing else to name yet. A question needs no form at all — open a blank issue.
+
+A `priority:` label is the maintainer reading a queue, not a commitment about when anything ships. Nothing here carries a response time, and [SECURITY.md](SECURITY.md) says the same about vulnerabilities.
 
 ## Stability
 
