@@ -6,11 +6,11 @@ name: CI
 on:
   push:
     branches: [main]
-    # Tags too. A tag normally lands on a commit main has already judged, which
-    # makes this redundant — but a tag is the one thing here that cannot be
-    # withdrawn once the module proxy has served it, so the redundant run costs
-    # less than the case it covers.
-    tags: ['v*']
+    # Tags too. This run starts after the tag is already pushed, so it cannot
+    # stop a bad one, and a tag cannot be withdrawn once the module proxy has
+    # served it. What it buys is judging the tagged tree itself, immediately,
+    # rather than trusting that main was green. The remedy is the next tag.
+    tags: ['v[0-9]*']
   pull_request:
 
 permissions:

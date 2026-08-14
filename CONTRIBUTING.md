@@ -53,12 +53,13 @@ A `priority:` label is the maintainer reading a queue, not a commitment about wh
 
 The API can break while this is v0.x. Changes that are expensive to reverse get a `DECISIONS.md` entry; everything else can move without ceremony.
 
-Supported Go is whatever `go.mod` says, and newer. Older is not tested and not promised — CI reads that same line, so there is one number rather than a matrix.
+Supported Go is the version in `go.mod` and newer. Newer is untested rather than unsupported: [the gate](#the-gate) pins that one line, so there is one number rather than a matrix.
 
 ## Cutting a release
 
-No tags yet; the first will be `v0.1.0`. Three steps, and only the first is irreversible.
+Four steps, in this order. Everything before the push is reversible; the push is not.
 
-1. **Tag a commit that is already green on `main`.** Once the Go module proxy has served a version, deleting the tag does not withdraw it — the version stays resolvable, pointing at whatever it pointed at. That is why `v*` tags trigger [CI](.github/workflows/ci.yml) even though the commit has usually been judged already.
-2. `gh release create <tag> --generate-notes` — the notes come from the merged pull requests, so nothing is retyped.
-3. **A [CHANGELOG](CHANGELOG.md) entry only if the release moved one of three things**: `pkg/engine/testdata/engine_api.txt`, `formatVersion` in `pkg/engine/segment.go`, or go.mod's Go version. Each is a file a test or the toolchain already watches. If none moved, write nothing — the silence is the claim that there is nothing for a caller to do.
+1. **Merge the documentation the tag will freeze.** A tag points at a tree, so a correction written afterwards is not in it — the whole reason `docs/FINDINGS.md`'s line count was fixed before the first tag rather than after. That means: a [CHANGELOG](CHANGELOG.md) entry **only if the release moved one of three things** — `pkg/engine/testdata/engine_api.txt`, `formatVersion` in `pkg/engine/segment.go`, or go.mod's Go version, each a file a test or the toolchain already watches. If none moved, write nothing; the silence is the claim that there is nothing for a caller to do. Either way the heading stops saying `unreleased`, and whatever else the tag makes false goes in the same commit — [README](README.md#status)'s "no tag yet", [SECURITY.md](SECURITY.md)'s "no releases yet".
+2. **Confirm that commit is green on `main`:** `gh run list --workflow=ci.yml --branch=main`.
+3. `git tag -a <tag> <sha>`, then `git push origin <tag>`. Push the tag yourself instead of letting step 4 invent one: `gh release create` on a tag that does not exist yet creates it at the default branch's HEAD, which need not be the commit you just checked. Once the Go module proxy has served a version, deleting the tag does not withdraw it — the version stays resolvable, pointing at whatever it pointed at. `v[0-9]*` tags do trigger [CI](.github/workflows/ci.yml), but that run starts after the push: it reports a bad tag, it cannot stop one, and the remedy is the next tag rather than a deletion.
+4. `gh release create <tag> --verify-tag --generate-notes` — the notes come from the merged pull requests, so nothing is retyped. `--verify-tag` aborts when the tag is not already on the remote, which makes the trap in step 3 a check rather than something to remember.

@@ -6,9 +6,9 @@ Three things can force work on your side, and each is decided by a file rather t
 
 | What | Where it is decided | How you find out |
 |---|---|---|
-| `pkg/engine`'s exported API | `pkg/engine/testdata/engine_api.txt` | `TestEngineAPISurfaceIsUnchanged` fails |
+| `pkg/engine`'s exported API | `pkg/engine/testdata/engine_api.txt` | your build stops compiling; that file's diff between the two tags says what moved |
 | The on-disk format | `formatVersion` in `pkg/engine/segment.go` | `Open` returns `ErrBadVersion` |
-| The minimum Go version | the `go` line in `go.mod` | the toolchain refuses to build |
+| The minimum Go version | the `go` line in `go.mod` | `GOTOOLCHAIN=auto`, the default, downloads that version and builds; `GOTOOLCHAIN=local` refuses |
 
 A release that moved none of the three gets no entry. Absence is the claim.
 
@@ -22,7 +22,7 @@ First tag. Nothing to migrate from.
 
 | | |
 |---|---|
-| Exported API | baseline: `pkg/engine/testdata/engine_api.txt` at this commit |
+| Exported API | baseline: `pkg/engine/testdata/engine_api.txt` at the tagged commit |
 | On-disk format | 1 — [FORMAT.md](docs/FORMAT.md) |
 | Minimum Go | 1.26 |
 
