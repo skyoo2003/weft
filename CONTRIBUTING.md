@@ -52,3 +52,13 @@ A `priority:` label is the maintainer reading a queue, not a commitment about wh
 ## Stability
 
 The API can break while this is v0.x. Changes that are expensive to reverse get a `DECISIONS.md` entry; everything else can move without ceremony.
+
+Supported Go is whatever `go.mod` says, and newer. Older is not tested and not promised — CI reads that same line, so there is one number rather than a matrix.
+
+## Cutting a release
+
+No tags yet; the first will be `v0.1.0`. Three steps, and only the first is irreversible.
+
+1. **Tag a commit that is already green on `main`.** Once the Go module proxy has served a version, deleting the tag does not withdraw it — the version stays resolvable, pointing at whatever it pointed at. That is why `v*` tags trigger [CI](.github/workflows/ci.yml) even though the commit has usually been judged already.
+2. `gh release create <tag> --generate-notes` — the notes come from the merged pull requests, so nothing is retyped.
+3. **A [CHANGELOG](CHANGELOG.md) entry only if the release moved one of three things**: `pkg/engine/testdata/engine_api.txt`, `formatVersion` in `pkg/engine/segment.go`, or go.mod's Go version. Each is a file a test or the toolchain already watches. If none moved, write nothing — the silence is the claim that there is nothing for a caller to do.

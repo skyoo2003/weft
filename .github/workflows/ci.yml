@@ -6,6 +6,11 @@ name: CI
 on:
   push:
     branches: [main]
+    # Tags too. A tag normally lands on a commit main has already judged, which
+    # makes this redundant — but a tag is the one thing here that cannot be
+    # withdrawn once the module proxy has served it, so the redundant run costs
+    # less than the case it covers.
+    tags: ['v*']
   pull_request:
 
 permissions:
