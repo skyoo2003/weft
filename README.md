@@ -115,7 +115,7 @@ Dependencies point inward. `engine` imports no weft package; `fusion` imports on
 ## Development
 
 ```bash
-make            # fmt + build + vet + test — the same gate CI runs
+make            # fmt + build + vet + test -race — the same gate CI runs
 make arch       # the three assertions above
 make deps       # zero dependencies, and fusion sees no scorer
 make run        # interactive demo
@@ -137,6 +137,12 @@ make example    # minimal example
 | No CJK tokenization | Whitespace and punctuation splitting only, so CJK runs collapse into one token. |
 | No embedding generation | Vectors are supplied by the caller. |
 | No query language | Queries are built through the Go API. |
+
+## Contributing
+
+`make all` is the gate, and CI runs that same target. What the three assertions mean is [Adding a scorer](#adding-a-scorer), above. How to contribute — which of them a test decides for you, what the 100-line figure does and does not enforce, what a pull request should say, why a decision is recorded — is in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Vulnerabilities go to [SECURITY.md](SECURITY.md), not to the issue tracker. Behavior is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
