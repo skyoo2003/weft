@@ -1,5 +1,6 @@
 .PHONY: all fmt build vet test lint lint-docs spdx fuzz arch deps run example clean \
-	changelog changelog-new changelog-check docs-site release-check
+	changelog changelog-new changelog-check docs-site release-check \
+	eval eval-full eval-data
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
@@ -147,6 +148,28 @@ deps:
 	else \
 		echo "OK: fusion imports no scorer package"; \
 	fi
+
+# Milestone 4. The headline numbers, reprinted from an already-built index.
+# docs/EVAL.md is the measurement design and the judgment rule; this target exists
+# so a published figure can be re-derived with one command.
+eval:
+	go run ./cmd/weft-eval run
+
+# Everything milestone 4 publishes: the degeneracy diagnostic, the frozen arms, the
+# sensitivity sweep and the fusion weight sweep the README's +0.0018 headline comes
+# from. Slower — the sweep alone re-measures 28 configurations.
+eval-full:
+	go run ./cmd/weft-eval diagnose
+	go run ./cmd/weft-eval run
+	go run ./cmd/weft-eval sweep
+	go run ./cmd/weft-eval weights
+
+# One-time data preparation. prepare is rate limited and takes hours; it appends
+# and is resumable, so rerunning it continues rather than starting over. See
+# docs/EVAL.md section 3 for the downloads it expects to already be in place.
+eval-data:
+	go run ./cmd/weft-eval prepare
+	go run ./cmd/weft-eval build
 
 run:
 	go run ./cmd/weft

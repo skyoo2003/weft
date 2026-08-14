@@ -2,10 +2,39 @@
 
 // Package graph ranks documents by link proximity to a seed set.
 //
-// The seed set is the interesting part. It comes either from Query.Seeds, or
-// from another engine.Scorer handed to New — any scorer, not specifically the
-// text one. Graph proximity therefore composes with whatever is available
-// without ever naming it, which is the same claim fusion makes, one level down.
+// # Measured contribution: none. Read this before enabling it.
+//
+// Milestone 4 evaluated this scorer on TREC-COVID joined to the Semantic Scholar
+// citation graph — 171,332 documents, 579,720 in-corpus edges, 50 queries — and it
+// did not improve ranking quality at any setting tried. At the fusion weight that
+// suits it best it is worth +0.0018 nDCG@10, an interval that touches zero. Under
+// equal-weight RRF (fusion.Fuse) it is far worse than neutral: −0.1156.
+//
+// Two things follow for a caller.
+//
+// If you use this scorer, weight its stream down — fusion.FuseWeighted exists
+// because of this measurement. Handing it an equal vote alongside BM25 measurably
+// destroys rankings, and that cost belongs to the fusion policy rather than to this
+// package (docs/FINDINGS.md milestone 4 section 7).
+//
+// And do not expect quality from it. The mechanism is understood: with MaxDepth 3 a
+// candidate's score takes very few distinct values, the hop-1 frontier on a real
+// citation graph runs to tens of documents per query, and engine.TopK breaks the
+// resulting ties on DocID — which is corpus insertion order. The stream carries
+// almost no ordering to contribute. Summing per-seed distances (see Candidates)
+// improved this and did not fix it.
+//
+// The package is kept rather than deleted, deliberately and on the record: it is one
+// of the signals the milestone 1 architecture assertions are built on, and those
+// assertions are what this project is actually evidence for. docs/DECISIONS.md D-005
+// has the full argument, including the case for deleting it instead.
+//
+// # What it does
+//
+// The seed set is the interesting part. It comes either from Query.Seeds, or from
+// another engine.Scorer handed to New — any scorer, not specifically the text one.
+// Graph proximity therefore composes with whatever is available without ever naming
+// it, which is the same claim fusion makes, one level down.
 package graph
 
 import (
@@ -45,20 +74,27 @@ func New(ix *engine.Index, seed engine.Scorer) *Scorer {
 	return &Scorer{ix: ix, seed: seed}
 }
 
-// NewIncludingSeeds is New with seeds kept in the results at score 1.0, which is
-// the proximity formula taken literally.
+// NewIncludingSeeds is New with seeds kept in the results, which is the proximity
+// formula taken literally.
 //
 // This is the double-counting variant described above, and it exists for one
 // reason: milestone 4 has to measure whether graph proximity improves nDCG, and
 // that measurement is only trustworthy if both variants can be run over the same
 // query set. Prefer New everywhere else.
 //
-// Read the measurement carefully: every seed scores exactly 1.0, so TopK's tie
-// break puts them in DocID order, not the order the seed scorer ranked them.
-// This arm therefore measures the seed set getting a second vote, not the seed
-// scorer's ranking getting one. At k <= SeedN it is only seeds — hop-1 at 0.5
-// never outsorts a seed at 1.0 — so the traversal contributes nothing at the
-// demo's default k of 5.
+// Read the measurement carefully: a seed contributes 1.0 to its own score, so seeds
+// that do not link to each other all land on exactly 1.0 and TopK's tiebreak puts
+// them in DocID order rather than the order the seed scorer ranked them. This arm
+// therefore measures the seed set getting a second vote, not the seed scorer's
+// ranking getting one.
+//
+// Since Candidates became a sum over seeds, a well-connected non-seed document can
+// outrank a seed — two seeds one hop away sum to 1.0, three to 1.5. Under the
+// previous nearest-seed formula hop-1 topped out at 0.5 and could never displace a
+// seed, so at k <= SeedN this variant returned nothing but seeds. It no longer
+// necessarily does, which makes it a slightly less clean isolation of the
+// double-counting effect and a slightly more realistic arm. Milestone 4 reports both
+// variants regardless (docs/EVAL.md section 5.8).
 func NewIncludingSeeds(ix *engine.Index, seed engine.Scorer) *Scorer {
 	return &Scorer{ix: ix, seed: seed, includeSeeds: true}
 }
@@ -68,10 +104,34 @@ func (s *Scorer) Name() string { return "graph" }
 
 // Candidates implements engine.Scorer.
 //
-// Score is 1/(1+hops): one hop out scores 0.5, two hops 1/3. Seeds sit at zero
-// hops and would score 1.0, but they are dropped unless the scorer was built
-// with NewIncludingSeeds — see New for why, and docs/FINDINGS.md section 2.3 for
-// how the two variants differ in practice.
+// Score is Σ over seeds of 1/(1+hops from that seed), so a document one hop from
+// two seeds scores 1.0 while a document one hop from one seed scores 0.5. Seeds sit
+// at zero hops from themselves and are dropped unless the scorer was built with
+// NewIncludingSeeds — see New for why, and docs/FINDINGS.md section 2.3 for how the
+// two variants differ in practice.
+//
+// # Why the sum, and not the distance to the nearest seed
+//
+// The obvious formula — one merged traversal, score 1/(1+min hops) — is what this
+// scorer used through milestone 3, and milestone 4 measured what it does on a real
+// citation graph. With MaxDepth 3 a non-seed candidate can hold exactly three
+// values: 0.5, 1/3, 0.25. On TREC-COVID the hop-1 frontier averaged 41 documents per
+// query and exceeded k for 38 of 50 queries, so every candidate the stream returned
+// scored 0.5 and engine.TopK's tiebreak picked the winners — by DocID, which is
+// corpus insertion order. The stream was ranking by an accident of indexing, and it
+// cost 0.16 nDCG@10 against the baseline (docs/EVAL.md sections 5.7 and 5.8).
+//
+// Summing per-seed distances addresses the cause rather than the symptom. A document
+// several seeds agree on now outranks one only a single seed reaches, which is what
+// "close to what the query is about" should have meant all along, and the score's
+// granularity goes from three values to a sum over SeedN of them. It is also the
+// more natural reading of proximity to a *set*: nearest-neighbour throws away every
+// seed but one.
+//
+// ponytail: SeedN separate traversals, so a query pays SeedN times the link scans a
+// merged BFS would. Personalised PageRank subsumes this and is the principled
+// version (docs/FINDINGS.md section 5); it is worth writing when this formula is
+// what limits quality, not merely when it is inelegant.
 func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
 	if k <= 0 {
 		return nil, nil
@@ -84,17 +144,59 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		return nil, nil
 	}
 
-	// dist doubles as the visited set, which is what makes cycles terminate: a
-	// document already in dist is never enqueued again.
-	dist := make(map[engine.DocID]int, len(seeds))
-	queue := make([]engine.DocID, 0, len(seeds))
-	for _, id := range seeds {
-		if _, seen := dist[id]; seen {
+	// isSeed does two jobs. It excludes seeds from the results even when a sibling
+	// seed's traversal reaches them — under the old merged BFS a seed was
+	// identifiable by hops == 0, but now it can legitimately be one hop from another
+	// seed and its accumulated score mixes both contributions. And it deduplicates
+	// the traversal set: Query.Seeds is caller-supplied, two of its keys can resolve
+	// to the same document, and the old merged BFS absorbed that for free because a
+	// repeated id was already in dist. Summing per seed does not, so without this a
+	// seed listed twice votes twice and every document it reaches doubles its score.
+	isSeed := make(map[engine.DocID]bool, len(seeds))
+
+	score := make(map[engine.DocID]float64, len(seeds))
+	for _, seed := range seeds {
+		if isSeed[seed] {
 			continue
 		}
-		dist[id] = 0
-		queue = append(queue, id)
+		isSeed[seed] = true
+		dist, err := s.bfs(ctx, seed)
+		if err != nil {
+			return nil, err
+		}
+		for id, hops := range dist {
+			score[id] += 1 / float64(1+hops)
+		}
 	}
+
+	// TopK sorts, so a cancellation arriving after the last poll would otherwise
+	// still pay for an O(n log n) sort of results nobody will read.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// Unreachable documents never entered score, so they never appear.
+	cands := make([]engine.Candidate, 0, len(score))
+	for id, sc := range score {
+		if isSeed[id] && !s.includeSeeds {
+			continue // A seed is not a discovery.
+		}
+		cands = append(cands, engine.Candidate{Doc: id, Score: sc})
+	}
+	return engine.TopK(cands, k), nil
+}
+
+// bfs returns hop distance from one seed to every document reachable within
+// MaxDepth, including the seed itself at 0.
+//
+// Deduplication is per seed, not global: a document two seeds both reach has to be
+// counted once for each, or the sum in Candidates would quietly collapse back into
+// the nearest-seed formula for every document more than one seed touches.
+func (s *Scorer) bfs(ctx context.Context, seed engine.DocID) (map[engine.DocID]int, error) {
+	// dist doubles as the visited set, which is what makes cycles terminate: a
+	// document already in dist is never enqueued again.
+	dist := map[engine.DocID]int{seed: 0}
+	queue := []engine.DocID{seed}
 
 	for head := 0; head < len(queue); head++ {
 		if err := ctx.Err(); err != nil {
@@ -135,22 +237,7 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 			queue = append(queue, next)
 		}
 	}
-
-	// TopK sorts, so a cancellation arriving after the last poll would otherwise
-	// still pay for an O(n log n) sort of results nobody will read.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	// Unreachable documents are simply absent from dist, so they never appear.
-	cands := make([]engine.Candidate, 0, len(dist))
-	for id, hops := range dist {
-		if hops == 0 && !s.includeSeeds {
-			continue // A seed is not a discovery.
-		}
-		cands = append(cands, engine.Candidate{Doc: id, Score: 1 / float64(1+hops)})
-	}
-	return engine.TopK(cands, k), nil
+	return dist, nil
 }
 
 // seedDocs resolves the starting set. Explicit Query.Seeds win over the seed

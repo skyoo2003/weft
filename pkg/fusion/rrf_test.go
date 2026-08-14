@@ -3,6 +3,7 @@
 package fusion
 
 import (
+	"math"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -26,6 +27,126 @@ func equal(got []engine.DocID, want ...engine.DocID) bool {
 		}
 	}
 	return true
+}
+
+// weightStreams is the fixture the FuseWeighted tests share: two streams that
+// disagree completely, so which one is trusted decides the whole ranking.
+func weightStreams() [][]engine.Candidate {
+	return [][]engine.Candidate{
+		{{Doc: 1, Score: 9}, {Doc: 2, Score: 8}, {Doc: 3, Score: 7}},
+		{{Doc: 4, Score: 9}, {Doc: 5, Score: 8}, {Doc: 6, Score: 7}},
+	}
+}
+
+// TestFuseWeightedWithoutWeightsIsFuse is the compatibility guarantee the refactor
+// rests on. Fuse now delegates to the same accumulation loop, and if the two ever
+// diverge, every ranking pinned elsewhere — milestone 1's assertions, milestone 2's
+// restore equivalence — silently starts measuring something else.
+//
+// Bit equality, not approximate: multiplying by 1.0 is exact in IEEE-754, so there
+// is no tolerance to justify.
+func TestFuseWeightedWithoutWeightsIsFuse(t *testing.T) {
+	streams := [][]engine.Candidate{
+		{{Doc: 1, Score: 9}, {Doc: 3, Score: 8}, {Doc: 7, Score: 7}, {Doc: 2, Score: 6}},
+		{{Doc: 3, Score: 0.9}, {Doc: 9, Score: 0.8}, {Doc: 1, Score: 0.7}},
+		{{Doc: 7, Score: 5}, {Doc: 4, Score: 4}},
+	}
+
+	tests := []struct {
+		name  string
+		fused []engine.Candidate
+	}{
+		{"no weights at all", FuseWeighted()(streams, 6)},
+		{"explicit ones", FuseWeighted(1, 1, 1)(streams, 6)},
+		{"short slice, rest default to one", FuseWeighted(1)(streams, 6)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			want := Fuse(streams, 6)
+			if len(tc.fused) != len(want) {
+				t.Fatalf("got %d candidates, Fuse gave %d", len(tc.fused), len(want))
+			}
+			for i := range want {
+				if tc.fused[i] != want[i] {
+					t.Errorf("rank %d: got %+v, Fuse gave %+v", i+1, tc.fused[i], want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestFuseWeightedDiscountsAStream is the behaviour milestone 4 bought this for: a
+// stream that is mostly noise can be given a smaller vote instead of an equal one.
+func TestFuseWeightedDiscountsAStream(t *testing.T) {
+	streams := weightStreams()
+
+	// Equal votes: rank 1 of each stream ties, and TopK breaks on DocID.
+	if got := docs(Fuse(streams, 2)); !equal(got, 1, 4) {
+		t.Fatalf("unweighted = %v, want [1 4] (tied at rank 1, DocID decides)", got)
+	}
+
+	// Second stream discounted: the first sweeps the top before the second's best
+	// appears.
+	if got := docs(FuseWeighted(1, 0.1)(streams, 4)); !equal(got, 1, 2, 3, 4) {
+		t.Errorf("weighted 1:0.1 = %v, want [1 2 3 4]", got)
+	}
+
+	// And symmetrically, so the effect is the weight and not the stream order.
+	if got := docs(FuseWeighted(0.1, 1)(streams, 4)); !equal(got, 4, 5, 6, 1) {
+		t.Errorf("weighted 0.1:1 = %v, want [4 5 6 1]", got)
+	}
+}
+
+// TestFuseWeightedZeroSilencesAStream: weight 0 must remove a stream's influence
+// entirely rather than leave it breaking ties. "Turn this signal off" is the first
+// thing a caller will try, and a residue would be invisible.
+func TestFuseWeightedZeroSilencesAStream(t *testing.T) {
+	streams := weightStreams()
+	fused := FuseWeighted(1, 0)(streams, 6)
+
+	for _, c := range fused {
+		if c.Doc >= 4 {
+			t.Errorf("doc %d came from the silenced stream at score %v", c.Doc, c.Score)
+		}
+	}
+	// The surviving stream must rank exactly as it would alone.
+	if got := docs(fused); !equal(got, 1, 2, 3) {
+		t.Errorf("got %v, want [1 2 3]", got)
+	}
+}
+
+// TestFuseWeightedRejectsOutOfContractWeights pins the one defined behaviour for a
+// weight that breaks the precondition. A NaN weight is the dangerous one: it would
+// otherwise make every score it touches NaN, and TopK sorts those last and ties them
+// on DocID, so the fused order silently becomes corpus insertion order.
+func TestFuseWeightedRejectsOutOfContractWeights(t *testing.T) {
+	streams := weightStreams()
+	off := docs(FuseWeighted(1, 0)(streams, 6))
+
+	for _, w := range []float64{math.NaN(), -1, math.Inf(-1)} {
+		if got := docs(FuseWeighted(1, w)(streams, 6)); !equal(got, off...) {
+			t.Errorf("weight %v = %v, want %v (same as weight 0)", w, got, off)
+		}
+	}
+	// +Inf is finite-contract-breaking too, but it is not folded to 0: it is a
+	// weight, just an absurd one, and it silences the other stream instead.
+	if got := docs(FuseWeighted(1, math.Inf(1))(streams, 3)); !equal(got, 4, 5, 6) {
+		t.Errorf("weight +Inf = %v, want [4 5 6]", got)
+	}
+}
+
+// TestFuseWeightedDoesNotAliasCallerSlice: a Fuser outlives the call that built it,
+// and callers reuse scratch slices.
+func TestFuseWeightedDoesNotAliasCallerSlice(t *testing.T) {
+	w := []float64{1, 0.1}
+	fuser := FuseWeighted(w...)
+	before := docs(fuser(weightStreams(), 4))
+
+	w[1] = 1 // Would re-enable the discounted stream if the slice were shared.
+
+	if after := docs(fuser(weightStreams(), 4)); !equal(after, before...) {
+		t.Errorf("after mutating the caller's slice: %v, before: %v", after, before)
+	}
 }
 
 func TestSingleStreamPreservesOrder(t *testing.T) {

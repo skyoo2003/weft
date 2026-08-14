@@ -21,8 +21,15 @@ go.work.sum
 /site/resources/
 /site/.hugo_build.lock
 
+# Milestone 4 evaluation data: downloaded corpora, the Semantic Scholar response
+# cache, committed segments and generated run reports. Gigabytes, and all
+# reproducible from docs/EVAL.md. The reference goldens under
+# internal/eval/testdata/ are deliberately NOT here — those are the evidence.
+/.eval-data/
+
 # Local tooling, editor, and OS noise
 .claude/
+.ruff_cache/
 .DS_Store
 *.swp
 .idea/

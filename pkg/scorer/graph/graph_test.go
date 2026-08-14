@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -52,6 +53,138 @@ func scores(t *testing.T, s *Scorer, q engine.Query, k int) map[engine.DocID]flo
 		m[c.Doc] = c.Score
 	}
 	return m
+}
+
+// ---------------------------------------------------------------------------
+// Multi-seed accumulation — the fix milestone 4's degeneracy measurement forced
+// (docs/EVAL.md sections 5.7 and 5.9)
+// ---------------------------------------------------------------------------
+
+// TestSeedsAgreeingRaisesScore is the whole reason the score became a sum. Under the
+// previous nearest-seed formula every one of these documents scored 0.5 and TopK's
+// DocID tiebreak decided the order, which on a real citation graph meant the stream
+// ranked by corpus insertion order.
+func TestSeedsAgreeingRaisesScore(t *testing.T) {
+	// s0, s1, s2 are seeds. shared is cited by all three; pair by two; lonely by one.
+	ix := index(t,
+		node{"s0", []string{"shared", "pair", "lonely"}},
+		node{"s1", []string{"shared", "pair"}},
+		node{"s2", []string{"shared"}},
+		node{"shared", nil},
+		node{"pair", nil},
+		node{"lonely", nil},
+	)
+	q := engine.Query{Seeds: []string{"s0", "s1", "s2"}}
+	got := scores(t, New(ix, nil), q, 10)
+
+	// One hop from n seeds sums to n * 0.5.
+	for key, want := range map[string]float64{"shared": 1.5, "pair": 1.0, "lonely": 0.5} {
+		id, ok := ix.Resolve(key)
+		if !ok {
+			t.Fatalf("%s missing from the fixture", key)
+		}
+		if got[id] != want {
+			t.Errorf("%s scored %v, want %v", key, got[id], want)
+		}
+	}
+
+	// And the ordering that follows, which is the point: agreement outranks
+	// proximity to any single seed.
+	cands, err := New(ix, nil).Candidates(t.Context(), q, 3)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	var order []string
+	for _, c := range cands {
+		doc, _ := ix.Doc(c.Doc)
+		order = append(order, doc.Key)
+	}
+	if len(order) != 3 || order[0] != "shared" || order[1] != "pair" || order[2] != "lonely" {
+		t.Errorf("order = %v, want [shared pair lonely]", order)
+	}
+}
+
+// TestRepeatedSeedVotesOnce covers what the sum broke about seed handling. Query.Seeds
+// is caller-supplied, so two of its entries can name the same document; the old merged
+// BFS absorbed that because a repeated id was already in dist, and a per-seed sum does
+// not. Left unfixed, listing a seed twice doubles every score it reaches — a ranking
+// change with no cause in the graph.
+func TestRepeatedSeedVotesOnce(t *testing.T) {
+	ix := index(t,
+		node{"s0", []string{"x"}},
+		node{"other", []string{"y"}},
+		node{"x", nil},
+		node{"y", nil},
+	)
+	once := scores(t, New(ix, nil), engine.Query{Seeds: []string{"s0", "other"}}, 10)
+	twice := scores(t, New(ix, nil), engine.Query{Seeds: []string{"s0", "s0", "other"}}, 10)
+
+	for _, key := range []string{"x", "y"} {
+		id, ok := ix.Resolve(key)
+		if !ok {
+			t.Fatalf("%s missing from the fixture", key)
+		}
+		if once[id] != twice[id] {
+			t.Errorf("%s scored %v with the seed listed once and %v with it listed twice",
+				key, once[id], twice[id])
+		}
+	}
+}
+
+// TestOneSeedIsUnchangedByTheSum pins backward compatibility: with a single seed the
+// sum has one term, so every score is the nearest-seed value it was before. Most of
+// the rest of this file relies on that.
+func TestOneSeedIsUnchangedByTheSum(t *testing.T) {
+	ix := index(t,
+		node{"a", []string{"b"}},
+		node{"b", []string{"c"}},
+		node{"c", []string{"d"}},
+		node{"d", nil},
+	)
+	got := scores(t, New(ix, nil), engine.Query{Seeds: []string{"a"}}, 10)
+	for id, want := range map[engine.DocID]float64{1: 0.5, 2: 1.0 / 3, 3: 0.25} {
+		if got[id] != want {
+			t.Errorf("doc %d scored %v, want %v", id, got[id], want)
+		}
+	}
+}
+
+// TestSeedReachableFromAnotherSeedIsStillExcluded covers what the sum broke about the
+// old exclusion rule. Previously a seed was recognisable by hops == 0; now a seed one
+// hop from a sibling accumulates 1.0 + 0.5, so exclusion has to be by identity rather
+// than by score.
+func TestSeedReachableFromAnotherSeedIsStillExcluded(t *testing.T) {
+	ix := index(t,
+		node{"s0", []string{"s1"}}, // s0 cites s1, and both are seeds
+		node{"s1", []string{"x"}},
+		node{"x", nil},
+	)
+	q := engine.Query{Seeds: []string{"s0", "s1"}}
+
+	got := scores(t, New(ix, nil), q, 10)
+	s1, _ := ix.Resolve("s1")
+	if _, present := got[s1]; present {
+		t.Errorf("s1 is a seed but came back at %v", got[s1])
+	}
+	x, _ := ix.Resolve("x")
+	// x is one hop from s1 and two from s0: 1/3 + 0.5.
+	//
+	// Compared with a tolerance, unlike the exact assertions above. 1/3 is not
+	// representable, and the sum accumulates in seed order at runtime — two
+	// roundings — while a Go constant expression like 0.5 + 1.0/3 is evaluated in
+	// arbitrary precision and rounded once. The two differ in the last bit. That is
+	// a property of the arithmetic, not of the traversal, and the traversal is what
+	// this test is about; the order itself is deterministic because seeds are walked
+	// in slice order.
+	if want, tol := 1.0/3+0.5, 1e-12; math.Abs(got[x]-want) > tol {
+		t.Errorf("x scored %v, want %v", got[x], want)
+	}
+
+	// The literal variant keeps s1, and its score carries both contributions.
+	lit := scores(t, NewIncludingSeeds(ix, nil), q, 10)
+	if want := 1 + 0.5; lit[s1] != want {
+		t.Errorf("including seeds: s1 scored %v, want %v (1.0 from itself, 0.5 from s0)", lit[s1], want)
+	}
 }
 
 // ---------------------------------------------------------------------------
