@@ -224,7 +224,7 @@ had to clear.
 
 **The number it rested on was an artifact.** At 86.5% coverage `text + vector` scores
 **0.6233**, which is *better* than `text` at 0.5826 (+0.0407, 95% CI [+0.0010,
-+0.0799]). The vector scorer helps, modestly. It had appeared to hurt because with
++0.0798]). The vector scorer helps, modestly. It had appeared to hurt because with
 8,647 of 171,332 documents carrying a vector, its top-10 was drawn from an arbitrary
 5% slice of the corpus — so it was injecting near-random documents into fusion. That
 is a property of an unfinished download, not of rank fusion.
@@ -344,7 +344,11 @@ comparison; section 3.2 is the like-for-like one.
 | References pointing outside the corpus (dangling) | 1,692,610 | 74.5% of all references |
 
 The fetch itself covered 165,192 documents in 1 h 34 m, found 147,267 vectors and
-2,253,428 raw references, and failed to find 2,321 papers.
+2,253,428 raw references, and failed to find 2,321 papers. The remaining 6,140
+documents carry no identifier the CORD-19 metadata can join on, and `prepare` records
+a key-only entry for each so that a rerun neither asks about them again nor rescans
+the 1.6 GB metadata file to rediscover that it cannot. The cache therefore holds one
+record per corpus document, 171,332 of them.
 
 **Two ceilings to read every graph number against.** Only 28.1% of documents have any
 usable out-edge, and three quarters of all references point outside the corpus. The
@@ -367,6 +371,16 @@ bucketing candidates by score, which recovers each one's hop exactly.
 candidate the graph stream returns scores exactly 0.5, so `engine.TopK`'s tiebreak
 decides the order — and that tiebreak is `DocID`, which is corpus insertion order.
 
+> **This table is the one figure here that HEAD cannot reprint** (section 5.12). It
+> buckets candidates by score, which recovers the hop only while a score *is* one
+> hop — true of the single-seed formula this section diagnosed, not of the summed
+> formula that replaced it. `weft-eval diagnose` was rewritten with the formula and now
+> reports ties at the cut instead, which is the question that actually matters and
+> survives the change; on the same pre-fix scorer it reports **45 of the 45 answering
+> queries** with a tie group crossing k=10 and 2,082 slots settled by `DocID`. That
+> figure is reproducible and is the one section 5.9 compares against. The hop counts
+> are kept because they are what motivated the fix.
+
 The graph stream is therefore handing fusion "the ten lowest-numbered documents cited
 by the text scorer's top five", ranked by an accident of indexing. This is the failure
 mode section 5 flagged in advance and Task 4 existed to catch, and it is why the
@@ -379,30 +393,34 @@ turn proximity into a ranking.
 `RRFk=60`, `K1=1.2`, `B=0.75`, `SeedN=5`, `MaxDepth=3`, over-fetch=1. 50 queries,
 paired bootstrap, 10,000 resamples, seed 20260814.
 
+The scorer this table measures is the single-seed one, which HEAD no longer contains —
+section 5.9 replaced it. Re-measuring it after the determinism fix (section 5.12) meant
+restoring `pkg/scorer/graph/graph.go` from commit `ed80dc2` over the current tree,
+running `weft-eval run` against the same rebuilt index, and restoring the file. That is
+one command and a `git show`, not a code path kept alive for a historical number.
+
 | Arm | nDCG@10 |
 |---|---|
 | `text` | 0.5826 |
 | `text+vector` | **0.6233** ← baseline |
-| `text+graph` | 0.3565 |
-| `text+vector+graph` | 0.4639 |
-| `text+vector+graph-including-seeds` | 0.6087 |
+| `text+graph` | 0.3527 |
+| `text+vector+graph` | 0.4661 |
+| `text+vector+graph-including-seeds` | 0.6071 |
 
 | Comparison | Delta | 95% CI | Reading |
 |---|---|---|---|
-| `text+vector+graph` − `text+vector` **(binding)** | **−0.1594** | [−0.1979, −0.1210] | **regresses** |
-| `text+graph` − `text` | −0.2261 | [−0.2723, −0.1788] | regresses |
-| `text+vector+graph-including-seeds` − `text+vector` | −0.0146 | [−0.0327, +0.0042] | undetermined |
-| `text+vector` − `text` | +0.0407 | [+0.0010, +0.0799] | improves |
+| `text+vector+graph` − `text+vector` **(binding)** | **−0.1572** | [−0.1947, −0.1200] | **regresses** |
+| `text+graph` − `text` | −0.2299 | [−0.2766, −0.1826] | regresses |
+| `text+vector+graph-including-seeds` − `text+vector` | −0.0161 | [−0.0336, +0.0017] | undetermined |
+| `text+vector` − `text` | +0.0407 | [+0.0010, +0.0798] | improves |
 
 Largest per-query moves for the binding pair, `text+vector+graph` against
 `text+vector`: query 24 falls from 0.9149 to 0.4787, query 40 from a perfect 1.0000 to
 0.6321, query 3 from 0.8568 to 0.4948. The graph stream is not diluting mediocre
-rankings, it is dismantling good ones. (`make eval` reprints these; the figures are
-larger still against the text-only baseline, where query 30 and query 40 both fall
-from 1.0000 to 0.4451.)
+rankings, it is dismantling good ones.
 
 **The double-counting arm is the diagnostic that makes this legible.** Keeping the
-seeds scores 0.6087 while dropping them scores 0.4639 — a 0.14 gap in favour of the
+seeds scores 0.6071 while dropping them scores 0.4661 — a 0.14 gap in favour of the
 variant whose top five are *the text scorer's own results*. The traversal's
 contribution is worse than re-voting text. Combined with section 5.7, the picture is
 consistent: the ten documents the traversal contributes are close to arbitrary, and
@@ -424,39 +442,46 @@ strictly an extension.
 
 **It did not fix the degeneracy.**
 
-| Tie analysis at k=10 | Before | After |
+| Tie analysis at k=10 (`weft-eval diagnose`) | Before | After |
 |---|---|---|
-| Queries whose stream's membership is settled by DocID | 38 of 50 | 41 of 45 answering |
-| Slots decided by DocID across all queries | — | 954 |
-| Distinct scores per query, typical | 3 | 3–16 |
+| Queries producing a graph stream at all | 45 of 50 | 45 of 50 |
+| Queries whose stream's membership is settled by DocID | 45 of 45 | 41 of 45 |
+| Slots decided by DocID across all queries | 2,082 | 958 |
+| Distinct scores per query | 3 | 3–29, and 3 is still the mode |
 
 The reason is the graph, not the formula. Only 28.1% of documents have an in-corpus
 out-edge (section 5.6), so two seeds rarely cite the same paper — the sum almost
-always has exactly one non-zero term, and 0.5 remains the modal score. Multiplying
-granularity by `SeedN` only helps if the seeds agree, and on a citation graph this
-sparse they do not.
+always has exactly one non-zero term, and 0.5 remains the modal score. Granularity did
+widen where seeds agree, from a flat 3 distinct scores to as many as 29 on one query,
+but 3 is still the most common value across the 50 and the tie group still crosses the
+cut on 41 of the 45 queries that answer at all. Multiplying granularity by `SeedN` only
+helps if the seeds agree, and on a citation graph this sparse they mostly do not.
 
 It did move the numbers, in the right direction and not nearly far enough:
 
 | Arm | Before | After | Change |
 |---|---|---|---|
-| `text+graph` | 0.3565 | 0.4017 | +0.0452 |
-| `text+vector+graph` | 0.4639 | 0.5077 | +0.0438 |
-| `text+vector+graph-including-seeds` | 0.6087 | 0.5485 | −0.0602 |
+| `text+graph` | 0.3527 | 0.3987 | +0.0460 |
+| `text+vector+graph` | 0.4661 | 0.5031 | +0.0370 |
+| `text+vector+graph-including-seeds` | 0.6071 | 0.5464 | −0.0607 |
 
 | Comparison (after fix) | Delta | 95% CI | Reading |
 |---|---|---|---|
-| `text+vector+graph` − `text+vector` **(binding)** | **−0.1156** | [−0.1483, −0.0837] | **regresses** |
-| `text+graph` − `text` | −0.1809 | [−0.2236, −0.1386] | regresses |
-| `text+vector+graph-including-seeds` − `text+vector` | −0.0748 | [−0.1026, −0.0468] | regresses |
-| `text+vector` − `text` | +0.0407 | [+0.0010, +0.0799] | improves |
+| `text+vector+graph` − `text+vector` **(binding)** | **−0.1202** | [−0.1521, −0.0886] | **regresses** |
+| `text+graph` − `text` | −0.1839 | [−0.2273, −0.1407] | regresses |
+| `text+vector+graph-including-seeds` − `text+vector` | −0.0769 | [−0.1034, −0.0502] | regresses |
+| `text+vector` − `text` | +0.0407 | [+0.0010, +0.0798] | improves |
+
+`make eval` reprints this block. Largest per-query moves for the binding pair: query 24
+from 0.9149 to 0.4819, query 40 from a perfect 1.0000 to 0.6321, query 3 from 0.8568 to
+0.4948.
 
 The `including-seeds` arm moved *down*, which is consistent rather than surprising: a
 non-seed reached by two seeds now sums to 1.0 and can displace a seed, so that arm
 admits more traversal output than it used to and inherits more of its cost. The
 control is behaving like a control.
 
-**Both measurements are kept.** The fix is attributable — it is worth about +0.044 —
+**Both measurements are kept.** The fix is attributable — it is worth about +0.04 —
 and so is the conclusion that it does not change the outcome. Reporting only the
 post-fix number would hide that a predicted remedy was tried and fell short by an
 order of magnitude.
@@ -481,8 +506,8 @@ configurations, `text+graph` against `text`, 2,000 resamples each.
 |---|---|
 | Configurations | 28 |
 | Sign flips | **0** |
-| Delta range | −0.1806 to −0.1870 |
-| CI upper bound, worst case | **−0.1307** (never reaches zero) |
+| Delta range | −0.1762 to −0.1895 |
+| CI upper bound, worst case | **−0.1261** (never reaches zero) |
 | Baseline, all configurations | 0.5826 (unaffected — the graph arm is what varies) |
 
 Over-fetching to depth 100 does not rescue it, and neither does collapsing the rank
@@ -498,7 +523,7 @@ known to help RRF, and here it changes the fourth decimal.
 `text`, not the binding `text+vector+graph` against `text+vector`. It was written
 while section 4.1's amendment was in force and the text-only pair was the binding one;
 the amendment was withdrawn and the grid was not re-run. The sign is negative in both
-framings at the frozen point — −0.1809 here, −0.1156 for the binding pair — so the
+framings at the frozen point — −0.1839 here, −0.1202 for the binding pair — so the
 conclusion is unaffected, but section 4's rule 2 is satisfied by evidence about a
 neighbouring comparison rather than the exact one it names. Re-running it against the
 binding pair costs about an hour and would forfeit the shortcut that makes it
@@ -520,32 +545,107 @@ is untouched, and nothing in the variant branches on a scorer.
 
 | Graph stream weight | nDCG@10 | Delta vs `text+vector` | 95% CI | Reading |
 |---|---|---|---|---|
-| 1.0 (as measured everywhere above) | 0.5077 | **−0.1156** | [−0.1483, −0.0837] | regresses |
-| 0.5 | 0.6240 | +0.0007 | [−0.0057, +0.0079] | undetermined |
-| 0.25 | 0.6240 | +0.0007 | [−0.0057, +0.0079] | undetermined |
-| **0.1** | **0.6250** | **+0.0018** | [+0.0000, +0.0053] | undetermined |
-| 0.05 | 0.6246 | +0.0013 | [+0.0000, +0.0040] | undetermined |
-| 0.02 and below | 0.6233 | +0.0000 | [0, 0] | converged to baseline |
+| 1.0 (as measured everywhere above) | 0.5031 | **−0.1202** | [−0.1521, −0.0886] | regresses |
+| 0.5 | 0.6214 | −0.0019 | [−0.0057, +0.0000] | undetermined |
+| 0.25 | 0.6214 | −0.0019 | [−0.0057, +0.0000] | undetermined |
+| **0.1** | 0.6233 | **+0.0000** | [+0.0000, +0.0000] | converged to baseline |
+| 0.05 and below | 0.6233 | +0.0000 | [+0.0000, +0.0000] | converged to baseline |
 
 The bottom rows are the implementation's own check: as the weight approaches zero the
 graph stream can only break ties among documents the other two already rank equally,
-so the arm must converge exactly onto the baseline. It does, to the last bit.
+so the arm must converge exactly onto the baseline. It does, to the last bit, and it
+gets there by weight 0.1 rather than 0.02.
 
 **Two conclusions, pointing in opposite directions.**
 
-**The entire −0.1156 belonged to fusion, not to the graph.** Halving the weight erases
-it. What section 5.8 measured was not a signal destroying a ranking; it was RRF
-handing ten slots to a stream that had not earned them, exactly as
+**The entire −0.1202 belonged to fusion, not to the graph.** Halving the weight erases
+all but 0.0019 of it. What section 5.8 measured was not a signal destroying a ranking;
+it was RRF handing ten slots to a stream that had not earned them, exactly as
 [FINDINGS](FINDINGS.md) milestone 4 section 5.2 suspected. Equal weighting is a
 substantive ranking decision that unweighted RRF makes silently on every query, and
 its cost here was 0.12 nDCG — an order of magnitude larger than anything the graph
 signal itself was ever worth.
 
-**And the graph still contributes nothing.** The best weight found is 0.1, worth
-+0.0018 — a 0.29% relative gain whose interval touches zero. No weight produces a
-positive delta with an interval excluding zero, which is what section 4's rule
-requires. Down-weighting a near-noise stream stops it doing harm; it does not turn it
-into information.
+**And the graph contributes nothing at all.** Not "nothing detectable": **no weight in
+this sweep beats the baseline.** Between 1.0 and 0.25 the arm is worse than
+`text+vector`; from 0.1 down it is `text+vector`, delta exactly zero, interval a point
+at zero — the graph stream is present, is being fused, and changes no ranking any
+query is scored on. Section 4's rule asks for a positive delta whose interval excludes
+zero; the best available is a delta of zero. Down-weighting a near-noise stream stops
+it doing harm. It does not turn it into information.
+
+> An earlier revision of this table reported a best case of **+0.0018 at weight 0.1,
+> CI [+0.0000, +0.0053]**, and both this document and the README built a sentence on
+> it — "worth +0.0018, a 0.29% relative gain". That number does not survive
+> section 5.12: it came from a build whose citation graph was assembled in Go map
+> order, and it was smaller than the run-to-run spread of that graph. It was noise
+> being read as the graph's best case. The corrected answer is cleaner and less
+> flattering to the scorer.
+
+### 5.12 The build was not deterministic, and every number above was re-measured
+
+Found in review of the milestone 4 pull request, after the numbers had been published.
+
+`weft-eval build` inverts the Semantic Scholar cache into `CorpusId → cord_uid` so a
+citation can be written as a `Document.Link`. That mapping is not injective: CORD-19
+ships the same paper under several `cord_uid`s, and on this release **20,556 of the
+162,837 records carrying a CorpusId share one with another record**. The inversion
+ranged over a Go map and let the last writer win. Go randomises map iteration, so the
+winner was drawn afresh on every build:
+
+| Two builds from the identical cache | CorpusIds resolving to a different `cord_uid` |
+|---|---|
+| run 1 vs run 0 | 9,377 of 142,281 |
+| run 2 vs run 0 | 2,571 |
+| run 3 vs run 0 | 8,240 |
+| run 4 vs run 0 | 4,281 |
+| run 5 vs run 0 | 3,795 |
+
+Up to 6.6% of the graph moved between builds. The edge *count* did not — every
+reference still resolved to exactly one document — which is why the build log looked
+stable at 579,720 edges and nothing downstream noticed. What varied was which document
+received each edge, and that is precisely what the graph scorer traverses.
+
+**Fixed** by inverting in sorted `cord_uid` order and keeping the first, with the
+collision count printed rather than left implicit
+(`corpusIDIndex`, `cmd/weft-eval/main.go`). Which duplicate wins matters far less than
+that the same one always does; they carry near-identical text. Two consecutive builds
+from the same cache now produce byte-identical segments:
+
+    a466fd42bbf407eb  index/seg-NNNNNN/docs
+    f7709b3184820730  index/seg-NNNNNN/postings
+    6d24fd18e4c8032e  index/seg-NNNNNN/terms
+
+**Every measured number in section 5 was then taken again** against the rebuilt index:
+sections 5.8 through 5.11, the 28-configuration sweep, the weight sweep and the
+degeneracy diagnostic. Sections 5.1–5.7 are unaffected — they describe the corpus, the
+join and the text baseline, none of which depend on the inversion. The two arms with no
+graph stream, `text` at 0.5826 and `text+vector` at 0.6233, are unchanged to four
+decimals, as they must be.
+
+**What changed, and what did not.** The verdict did not move: the binding delta went
+from −0.1156 to **−0.1202**, interval [−0.1521, −0.0886], still excluding zero, still
+negative, still 0 sign flips across the sweep. What did move is section 5.11's headline.
+The graph's best case under any fusion weight was published as **+0.0018**; it is
+**+0.0000**. That figure was smaller than the run-to-run spread of the graph it was
+measured on, and it was the one number in this document that a reader might have taken
+as a reason to keep the scorer.
+
+**The lesson is the same shape as section 4.1's, one layer lower.** There the interval
+was asked a question it could not answer — it quantifies variation across queries, and
+was read as though it covered corpus coverage too. Here it was asked an even more basic
+one: the bootstrap resamples queries against *one* index, so it cannot see variation
+that lives in how the index was built. Nothing in a confidence interval, a sweep across
+28 configurations, or a seed pinned for reproducibility detects a pipeline that is
+nondeterministic upstream of all three. The check that would have caught it is the
+cheapest one available and is now in the repository twice — as a unit test on
+`corpusIDIndex`, and as the observation that building the same corpus twice should
+produce the same bytes.
+
+A second review finding touched the numbers directly: `percentileIndex` truncated
+`p·n` instead of taking ⌈`p·n`⌉ − 1, so both bootstrap bounds were reported one order
+statistic high. Corrected, and every interval above reflects the correction; the effect
+is in the third or fourth decimal and changes no reading.
 
 ---
 
@@ -556,20 +656,21 @@ as weft implements it does not improve nDCG@10.**
 
 | Section 4 condition | Result |
 |---|---|
-| 1. Frozen: paired 95% CI for `+graph` − baseline excludes zero and is positive | **FAILS** — excludes zero and is *negative*: −0.1156, [−0.1483, −0.0837] |
+| 1. Frozen: paired 95% CI for `+graph` − baseline excludes zero and is positive | **FAILS** — excludes zero and is *negative*: −0.1202, [−0.1521, −0.0886] |
 | 2. Stable: the sign does not flip across the sweep | Holds — 0 flips in 28 configurations, negative throughout |
-| Best case under any fusion weight (section 5.11) | +0.0018, CI [+0.0000, +0.0053] — touches zero, 0.29% relative |
+| Best case under any fusion weight (section 5.11) | **+0.0000** — no weight beats the baseline; below 0.1 the arm *is* the baseline |
 
 Condition 1 fails, which is the "no" branch. Per the PRD and [D-004](DECISIONS.md) the
 consequence is that `pkg/scorer/graph` goes while the `Scorer` interface,
 `Query.Seeds` and `pkg/scorer/recency` stay.
 
-**Section 5.11 changes why, without changing what.** The headline −0.1156 was fusion's
-doing: give the graph stream half a vote and the entire regression disappears. The
-honest statement of the result is therefore not "graph proximity destroys rankings"
-but the flatter and less dramatic one — **at every weight from 1.0 down to 0, the best
-the graph stream is worth is +0.0018 nDCG@10, and that interval touches zero.** It is
-not harmful information. It is, as far as this measurement can tell, not information.
+**Section 5.11 changes why, without changing what.** The headline −0.1202 was fusion's
+doing: give the graph stream half a vote and all but 0.0019 of the regression
+disappears. The honest statement of the result is therefore not "graph proximity
+destroys rankings" but the flatter and less dramatic one — **at no weight between 1.0
+and 0 does the graph stream beat the baseline, and from 0.1 downward the arm is the
+baseline exactly.** It is not harmful information. It is, as far as this measurement
+can tell, not information.
 
 That reframing costs the verdict nothing and matters a great deal for what to do next,
 because it moves the largest measured effect in this milestone out of the graph
@@ -589,11 +690,11 @@ differently:
 | Graph | citations restricted to one topical corpus — 28.1% of documents have any in-corpus out-edge |
 
 The mechanism of the failure is legible and it is not subtle. The graph stream
-returns thousands of candidates carrying 3 to 16 distinct scores, so it has almost no
-internal ranking; RRF then gives its arbitrary top ten the same vote as BM25's top
-ten, and they displace results that were correct. Queries 30 and 40 fall from a
-perfect 1.0000 to about 0.51. The signal is not weak, it is close to noise, and
-unweighted fusion has no way to discount it.
+returns thousands of candidates carrying as few as 3 distinct scores — the modal case
+across the 50 queries — so it has almost no internal ranking; RRF then gives its
+arbitrary top ten the same vote as BM25's top ten, and they displace results that were
+correct. Query 40 falls from a perfect 1.0000 to 0.6321. The signal is not weak, it is
+close to noise, and unweighted fusion has no way to discount it.
 
 **A graph signal that produced a real ordering might well help.** Personalised
 PageRank or a random-walk probability would give a continuous score instead of three
@@ -621,7 +722,7 @@ therefore what the PRD's hypothesis was resting on.
   does not eliminate it. The effect pushes toward this verdict.
 - **Both graph variants regress, including the double-counting one.** If the harness
   were somehow rigged against the graph, `including-seeds` — which mostly re-votes
-  text — should have been safe. It regresses too (−0.0748).
+  text — should have been safe. It regresses too (−0.0769).
 
 ---
 
@@ -649,3 +750,21 @@ go run ./cmd/weft-eval build            # index + Commit + reopen equivalence ch
 
 Bootstrap seed 20260814 and the frozen constants are compiled in, so `make eval`
 reprints the intervals in this document rather than approximations of them.
+
+Section 5.12's determinism claim is checked by building twice and comparing, which is
+worth doing once on any new cache — it is the check whose absence let a nondeterministic
+graph go unnoticed through a full round of published numbers:
+
+```bash
+go run ./cmd/weft-eval build && shasum -a 256 .eval-data/index/seg-*/*
+go run ./cmd/weft-eval build && shasum -a 256 .eval-data/index/seg-*/*
+```
+
+Section 5.8's table needs the scorer HEAD replaced, and is the one block above that
+`make eval-full` does not reprint:
+
+```bash
+git show ed80dc2:pkg/scorer/graph/graph.go > pkg/scorer/graph/graph.go
+go run ./cmd/weft-eval run && go run ./cmd/weft-eval diagnose
+git checkout pkg/scorer/graph/graph.go
+```

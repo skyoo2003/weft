@@ -253,6 +253,15 @@ func (c *S2Client) Batch(ctx context.Context, refs []string) ([]*S2Paper, error)
 			return nil, fmt.Errorf("status %d: %s: %w", status, truncate(raw, 200), ErrS2Status)
 		}
 
+		// The wait spaces out the *next* attempt, so after the last one there is
+		// nothing left to space out. Sleeping here would add the whole backoff — up
+		// to two minutes, or whatever a server-supplied Retry-After asks for — to a
+		// failure that is already final, with the operator watching a job that has
+		// stopped doing anything.
+		if attempt == c.MaxRetries {
+			break
+		}
+
 		sleep := backoff
 		if retryAfter > 0 {
 			sleep = retryAfter

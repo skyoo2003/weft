@@ -128,6 +128,13 @@ func loadQueries(dir string) ([]eval.Query, error) {
 	// does quietly.
 	vecPath := filepath.Join(dir, queryVecFile)
 	vecs, err := eval.ReadQueryVectors(vecPath)
+	// Whether the file was there at all, kept separate from how many of its ids
+	// matched. A file that loaded and then matched nothing — one generated against a
+	// different dataset, or before the query ids were renamed — leaves withVec at 0,
+	// which is indistinguishable from "no file" by count alone. The missing-file case
+	// at least prints the warning below; without this flag the mismatched-file case
+	// would print nothing and publish a text-only run under the text+vector label.
+	haveVecFile := err == nil
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
@@ -165,10 +172,13 @@ func loadQueries(dir string) ([]eval.Query, error) {
 	log.Printf("queries: %d with judgments, %d with a vector", len(out), withVec)
 	// A partial set is the dangerous case: some queries get two signals and others
 	// one, so the arms are not measured under the same conditions and the mean mixes
-	// two populations.
-	if withVec > 0 && withVec != len(out) {
-		return nil, fmt.Errorf("%d of %d queries have a vector; all or none, "+
-			"otherwise the arms are not comparable across queries", withVec, len(out))
+	// two populations. Zero coverage from a file that did load counts as partial, not
+	// as "no vectors": the run would otherwise complete with the vector scorer
+	// abstaining on every query and still print, publish and label the arm
+	// text+vector.
+	if (haveVecFile || withVec > 0) && withVec != len(out) {
+		return nil, fmt.Errorf("%d of %d queries have a vector in %s; all or none, "+
+			"otherwise the arms are not comparable across queries", withVec, len(out), vecPath)
 	}
 	return out, nil
 }
@@ -345,7 +355,7 @@ func sweep(ctx context.Context, args []string) error {
 	// comparison when the sweep was written, the amendment that made it binding was
 	// later withdrawn (see the arm names above), and re-running the grid against
 	// text+vector would cost an hour to re-derive a sign that is already negative in
-	// both framings — −0.1809 here, −0.1156 there.
+	// both framings — −0.1839 here, −0.1202 there.
 	//
 	// So this establishes that the graph delta's sign is stable under the fusion
 	// constants nobody tuned. It does not establish that for the exact pair section 4
@@ -425,7 +435,7 @@ func sweep(ctx context.Context, args []string) error {
 
 // weights answers the question milestone 4 created rather than settled: unweighted
 // RRF gives a near-noise stream the same vote as BM25's, and the measured cost of
-// that was −0.1156 nDCG@10. Does discounting the graph stream recover it?
+// that was −0.1202 nDCG@10. Does discounting the graph stream recover it?
 //
 // Only the graph stream's weight moves. text and vector stay at 1.0, so the sweep
 // isolates one variable, and w=0 is not tested because it is the baseline arm by
@@ -536,6 +546,20 @@ func diagnose(ctx context.Context, args []string) error {
 		fs.IntVar(&deep, "deep", 1_000_000, "k to request, large enough not to truncate the frontier")
 		fs.IntVar(&k, "k", frozenK, "the cut whose tie group is measured")
 	})
+
+	// Checked here rather than at the cut below, where min(k, len(cands))-1 would
+	// index -1 and panic on the first query that produced any candidate. The other
+	// subcommands never needed this guard because eval.Evaluate rejects k <= 0 for
+	// them; diagnose reads the streams directly and so owns the check itself.
+	if k <= 0 {
+		return fmt.Errorf("-k is %d, want > 0", k)
+	}
+	if deep <= 0 {
+		// Not a panic, a worse outcome: engine.Search returns nothing for a
+		// non-positive k, so every query reports "no reachable neighbour" and the
+		// table reads as a graph with no edges at all.
+		return fmt.Errorf("-deep is %d, want > 0", deep)
+	}
 
 	ix, err := openIndex(*data)
 	if err != nil {

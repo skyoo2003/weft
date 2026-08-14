@@ -3,6 +3,7 @@ package eval
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"slices"
 )
@@ -118,11 +119,20 @@ func BootstrapCI(base, arm map[string]float64, iters int, seed uint64) (Interval
 
 // percentileIndex is the nearest-rank index into a sorted slice of n values.
 //
+// Nearest rank is the ⌈p·n⌉-th value counting from 1, so the zero-based index is
+// ⌈p·n⌉ − 1. Truncating p·n instead is off by one whenever p·n lands on a whole
+// number, which at the 10,000 iterations this harness actually runs is both
+// percentiles: it took the 251st value for the 2.5th and the 9,751st for the 97.5th,
+// shifting the whole interval up by one order statistic. The shift is small — a few
+// ten-thousandths on these runs — but BootstrapCI's doc comment names the method,
+// and an interval that does not compute the method it claims is exactly the kind of
+// quiet mismatch this milestone exists to not ship.
+//
 // Clamped at both ends so a small iters cannot index out of range: at iters = 1
 // both percentiles resolve to the single value, which is the honest answer for a
 // bootstrap that was not really run.
 func percentileIndex(n int, p float64) int {
-	i := int(p * float64(n))
+	i := int(math.Ceil(p*float64(n))) - 1
 	if i >= n {
 		i = n - 1
 	}

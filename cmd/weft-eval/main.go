@@ -179,16 +179,20 @@ func prepare(ctx context.Context, args []string) error {
 	// scanning 1.6 GB.
 	log.Printf("scanning %s for %d cord_uids...", metaPath, len(want))
 	ids, tally, err := eval.ReadCORD19IDs(metaPath, want)
-	if err != nil {
+	if err != nil && !errors.Is(err, eval.ErrEmptyDataset) {
 		return err
 	}
+	// "None of the remaining keys joined" is a state to record, not a failure. It is
+	// what a resumed run sees once every joinable document is already cached and only
+	// the unjoinable ones are left — the normal end of this command, reached through
+	// the same error ReadCORD19IDs raises for a metadata file that matched nothing.
+	// The tombstones below are what make it terminal rather than permanent: without
+	// them the same keys come back on every rerun, each one rescanning 1.6 GB to be
+	// told again that they cannot be joined. A header with no usable identifier
+	// column at all is a different error and is still fatal.
 	log.Printf("join: %d of %d resolved to an identifier", len(ids), len(want))
 	for _, k := range sortedKeys(tally) {
 		log.Printf("  %-16s %d", k, tally[k])
-	}
-	if unresolved := len(want) - len(ids); unresolved > 0 {
-		log.Printf("  %-16s %d (no usable identifier; they stay in the corpus with no edges or vector)",
-			"unresolved", unresolved)
 	}
 
 	// Fetched in corpus order rather than map order, so a partial run is a prefix
@@ -200,6 +204,26 @@ func prepare(ctx context.Context, args []string) error {
 			targets = append(targets, target{uid, id.S2Ref})
 		}
 	}
+
+	// Computed before -limit is applied: a document is unjoinable because the
+	// metadata has no identifier for it, which has nothing to do with how many
+	// documents this particular run was asked to fetch.
+	joinable := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		joinable[t.key] = true
+	}
+	var unjoinable []string
+	for _, uid := range uids {
+		if want[uid] && !joinable[uid] {
+			unjoinable = append(unjoinable, uid)
+		}
+	}
+	if len(unjoinable) > 0 {
+		log.Printf("  %-16s %d (no usable identifier; recorded as asked-and-unjoinable so a "+
+			"rerun does not rescan for them, and they stay in the corpus with no edges or vector)",
+			"unresolved", len(unjoinable))
+	}
+
 	if limit > 0 && limit < len(targets) {
 		targets = targets[:limit]
 		log.Printf("limit: fetching only the first %d", limit)
@@ -211,6 +235,26 @@ func prepare(ctx context.Context, args []string) error {
 	}
 	defer out.Close()
 	enc := json.NewEncoder(out)
+
+	// Written first, and written even though there is nothing to fetch for them. A
+	// record with a key and nothing else says "this document was asked about and has
+	// no Semantic Scholar side", which is exactly what build needs to know and what
+	// the next resume needs in order to stop asking. It reads back as a hit with no
+	// CorpusID, no refs and no vector, which is what an unjoinable document is.
+	for _, uid := range unjoinable {
+		if err := enc.Encode(eval.S2Record{Key: uid}); err != nil {
+			return fmt.Errorf("write %s: %w", outPath, err)
+		}
+	}
+	if len(unjoinable) > 0 {
+		if err := out.Sync(); err != nil {
+			return fmt.Errorf("sync %s: %w", outPath, err)
+		}
+	}
+	if len(targets) == 0 {
+		log.Printf("nothing left to fetch; %s is complete", outPath)
+		return nil
+	}
 
 	client := eval.NewS2Client(apiKey, log.Printf)
 	batches := (len(targets) + eval.S2BatchLimit - 1) / eval.S2BatchLimit
@@ -327,6 +371,36 @@ func doneKeys(path string) (map[string]bool, int64, error) {
 			done[rec.Key] = true
 		}
 	}
+
+	// InputOffset stops at the closing brace of the last value it decoded, one byte
+	// short of the newline the encoder wrote after it. Left there, a healthy complete
+	// file looks one byte longer than its last good record and the caller truncates
+	// that newline away as a fragment; the next appended record then lands on the
+	// same line, producing `}{`. Go's stream decoder reads that back happily, so the
+	// damage stays invisible here and surfaces in the line-oriented readers —
+	// testdata/gen_query_vectors.py --verify calls json.loads per line and fails with
+	// "extra data" on a file this command reports as fine.
+	//
+	// Advancing over the whitespace that follows fixes both cases at once, because
+	// the separator and the fragment are distinguishable: whitespace after the last
+	// value is the separator and belongs to what has been written, anything else is
+	// the start of a record that never finished.
+	if good > 0 {
+		if _, err := f.Seek(good, io.SeekStart); err != nil {
+			return nil, 0, fmt.Errorf("seek %s: %w", path, err)
+		}
+		var buf [16]byte
+		n, err := f.Read(buf[:])
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, 0, fmt.Errorf("read %s: %w", path, err)
+		}
+		for _, b := range buf[:n] {
+			if b != '\n' && b != '\r' && b != ' ' && b != '\t' {
+				break
+			}
+			good++
+		}
+	}
 	return done, good, nil
 }
 
@@ -354,17 +428,9 @@ func build(ctx context.Context, args []string) error {
 	}
 	log.Printf("s2: %d records", len(recs))
 
-	// CorpusId -> cord_uid, so a reference can be expressed as a Document.Link.
-	// Links are keyed by document key by design (docs/DATASETS.md section 4), and
-	// that is exactly what makes this join possible: a DocID adjacency list could
-	// not have been filled in from an external graph.
-	byCorpusID := make(map[string]string, len(recs))
-	for _, r := range recs {
-		if r.CorpusID != "" {
-			byCorpusID[r.CorpusID] = r.Key
-		}
-	}
-	log.Printf("s2: %d resolvable corpus ids", len(byCorpusID))
+	byCorpusID, duplicated := corpusIDIndex(recs)
+	log.Printf("s2: %d resolvable corpus ids (%d further records share one of them; "+
+		"the lowest cord_uid holds the mapping)", len(byCorpusID), duplicated)
 
 	ix := engine.New()
 	var added, withVec, withLinks, links, dangling, dimSkipped int
@@ -449,6 +515,38 @@ func build(ctx context.Context, args []string) error {
 	log.Printf("reopened in %s: %d documents, avgdl %.1f — matches",
 		time.Since(start).Round(time.Millisecond), rdocs, ravg)
 	return nil
+}
+
+// corpusIDIndex inverts the records into CorpusId -> cord_uid, so a reference can be
+// expressed as a Document.Link, and reports how many records lost that position to an
+// earlier one. Links are keyed by document key by design (docs/DATASETS.md section
+// 4), and that is exactly what makes this join possible: a DocID adjacency list could
+// not have been filled in from an external graph.
+//
+// Built in sorted cord_uid order, not map order, and first writer wins. The mapping
+// is not injective: CORD-19 ships the same paper under several cord_uids — 20,556 of
+// 162,837 resolvable ids on the release measured in docs/EVAL.md — so most of those
+// CorpusIds have more than one candidate. Ranging over the map directly let Go's
+// randomised iteration pick between them, which meant every citation to a duplicated
+// paper landed on a different copy from one build to the next: a different graph,
+// different rankings and different published numbers out of the same cache. Which
+// copy wins matters far less than that the same one always does; duplicates carry
+// near-identical text, and reproducibility is what this harness is for.
+func corpusIDIndex(recs map[string]eval.S2Record) (map[string]string, int) {
+	byCorpusID := make(map[string]string, len(recs))
+	var duplicated int
+	for _, key := range sortedKeys(recs) {
+		id := recs[key].CorpusID
+		if id == "" {
+			continue
+		}
+		if _, seen := byCorpusID[id]; seen {
+			duplicated++
+			continue
+		}
+		byCorpusID[id] = key
+	}
+	return byCorpusID, duplicated
 }
 
 func readS2Records(path string) (map[string]eval.S2Record, error) {

@@ -156,8 +156,9 @@ eval:
 	go run ./cmd/weft-eval run
 
 # Everything milestone 4 publishes: the degeneracy diagnostic, the frozen arms, the
-# sensitivity sweep and the fusion weight sweep the README's +0.0018 headline comes
-# from. Slower — the sweep alone re-measures 28 configurations.
+# sensitivity sweep, and the fusion weight sweep behind the README's claim that no
+# weight makes the graph stream worth anything. Slower — the sweep alone re-measures
+# 28 configurations.
 eval-full:
 	go run ./cmd/weft-eval diagnose
 	go run ./cmd/weft-eval run

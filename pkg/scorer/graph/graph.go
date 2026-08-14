@@ -6,9 +6,9 @@
 //
 // Milestone 4 evaluated this scorer on TREC-COVID joined to the Semantic Scholar
 // citation graph — 171,332 documents, 579,720 in-corpus edges, 50 queries — and it
-// did not improve ranking quality at any setting tried. At the fusion weight that
-// suits it best it is worth +0.0018 nDCG@10, an interval that touches zero. Under
-// equal-weight RRF (fusion.Fuse) it is far worse than neutral: −0.1156.
+// did not improve ranking quality at any setting tried. No fusion weight beat the
+// baseline: from 0.1 downward the arm it produces *is* the baseline, delta exactly
+// +0.0000. Under equal-weight RRF (fusion.Fuse) it is far worse than neutral: −0.1202.
 //
 // Two things follow for a caller.
 //
@@ -116,10 +116,10 @@ func (s *Scorer) Name() string { return "graph" }
 // scorer used through milestone 3, and milestone 4 measured what it does on a real
 // citation graph. With MaxDepth 3 a non-seed candidate can hold exactly three
 // values: 0.5, 1/3, 0.25. On TREC-COVID the hop-1 frontier averaged 41 documents per
-// query and exceeded k for 38 of 50 queries, so every candidate the stream returned
-// scored 0.5 and engine.TopK's tiebreak picked the winners — by DocID, which is
-// corpus insertion order. The stream was ranking by an accident of indexing, and it
-// cost 0.16 nDCG@10 against the baseline (docs/EVAL.md sections 5.7 and 5.8).
+// query, and on every one of the 45 queries the graph could answer at all the tie
+// group ran past k=10 — so engine.TopK's tiebreak picked the winners, by DocID, which
+// is corpus insertion order. The stream was ranking by an accident of indexing, and it
+// cost 0.157 nDCG@10 against the baseline (docs/EVAL.md sections 5.7 and 5.8).
 //
 // Summing per-seed distances addresses the cause rather than the symptom. A document
 // several seeds agree on now outranks one only a single seed reaches, which is what

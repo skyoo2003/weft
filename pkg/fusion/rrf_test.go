@@ -116,22 +116,52 @@ func TestFuseWeightedZeroSilencesAStream(t *testing.T) {
 }
 
 // TestFuseWeightedRejectsOutOfContractWeights pins the one defined behaviour for a
-// weight that breaks the precondition. A NaN weight is the dangerous one: it would
-// otherwise make every score it touches NaN, and TopK sorts those last and ties them
-// on DocID, so the fused order silently becomes corpus insertion order.
+// weight that breaks the precondition. NaN and +Inf are the dangerous pair, and they
+// fail the same way from opposite ends: every score the stream touches becomes NaN or
+// becomes +Inf, all of them compare equal, and TopK ties them on DocID — so the fused
+// order silently becomes corpus insertion order.
 func TestFuseWeightedRejectsOutOfContractWeights(t *testing.T) {
 	streams := weightStreams()
 	off := docs(FuseWeighted(1, 0)(streams, 6))
 
-	for _, w := range []float64{math.NaN(), -1, math.Inf(-1)} {
+	for _, w := range []float64{math.NaN(), -1, math.Inf(-1), math.Inf(1)} {
 		if got := docs(FuseWeighted(1, w)(streams, 6)); !equal(got, off...) {
 			t.Errorf("weight %v = %v, want %v (same as weight 0)", w, got, off)
 		}
 	}
-	// +Inf is finite-contract-breaking too, but it is not folded to 0: it is a
-	// weight, just an absurd one, and it silences the other stream instead.
-	if got := docs(FuseWeighted(1, math.Inf(1))(streams, 3)); !equal(got, 4, 5, 6) {
-		t.Errorf("weight +Inf = %v, want [4 5 6]", got)
+}
+
+// TestFuseWeightedInfiniteWeightIsNotJustAnExtremeWeight is why +Inf is folded to 0
+// rather than honoured as "trust this stream absolutely".
+//
+// This file previously asserted the opposite — that +Inf merely silenced the other
+// stream — and it passed, because weightStreams happens to rank 4, 5, 6 in DocID
+// order. A stream whose ranking had collapsed onto the tiebreak was indistinguishable
+// from one that kept it. Here the stream ranks descending, so the two disagree: an
+// honoured +Inf would return [6 5 4] only by luck and in fact returns them in DocID
+// order [4 5 6], because Inf/(60+1) and Inf/(60+3) are the same float. The stream's
+// own ranking is not scaled up, it is erased.
+func TestFuseWeightedInfiniteWeightIsNotJustAnExtremeWeight(t *testing.T) {
+	streams := [][]engine.Candidate{
+		{{Doc: 1, Score: 9}},
+		{{Doc: 6, Score: 9}, {Doc: 5, Score: 8}, {Doc: 4, Score: 7}},
+	}
+	if got := docs(FuseWeighted(1, math.Inf(1))(streams, 4)); !equal(got, 1) {
+		t.Errorf("weight +Inf = %v, want [1]: the stream carries no usable order at "+
+			"that weight, so it is switched off rather than ranked by DocID", got)
+	}
+
+	// The claim above about what an honoured +Inf would do, checked rather than
+	// asserted — the fold is only the right call if the alternative really is
+	// insertion order.
+	var collapsed []engine.DocID
+	for _, c := range engine.TopK([]engine.Candidate{
+		{Doc: 6, Score: math.Inf(1)}, {Doc: 5, Score: math.Inf(1)}, {Doc: 4, Score: math.Inf(1)},
+	}, 3) {
+		collapsed = append(collapsed, c.Doc)
+	}
+	if !equal(collapsed, 4, 5, 6) {
+		t.Errorf("tied +Inf scores rank %v, want DocID order [4 5 6]", collapsed)
 	}
 }
 

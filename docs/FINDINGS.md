@@ -277,27 +277,27 @@ version 128 would be a format change anyway.
 
 **Verdict: the graph signal does not improve ranking quality.** The PRD's second
 falsification condition is met and answered *no*. Under equal-weight fusion it costs
-0.1156 nDCG@10; at the best fusion weight found it is worth +0.0018, with an interval
-touching zero. Measurement design and full numbers: [EVAL.md](EVAL.md).
+0.1202 nDCG@10, and no fusion weight makes it worth anything: the best delta available
+is exactly +0.0000. Measurement design and full numbers: [EVAL.md](EVAL.md).
 
-**The larger finding is about fusion, not about graphs.** That −0.1156 was RRF's equal
-vote, not the graph's information — halving the graph stream's weight erases the whole
-regression (§7). Unweighted rank fusion makes a substantive ranking decision silently
-on every query, and its cost here was an order of magnitude larger than anything the
-graph signal was ever worth.
+**The larger finding is about fusion, not about graphs.** That −0.1202 was RRF's equal
+vote, not the graph's information — halving the graph stream's weight erases all but
+0.0019 of the regression (§7). Unweighted rank fusion makes a substantive ranking
+decision silently on every query, and its cost here was two orders of magnitude larger
+than anything the graph signal was ever worth.
 
 | Arm | nDCG@10 |
 |---|---|
 | `text` | 0.5826 |
 | `text+vector` | **0.6233** ← best |
-| `text+graph` | 0.4017 |
-| `text+vector+graph` | 0.5077 |
-| `text+vector+graph-including-seeds` | 0.5485 |
+| `text+graph` | 0.3987 |
+| `text+vector+graph` | 0.5031 |
+| `text+vector+graph-including-seeds` | 0.5464 |
 
 | Comparison | Delta | 95% CI |
 |---|---|---|
-| `text+vector+graph` − `text+vector` | **−0.1156** | [−0.1483, −0.0837] |
-| `text+vector` − `text` | +0.0407 | [+0.0010, +0.0799] |
+| `text+vector+graph` − `text+vector` | **−0.1202** | [−0.1521, −0.0886] |
+| `text+vector` − `text` | +0.0407 | [+0.0010, +0.0798] |
 
 TREC-COVID, 50 queries, 171,332 documents, 579,720 in-corpus citation edges, 148,232
 SPECTER2 vectors. Paired bootstrap, 10,000 resamples, seed 20260814. 28-configuration
@@ -327,7 +327,7 @@ of them; five arms differ only in the contents of a slice. The milestone 1 claim
 one level up from the engine, which is where it would have been cheapest to quietly
 break.
 
-**Assertion 3 — the graph signal regresses, robustly.** −0.1156 against the
+**Assertion 3 — the graph signal regresses, robustly.** −0.1202 against the
 pre-registered baseline, CI far from zero, sign stable across 28 configurations
 including over-fetch to depth 100 and rank constants from 1 to 200.
 
@@ -363,30 +363,37 @@ cheap-to-add signal can still be worth less than nothing.
 `1/(1+hops)` with `MaxDepth = 3` gives a non-seed candidate three possible values. On
 this corpus the hop-1 frontier averages 41 documents per query, so the whole top ten
 sat at 0.5 and `engine.TopK`'s tiebreak — `DocID`, i.e. corpus insertion order — chose
-which ten. **38 of 50 queries were ranking by an accident of indexing.**
+which ten. **Every one of the 45 queries the graph could answer at all was ranking by
+an accident of indexing**, 2,082 slots of it.
 
 The plan predicted this as a High risk and named the minimal fix in advance: sum
 per-seed distances instead of taking the nearest, so documents several seeds agree on
 rise. Implemented, tested, and measured before and after as the plan required.
 
 **It did not work.** Only 28.1% of documents have an in-corpus out-edge, so two seeds
-almost never cite the same paper and the sum almost always has one non-zero term.
-Scores stayed at 3–16 distinct values per query, 41 of 45 answering queries still have
-their stream's membership decided by `DocID`, and the arm moved +0.044 — an order of
-magnitude short of the 0.12 it needed.
+almost never cite the same paper and the sum almost always has one non-zero term. 3
+distinct scores per query is still the modal case, 41 of 45 answering queries still
+have their stream's membership decided by `DocID`, and the arm moved +0.037 — an order
+of magnitude short of the 0.12 it needed.
 
 So the stream carries almost no ordering, and unweighted RRF gives its arbitrary top
-ten the same vote as BM25's. Queries 30 and 40 fall from a perfect 1.0000 to about
-0.51. This is not dilution, it is displacement.
+ten the same vote as BM25's. Query 40 falls from a perfect 1.0000 to 0.6321 and query
+24 from 0.9149 to 0.4819. This is not dilution, it is displacement.
 
 **The double-counting control earned its place twice.** At 5% graph coverage, with a
 traversal returning literally nothing, `including-seeds` showed +0.1021 with a CI
 excluding zero — an "improvement" that was purely text getting a second vote. Without
 that arm in the table it would have read as graph proximity working. Milestone 1 §2.3
 predicted the inflation; this is what it looks like. Post-fix it regresses too, at
-−0.0748, which rules out the harness being rigged against the traversal.
+−0.0769, which rules out the harness being rigged against the traversal.
 
-## 4. The methodological failure worth recording
+## 4. The methodological failures worth recording
+
+Two, both caught after publication, both the same shape: a statistic answering the
+question it was asked while the thing that actually moved the number sat outside its
+scope.
+
+### 4.1 A confident interval on an incomplete corpus
 
 [EVAL.md](EVAL.md) section 4.1 documents a finding this milestone published to itself
 and then withdrew. At 27% vector coverage, `text+vector` measured 0.3200 against `text`
@@ -400,6 +407,36 @@ reference implementations were wired in specifically to stop us trusting an unve
 metric, and the same class of error landed one level out anyway — in the data rather
 than the instrument. Every arm number now carries the coverage it was measured at.
 
+### 4.2 A reproducible measurement on a non-reproducible build
+
+Found by review of the milestone's own pull request, after the numbers were published.
+
+`weft-eval build` inverted the Semantic Scholar cache into `CorpusId → cord_uid` by
+ranging over a Go map. The mapping is not injective — CORD-19 ships the same paper
+under several `cord_uid`s, and **20,556 of 162,837 records with a CorpusId collide** —
+so randomised map iteration chose a different winner on every build. Two builds from
+the identical cache disagreed on **2,571 to 9,377 of 142,281 CorpusIds**, up to 6.6% of
+the citation graph. The edge *count* was identical every time, 579,720, which is why
+the build log looked stable and nothing downstream noticed.
+
+Everything guarding this measurement was pointed elsewhere. The bootstrap resamples
+queries against one index. The seed is pinned so the *resampling* reproduces. The
+28-configuration sweep varies fusion, not the corpus. `make eval` reprints the numbers
+faithfully — from whichever graph the last build happened to produce. A pipeline that
+is nondeterministic upstream is invisible to all four.
+
+The verdict survived: −0.1156 became −0.1202, same sign, interval still far from zero,
+still 0 sign flips. What did not survive was §7's headline. The graph's best case under
+any fusion weight was published as +0.0018 and is **+0.0000** — a figure smaller than
+the run-to-run spread of the graph it was measured on, and the one number in this
+document a reader might have taken as a reason to keep the scorer.
+
+The fix is four lines: iterate in sorted key order, keep the first, print the collision
+count. The check that would have caught it is cheaper still — build twice, compare the
+bytes — and is now in the repository as a unit test on `corpusIDIndex` and as a command
+in [EVAL.md](EVAL.md) section 7. **A harness whose purpose is reproducibility had never
+been asked to reproduce anything.**
+
 ## 5. Known costs
 
 ### 5.1 The verdict is about one construction, not about graphs
@@ -412,8 +449,8 @@ attack a different part of the mechanism in §3, and neither was in scope.
 
 This distinction is load-bearing for what happens next, and it is also the most
 convenient thing this document could say — which is why the evidence for it is stated
-as mechanism rather than as hope: the stream demonstrably carries 3–16 distinct scores
-across thousands of candidates.
+as mechanism rather than as hope: on most queries the stream demonstrably carries 3
+distinct scores across thousands of candidates.
 
 ### 5.2 Unweighted fusion has no way to discount a weak stream — measured, see §7
 
@@ -465,15 +502,15 @@ stream moving.
 
 | Graph stream weight | nDCG@10 | Delta vs `text+vector` | 95% CI |
 |---|---|---|---|
-| 1.0 | 0.5077 | **−0.1156** | [−0.1483, −0.0837] |
-| 0.5 | 0.6240 | +0.0007 | [−0.0057, +0.0079] |
-| **0.1** | **0.6250** | **+0.0018** | [+0.0000, +0.0053] |
-| ≤ 0.02 | 0.6233 | +0.0000 | [0, 0] — converged to baseline |
+| 1.0 | 0.5031 | **−0.1202** | [−0.1521, −0.0886] |
+| 0.5 | 0.6214 | −0.0019 | [−0.0057, +0.0000] |
+| 0.25 | 0.6214 | −0.0019 | [−0.0057, +0.0000] |
+| ≤ 0.1 | 0.6233 | +0.0000 | [+0.0000, +0.0000] — converged to baseline |
 
-**Halving one weight erased a 0.12 regression.** The graph stream was never destroying
-rankings; RRF was giving it ten slots it had not earned. Equal weighting is not a
-neutral default — it is a ranking decision made silently on every query, and on this
-corpus it was worth an order of magnitude more than the signal being evaluated.
+**Halving one weight erased 0.118 of a 0.120 regression.** The graph stream was never
+destroying rankings; RRF was giving it ten slots it had not earned. Equal weighting is
+not a neutral default — it is a ranking decision made silently on every query, and on
+this corpus it was worth two orders of magnitude more than the signal being evaluated.
 
 **Weights do not compromise scorer-agnosticism.** They index by *position in the
 stream list*, and the caller already fixed that order when it passed scorers to
@@ -481,11 +518,16 @@ stream list*, and the caller already fixed that order when it passed scorers to
 touched to run this; the variant lives in `cmd/weft-eval` and is injected as an
 `engine.Fuser`, the same mechanism the RRF-constant sweep uses.
 
-**It does not rescue the graph.** The best weight is worth +0.0018 — 0.29% relative,
-interval touching zero. Down-weighting a near-noise stream stops it doing harm; it
-does not make it informative. The verdict in §1 stands, with its reason corrected:
-not "graph proximity is harmful" but "graph proximity, as constructed here, is not
-information."
+**It does not rescue the graph.** No weight beats the baseline. From 0.1 downward the
+arm *is* the baseline — delta exactly zero, interval a point at zero — meaning the
+graph stream is being fused and changes no ranking any query is scored on.
+Down-weighting a near-noise stream stops it doing harm; it does not make it
+informative. The verdict in §1 stands, with its reason corrected: not "graph proximity
+is harmful" but "graph proximity, as constructed here, is not information."
+
+An earlier revision of this table reported +0.0018 at weight 0.1 and called it the
+graph's best case. That number came from a build whose citation graph varied between
+runs (§4.2) and was smaller than that variation. It is now +0.0000.
 
 **Shipped as `fusion.FuseWeighted`.** Weights are variadic and positional, `Fuse` is
 unchanged, and the unweighted path is bit-identical — multiplying by 1.0 is exact, so

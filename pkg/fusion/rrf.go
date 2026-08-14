@@ -12,6 +12,7 @@
 package fusion
 
 import (
+	"math"
 	"slices"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -41,7 +42,7 @@ const RRFk = 60.0
 //
 // Every stream gets one equal vote. That is a ranking decision rather than a
 // neutral default, and milestone 4 measured what it costs when one stream is much
-// weaker than the others: 0.1156 nDCG@10, an order of magnitude more than the
+// weaker than the others: 0.1202 nDCG@10, two orders of magnitude more than the
 // signal under evaluation was worth (docs/FINDINGS.md milestone 4 section 7).
 // FuseWeighted is the escape hatch.
 func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
@@ -56,13 +57,14 @@ func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
 // all, rather than appearing last at score 0.
 //
 // Precondition: a weight is finite and non-negative. Anything else — a negative
-// weight, a NaN from an unchecked division — is treated as 0, which is the one
-// defined behaviour that cannot corrupt a ranking silently. It is not rejected,
-// because a Fuser has no error to return. A negative weight would otherwise push a
-// document below documents that no stream ranked at all, which is exactly the
-// unearned position the weight-0 rule exists to prevent, and a single NaN weight
-// would make every score it touches NaN — TopK sorts those last and ties them on
-// DocID, so the fused order would quietly become corpus insertion order.
+// weight, or a NaN or +Inf from an unchecked division — is treated as 0, which is
+// the one defined behaviour that cannot corrupt a ranking silently. It is not
+// rejected, because a Fuser has no error to return. A negative weight would
+// otherwise push a document below documents that no stream ranked at all, which is
+// exactly the unearned position the weight-0 rule exists to prevent. A NaN weight
+// would make every score it touches NaN and a +Inf weight would make every one of
+// them +Inf; either way those documents compare equal, TopK ties them on DocID, and
+// the fused order quietly becomes corpus insertion order.
 //
 // A weight with no corresponding stream is ignored. Positional coupling cuts both
 // ways: a caller that drops or reorders a scorer without editing its weights gets a
@@ -77,7 +79,7 @@ func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
 // therefore identity; weighting *votes* does not.
 //
 // Milestone 4's evidence for adding it: at weight 1.0 a near-noise stream cost
-// 0.1156 nDCG@10, and halving that one weight erased the entire regression. What
+// 0.1202 nDCG@10, and halving that one weight erased all but 0.0019 of it. What
 // that milestone did not answer is where weights should come from. Hand-tuning
 // per corpus reintroduces the per-deployment tuning burden a scorer-agnostic design
 // exists to avoid, and learning them from relevance judgments is a different
@@ -146,10 +148,13 @@ func fuse(streams [][]engine.Candidate, k int, weights []float64) []engine.Candi
 			//
 			// Written as !(sw > 0) rather than sw <= 0 on purpose: it is the same test
 			// for 0 and for negatives, and it also catches NaN, which every ordered
-			// comparison reports as false. That folds all three out-of-contract
-			// weights onto the one behaviour documented on FuseWeighted instead of
-			// letting a NaN propagate into the score map.
-			if !(sw > 0) {
+			// comparison reports as false. +Inf passes that test and so is named
+			// separately: it would send every document in the stream to +Inf, where they
+			// compare equal and TopK settles them on DocID — the same silent collapse to
+			// insertion order the NaN case produces, reached from the opposite end. That
+			// folds all four out-of-contract weights onto the one behaviour documented on
+			// FuseWeighted instead of letting either value into the score map.
+			if !(sw > 0) || math.IsInf(sw, 1) {
 				continue
 			}
 			fused[stream[i].Doc] += sw * w

@@ -185,6 +185,29 @@ func TestS2ClientGivesUpAfterMaxRetries(t *testing.T) {
 	}
 }
 
+// TestS2ClientDoesNotWaitAfterTheFinalAttempt: the backoff spaces out the next
+// request, so once there is no next request the wait is pure delay on a failure that
+// is already decided. MaxRetries 0 makes the whole budget one attempt, and a
+// generous Retry-After makes the difference unmistakable — the old loop honoured it
+// and sat for 30 seconds before returning the error it already had.
+func TestS2ClientDoesNotWaitAfterTheFinalAttempt(t *testing.T) {
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	c.MaxRetries = 0
+
+	start := time.Now()
+	if _, err := c.Batch(context.Background(), []string{"CorpusId:7"}); !errors.Is(err, ErrS2Status) {
+		t.Errorf("error = %v, want ErrS2Status", err)
+	}
+	// Two orders of magnitude below the Retry-After it must not have honoured, so
+	// this does not become a test about how fast the machine is.
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("returned after %s, want promptly: the final attempt still slept", elapsed.Round(time.Millisecond))
+	}
+}
+
 // TestS2ClientDoesNotRetryClientError: a 400 means the request itself is wrong, and
 // repeating it burns rate limit the rest of a multi-hour job needs.
 func TestS2ClientDoesNotRetryClientError(t *testing.T) {

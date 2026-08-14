@@ -161,6 +161,35 @@ func TestBootstrapRejectsUnpairedRuns(t *testing.T) {
 	}
 }
 
+// TestPercentileIndexIsNearestRank pins the definition rather than the values it
+// happens to produce. Nearest rank is the ⌈p·n⌉-th value counting from 1, so the
+// zero-based index is one less; the n = 10000 rows are the two percentiles the
+// harness actually runs, and are where truncating p·n silently picked the next order
+// statistic.
+func TestPercentileIndexIsNearestRank(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		p    float64
+		want int
+	}{
+		{10000, 0.025, 249},  // 250th value, not the 251st.
+		{10000, 0.975, 9749}, // 9750th value, not the 9751st.
+		{2000, 0.025, 49},
+		{2000, 0.975, 1949},
+		{100, 0.5, 49},
+		{40, 0.025, 0}, // ⌈1⌉ − 1 = 0, in range without clamping.
+		{20, 0.025, 0}, // ⌈0.5⌉ − 1 = 0, and the clamp is not what produced it.
+		{3, 0.999, 2},  // ⌈2.997⌉ − 1 = 2.
+		{3, 1.0, 2},    // The maximum, exactly.
+		{1, 0.025, 0},  // Degenerate, held by the low clamp.
+		{1, 0.975, 0},  // Degenerate, held by the high clamp.
+	} {
+		if got := percentileIndex(tc.n, tc.p); got != tc.want {
+			t.Errorf("percentileIndex(%d, %v) = %d, want %d", tc.n, tc.p, got, tc.want)
+		}
+	}
+}
+
 // TestBootstrapSingleQueryDoesNotIndexOutOfRange covers the clamp in
 // percentileIndex: one query and one iteration is a degenerate call, and it has
 // to return the degenerate answer rather than panic.
