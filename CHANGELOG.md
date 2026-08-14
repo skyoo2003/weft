@@ -6,7 +6,7 @@ Three things can force work on your side, and each is decided by a file rather t
 
 | What | Where it is decided | How you find out |
 |---|---|---|
-| `pkg/engine`'s exported API | `pkg/engine/testdata/engine_api.txt` | your build stops compiling; that file's diff between the two tags says what moved |
+| The exported API of any package under `pkg/` | `pkg/engine/testdata/engine_api.txt` for `engine`, `public_api.txt` for `fusion` and every scorer | your build stops compiling; those files' diff between the two tags says what moved |
 | The on-disk format | `formatVersion` in `pkg/engine/segment.go` | `Open` returns `ErrBadVersion` |
 | The minimum Go version | the `go` line in `go.mod` | `GOTOOLCHAIN=auto`, the default, downloads that version and builds; `GOTOOLCHAIN=local` refuses |
 

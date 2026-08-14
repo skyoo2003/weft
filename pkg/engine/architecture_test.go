@@ -198,7 +198,70 @@ func TestNeitherEngineNorFusionImportsAScorer(t *testing.T) {
 //	WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/
 func TestEngineAPISurfaceIsUnchanged(t *testing.T) {
 	got := strings.Join(exportedAPI(t, "."), "\n") + "\n"
-	golden := filepath.Join("testdata", "engine_api.txt")
+	checkGolden(t, "engine_api.txt", got,
+		"engine's exported API changed. A new scorer needing a new Document field is a real "+
+			"engine cost. Record it in docs/FINDINGS.md, then refresh with WEFT_UPDATE_GOLDEN=1.")
+}
+
+// TestPublicAPISurfaceIsUnchanged covers the public surface the engine golden
+// leaves out.
+//
+// engine is not all of it. examples/basic imports fusion and four scorer
+// packages and calls their constructors directly, so renaming graph.New or
+// changing fusion.Fuse's signature breaks an embedder exactly as an engine
+// change would. CHANGELOG.md says a release with no entry is a release with
+// nothing for a caller to do; without this test that claim covers one package
+// out of six and is silently false for the other five.
+//
+// Directories are discovered rather than listed, so a fifth scorer joins this
+// golden the moment the package exists — unlike the scorer slices above, which
+// are edited by hand. Adding a scorer therefore shows up here as new exported
+// API, which is the intended cost: it is an addition a caller can see.
+//
+//	WEFT_UPDATE_GOLDEN=1 go test ./pkg/engine/
+func TestPublicAPISurfaceIsUnchanged(t *testing.T) {
+	var lines []string
+	for _, dir := range publicPackageDirs(t) {
+		lines = append(lines, "# "+filepath.ToSlash(dir))
+		lines = append(lines, exportedAPI(t, dir)...)
+		lines = append(lines, "")
+	}
+	checkGolden(t, "public_api.txt", strings.Join(lines, "\n"),
+		"A caller builds these directly — see examples/basic. If this change gives them work "+
+			"to do, CHANGELOG.md needs the entry whose absence would otherwise deny it.")
+}
+
+// publicPackageDirs returns every importable package under pkg/ except engine,
+// which has a golden of its own. Discovery rather than a fixed list: a scorer
+// that exists and is watched by nothing is the gap this exists to close.
+func publicPackageDirs(t *testing.T) []string {
+	t.Helper()
+	var dirs []string
+	// ".." is pkg/, whose subdirectories are engine, fusion and scorer. scorer
+	// is a parent holding no .go files of its own, so it is walked, not recorded.
+	for _, root := range []string{"..", filepath.Join("..", "scorer")} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatalf("ReadDir(%s): %v", root, err)
+		}
+		for _, e := range entries {
+			if !e.IsDir() || e.Name() == "engine" || e.Name() == "scorer" {
+				continue
+			}
+			dirs = append(dirs, filepath.Join(root, e.Name()))
+		}
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+// checkGolden compares got against testdata/name, or rewrites it when
+// WEFT_UPDATE_GOLDEN is set. hint is what the caller says the change costs;
+// without it a golden failure reports only that bytes differ, which is the one
+// thing the printed diff already says.
+func checkGolden(t *testing.T, name, got, hint string) {
+	t.Helper()
+	golden := filepath.Join("testdata", name)
 
 	if os.Getenv("WEFT_UPDATE_GOLDEN") != "" {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
@@ -216,9 +279,7 @@ func TestEngineAPISurfaceIsUnchanged(t *testing.T) {
 		t.Fatalf("ReadFile(%s): %v — regenerate with WEFT_UPDATE_GOLDEN=1", golden, err)
 	}
 	if got != string(want) {
-		t.Errorf("engine's exported API changed.\n--- recorded\n%s\n--- current\n%s\n"+
-			"A new scorer needing a new Document field is a real engine cost. Record it in "+
-			"docs/FINDINGS.md, then refresh with WEFT_UPDATE_GOLDEN=1.", want, got)
+		t.Errorf("%s is out of date.\n--- recorded\n%s\n--- current\n%s\n%s", golden, want, got, hint)
 	}
 }
 

@@ -1,0 +1,39 @@
+# ../fusion
+const RRFk
+func Fuse([][]engine.Candidate, int) []engine.Candidate
+
+# ../scorer/graph
+const MaxDepth
+const SeedN
+func New(*engine.Index, engine.Scorer) *Scorer
+func NewIncludingSeeds(*engine.Index, engine.Scorer) *Scorer
+method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method Scorer.Name() string
+type Scorer struct
+Scorer has unexported fields
+
+# ../scorer/recency
+const HalfLife
+func New(*engine.Index) *Scorer
+func NewAt(*engine.Index, time.Time) *Scorer
+method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method Scorer.Name() string
+type Scorer struct
+Scorer has unexported fields
+
+# ../scorer/text
+const B
+const K1
+func New(*engine.Index) *Scorer
+method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method Scorer.Name() string
+type Scorer struct
+Scorer has unexported fields
+
+# ../scorer/vector
+func New(*engine.Index) *Scorer
+method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method Scorer.Name() string
+type Scorer struct
+Scorer has unexported fields
+var ErrDimMismatch
