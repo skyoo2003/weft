@@ -158,7 +158,7 @@ def verify(n: int) -> int:
     return 0
 
 
-def sanity(query_vecs: dict[str, list[float]]) -> None:
+def sanity(query_vecs: dict[str, list[float]]) -> bool:
     """Check the query adapter's output is usable against proximity document vectors.
 
     --verify establishes that our document vectors and Semantic Scholar's are the
@@ -172,6 +172,12 @@ def sanity(query_vecs: dict[str, list[float]]) -> None:
     randomly chosen ones. If the space is compatible, relevant should win clearly.
     If it does not, the vector arm is contributing noise and reporting it as a
     signal would be worse than dropping it.
+
+    Returns False only for that conclusion. A check that could not run — no document
+    vectors cached yet, no judged document among them — returns True: it has found
+    nothing wrong with the query vectors, and refusing to write them before
+    `weft-eval prepare` has ever run would make this script unusable in the order the
+    pipeline is actually executed. The caller reports which of the two it got.
     """
     import random
 
@@ -181,7 +187,7 @@ def sanity(query_vecs: dict[str, list[float]]) -> None:
             vecs[rec["key"]] = rec["vec"]
     if not vecs:
         print("\nsanity check skipped: no document vectors yet", file=sys.stderr)
-        return
+        return True
 
     rel: dict[str, list[str]] = {}
     with open(os.path.join(DATA, "trec-covid", "qrels", "test.tsv")) as f:
@@ -211,7 +217,7 @@ def sanity(query_vecs: dict[str, list[float]]) -> None:
 
     if compared == 0:
         print("\nsanity check skipped: no judged document has a vector yet", file=sys.stderr)
-        return
+        return True
 
     print(f"\nsanity check over {compared} queries with judged documents that have vectors")
     print(f"  mean cosine to judged-relevant  {rel_sum / compared:.4f}")
@@ -219,10 +225,12 @@ def sanity(query_vecs: dict[str, list[float]]) -> None:
     print(f"  relevant wins                   {wins}/{compared}")
     if wins * 2 <= compared:
         print(
-            "\nWARNING: the query adapter does not separate relevant from random.\n"
+            "\nFAIL: the query adapter does not separate relevant from random.\n"
             "The vector arm would be contributing noise. Drop it rather than report it.",
             file=sys.stderr,
         )
+        return False
+    return True
 
 
 def generate(out_path: str) -> int:
@@ -237,14 +245,22 @@ def generate(out_path: str) -> int:
     # an input it never saw.
     vecs = encode(tok, model, [q["text"] for q in queries])
 
+    # Checked before the file exists, not after. Printed next to a written file, the
+    # conclusion "these vectors are noise, drop the arm" is advice nothing acts on:
+    # `weft-eval run` finds query-vectors.jsonl, reports a vector arm under its usual
+    # name, and that arm is the baseline the entire graph delta is measured against. An
+    # unusable file that was never written cannot be picked up by mistake, which is the
+    # same reason prepare refuses to record a corpus as unjoinable on no evidence.
+    if not sanity({q["_id"]: v for q, v in zip(queries, vecs)}):
+        print(f"not writing {out_path}", file=sys.stderr)
+        return 1
+
     with open(out_path, "w") as f:
         for q, v in zip(queries, vecs):
             json.dump({"id": q["_id"], "text": q["text"], "vec": v}, f)
             f.write("\n")
     print(f"wrote {len(queries)} query vectors of dimension {len(vecs[0])} to {out_path}")
     print(f"  model {BASE} + {QUERY_ADAPTER}")
-
-    sanity({q["_id"]: v for q, v in zip(queries, vecs)})
     return 0
 
 

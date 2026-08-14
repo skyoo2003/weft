@@ -46,7 +46,7 @@ const RRFk = 60.0
 // signal under evaluation was worth (docs/FINDINGS.md milestone 4 section 7).
 // FuseWeighted is the escape hatch.
 func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
-	return fuse(streams, k, nil)
+	return fuse(streams, k, nil, 1)
 }
 
 // FuseWeighted is Fuse with a per-stream multiplier: Σ wᵢ/(RRFk + rank).
@@ -64,7 +64,9 @@ func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
 // exactly the unearned position the weight-0 rule exists to prevent. A NaN weight
 // would make every score it touches NaN and a +Inf weight would make every one of
 // them +Inf; either way those documents compare equal, TopK ties them on DocID, and
-// the fused order quietly becomes corpus insertion order.
+// the fused order quietly becomes corpus insertion order. A weight small enough that
+// its vote underflows to zero joins them, for the same reason and at the point of use
+// rather than here — see fuse.
 //
 // Only the ratios between weights matter. Weights larger than 1 are scaled down so
 // the largest is 1, which leaves the fused order unchanged and keeps a large weight
@@ -73,6 +75,12 @@ func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
 // caller reading Candidate.Score off the result is reading a number whose scale it
 // did not choose. Score has never been comparable across fusions anyway; the ranking
 // is the output.
+//
+// The implicit 1.0 is scaled with them, and has to be. It is a weight like any other,
+// so dividing only the explicit ones changes the ratio between a stream that was given
+// a weight and a stream that was not: FuseWeighted(2) over two streams means 2:1, and
+// scaling the slice alone turns it into 1:1 — which is Fuse, the one fusion a caller
+// reaching for this function is asking not to get. It is stored as 1:0.5 instead.
 //
 // A weight with no corresponding stream is ignored. Positional coupling cuts both
 // ways: a caller that drops or reorders a scorer without editing its weights gets a
@@ -97,9 +105,9 @@ func FuseWeighted(weights ...float64) engine.Fuser {
 	// Cloned because the caller is free to reuse or mutate the slice it passed,
 	// and a Fuser outlives the call that built it.
 	w := slices.Clone(weights)
-	scaleDown(w)
+	dflt := scaleDown(w)
 	return func(streams [][]engine.Candidate, k int) []engine.Candidate {
-		return fuse(streams, k, w)
+		return fuse(streams, k, w, dflt)
 	}
 }
 
@@ -129,7 +137,14 @@ func FuseWeighted(weights ...float64) engine.Fuser {
 // A weight can underflow to 0 here, and that is honest rather than lossy: it takes
 // a ratio past 1e308 to the largest weight, at which point the stream's every
 // contribution was already further below the leader than float64 can represent.
-func scaleDown(w []float64) {
+//
+// The return value is what a stream past the end of w now weighs. Streams without a
+// weight are documented to count 1.0, and 1.0 is a weight in the same ratio set as
+// the rest — scaling every explicit weight and leaving that one alone would silently
+// re-rank the very streams the caller distinguished. Returning it rather than
+// appending to w keeps this working for a stream count nobody knows yet: FuseWeighted
+// builds a Fuser once and the caller decides how many streams to hand it.
+func scaleDown(w []float64) float64 {
 	maxW := 0.0
 	for _, v := range w {
 		// NaN fails every comparison and is skipped for free; +Inf would win and has
@@ -139,18 +154,20 @@ func scaleDown(w []float64) {
 		}
 	}
 	if maxW <= 1 {
-		return
+		return 1
 	}
 	for i := range w {
 		w[i] /= maxW
 	}
+	return 1 / maxW
 }
 
-// fuse is the shared implementation. A nil weights slice means every stream weighs
-// 1.0, and that path is bit-identical to weighting explicitly: IEEE-754
-// multiplication by 1.0 is exact, so no ranking changes and no test pinning an
-// exact order needs to know which entry point produced it.
-func fuse(streams [][]engine.Candidate, k int, weights []float64) []engine.Candidate {
+// fuse is the shared implementation. dflt is what a stream past the end of weights
+// weighs; a nil weights slice with dflt 1.0 means every stream weighs 1.0, and that
+// path is bit-identical to weighting explicitly: IEEE-754 multiplication by 1.0 is
+// exact, so no ranking changes and no test pinning an exact order needs to know which
+// entry point produced it.
+func fuse(streams [][]engine.Candidate, k int, weights []float64, dflt float64) []engine.Candidate {
 	// Sized from what the streams actually hold, not from k. A stream is at most
 	// k long, but k is caller-supplied and unbounded — the demo takes it from a
 	// flag — so hinting k*len(streams) asks the runtime to reserve space for a
@@ -188,7 +205,7 @@ func fuse(streams [][]engine.Candidate, k int, weights []float64) []engine.Candi
 			// would save nothing measurable and would create two accumulation paths
 			// whose last bits could drift apart, which is exactly what the
 			// rank-major ordering above exists to prevent.
-			sw := 1.0
+			sw := dflt
 			if si < len(weights) {
 				sw = weights[si]
 			}
@@ -209,7 +226,20 @@ func fuse(streams [][]engine.Candidate, k int, weights []float64) []engine.Candi
 			if !(sw > 0) || math.IsInf(sw, 1) {
 				continue
 			}
-			fused[stream[i].Doc] += sw * w
+			// The same rule again, on the product rather than the weight, because
+			// that is where the last way to reach it lives. A weight below about
+			// 1e-322 is positive, finite and entirely in contract, and still
+			// multiplies to nothing at every rank: the vote underflows, `+=` creates
+			// the map entry anyway, and the stream's documents land in the result at
+			// score 0 — tied, settled by TopK on DocID, holding the insertion-order
+			// position that weight 0 is excluded to deny them. Testing the product is
+			// also the only test that stays correct if RRFk or the depth changes,
+			// since both move where the underflow starts.
+			vote := sw * w
+			if vote == 0 {
+				continue
+			}
+			fused[stream[i].Doc] += vote
 		}
 	}
 

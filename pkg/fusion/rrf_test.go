@@ -390,3 +390,69 @@ func TestFuseWeightedLeavesSmallWeightsAlone(t *testing.T) {
 		}
 	}
 }
+
+// TestFuseWeightedScalingPreservesImplicitWeights is the regression for the one place
+// scaleDown and the short-slice default met and disagreed.
+//
+// A stream with no weight of its own counts 1.0, and scaleDown used to divide only the
+// weights it was handed. FuseWeighted(2) over two streams therefore became [1] plus an
+// untouched implicit 1.0 — the 2:1 the caller asked for, silently served as 1:1, which
+// is Fuse. The failure is invisible from the outside: no error, no NaN, just equal
+// votes from the one function whose purpose is not to give them.
+//
+// Both directions are checked. It has to equal the same ratio written out in full, and
+// it must not equal the unweighted fusion; either assertion alone passes on a fixture
+// where the two happen to agree.
+func TestFuseWeightedScalingPreservesImplicitWeights(t *testing.T) {
+	streams := weightStreams()
+
+	equalVotes := docs(Fuse(streams, 4))
+	for _, scale := range []float64{2, 10, 1e6, 1e300} {
+		want := docs(FuseWeighted(scale, scale/2)(streams, 4))
+		got := docs(FuseWeighted(scale)(streams, 4))
+		if !equal(got, want...) {
+			t.Errorf("FuseWeighted(%v) = %v, want %v: the second stream's implicit 1.0 "+
+				"is half of %v and has to be scaled with it", scale, got, want, scale)
+		}
+		if equal(got, equalVotes...) {
+			t.Errorf("FuseWeighted(%v) = %v, the same as unweighted Fuse: the ratio was "+
+				"scaled away", scale, got)
+		}
+	}
+}
+
+// TestFuseWeightedUnderflowingWeightSilencesAStream closes the last route to the
+// collapse the NaN and +Inf guards exist to stop.
+//
+// math.SmallestNonzeroFloat64 is positive, finite and in contract, so it passes every
+// guard on the weight — and then sw*w underflows to 0 at every rank, `+=` creates the
+// map entry regardless, and the whole stream arrives at score 0. Those documents tie,
+// TopK settles them on DocID, and a stream the caller chose to trust only a little
+// contributes corpus insertion order instead of its ranking. Weight 0 is the honest
+// answer: a vote that rounds to nothing did not earn a place.
+func TestFuseWeightedUnderflowingWeightSilencesAStream(t *testing.T) {
+	streams := weightStreams()
+	off := docs(FuseWeighted(1, 0)(streams, 6))
+
+	// The largest reciprocal is 1/(RRFk+1), so a weight that underflows at rank 1
+	// underflows at every rank; both of these do.
+	for _, w := range []float64{math.SmallestNonzeroFloat64, 10 * math.SmallestNonzeroFloat64} {
+		fused := FuseWeighted(1, w)(streams, 6)
+		for _, c := range fused {
+			if c.Score == 0 {
+				t.Errorf("weight %v: doc %d is in the result at score 0", w, c.Doc)
+			}
+		}
+		if got := docs(fused); !equal(got, off...) {
+			t.Errorf("weight %v = %v, want %v (same as weight 0)", w, got, off)
+		}
+	}
+
+	// And the other side of the boundary, three orders of magnitude up: 1e-320/61 is
+	// still a representable subnormal, so the stream keeps a real vote and ranks below
+	// the other one rather than being switched off. The guard is on the product being
+	// zero, not on the weight looking small.
+	if got := docs(FuseWeighted(1, 1e-320)(streams, 6)); !equal(got, 1, 2, 3, 4, 5, 6) {
+		t.Errorf("weight 1e-320 = %v, want [1 2 3 4 5 6]: nothing underflows there", got)
+	}
+}

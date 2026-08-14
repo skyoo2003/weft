@@ -110,6 +110,54 @@ func TestScanS2CacheDropsOnlyTheTruncatedRecord(t *testing.T) {
 	}
 }
 
+// TestScanS2CacheRefusesDamageInTheMiddle is the other half of the previous test, and
+// the reason the two cases have to be told apart at all.
+//
+// json.Decoder reports "half-written tail" and "damaged record with valid ones after
+// it" as the same error, and prepare's response to a short offset is os.Truncate. Read
+// as a tail, mid-file damage therefore deletes every record following it — hours of
+// rate-limited fetching — logs it as an incomplete trailing record, and the next run
+// refetches what it no longer has. Nothing in that sequence looks like a failure.
+//
+// The remaining valid records are what makes the difference visible: a record that
+// never finished writing is the last line of the file, so a newline after the damage
+// means a line that did finish.
+func TestScanS2CacheRefusesDamageInTheMiddle(t *testing.T) {
+	// Two good records, then a broken one, then more good ones that truncation would
+	// take with it.
+	path := writeCache(t, `{"key":"a"}`+"\n"+`{"key":"b"}`+"\n"+`{"key":"c`+"\n"+
+		`{"key":"d"}`+"\n"+`{"key":"e"}`+"\n")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	cache, err := scanS2Cache(path)
+	if err == nil {
+		t.Fatalf("scanS2Cache accepted a damaged cache and offered to truncate %d of %d bytes, "+
+			"which drops keys d and e", before.Size()-cache.good, before.Size())
+	}
+	for _, want := range []string{"middle", "refused"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not say %q; the operator has to be told this is not a "+
+				"resumable interruption", err, want)
+		}
+	}
+
+	// The caller gets the zero value on error, so a caller that ignores the error
+	// truncates to 0 rather than to a plausible-looking offset.
+	if cache.good != 0 || len(cache.keys) != 0 {
+		t.Errorf("cache = %+v, want the zero value on error", cache)
+	}
+
+	// A complete but unparseable final line is damage too, not an interrupted write:
+	// an interrupted write cannot have produced the newline that terminates it.
+	tail := writeCache(t, `{"key":"a"}`+"\n"+`{"key":"b`+"\n")
+	if _, err := scanS2Cache(tail); err == nil {
+		t.Error("scanS2Cache accepted a terminated line that does not parse")
+	}
+}
+
 // TestCorpusIDIndexIsDeterministic is the reproducibility guard. CORD-19 ships the
 // same paper under several cord_uids, so the CorpusId -> cord_uid mapping has to pick
 // one; ranging over a Go map picked a different one per build, which silently made

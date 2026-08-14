@@ -13,6 +13,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -435,14 +436,18 @@ func scanS2Cache(path string) (s2Cache, error) {
 	defer f.Close()
 
 	dec := json.NewDecoder(f)
+	var damaged error
 	for {
 		var rec eval.S2Record
 		if err := dec.Decode(&rec); err != nil {
-			// EOF, or a half-written trailing record. Both mean "stop reading", and
+			// EOF, or a record that did not decode. Both mean "stop reading", and
 			// neither invalidates what came before: every earlier record was
-			// followed by a newline before the next one began.
+			// followed by a newline before the next one began. Whether the second
+			// case is a half-written tail or damage in the middle of the file is
+			// not decidable here — the decoder reports both as the same error — so
+			// it is settled after the loop, before the caller acts on c.good.
 			if !errors.Is(err, io.EOF) {
-				log.Printf("%s: ignoring incomplete trailing record (%v)", path, err)
+				damaged = err
 			}
 			break
 		}
@@ -486,6 +491,46 @@ func scanS2Cache(path string) (s2Cache, error) {
 			}
 			c.good++
 		}
+	}
+
+	// What kind of undecodable thing stopped the loop, decided before the caller acts
+	// on c.good. prepare's response to a short offset is to truncate the file to it,
+	// which is right for the half-written tail of an interrupted run and catastrophic
+	// for anything else: damage in the middle deletes every valid record after it, and
+	// those are the hours of rate-limited fetching this cache exists to avoid repeating.
+	// It would go unremarked, too — the log line calls it a trailing record either way,
+	// and the next run simply refetches what it no longer has.
+	//
+	// The encoder writes one record per line and escapes newlines inside strings, so a
+	// record that never finished writing is the last line of the file and holds no
+	// newline of its own. A newline anywhere past c.good therefore means a line that
+	// did finish, and that is not something to throw away without being asked.
+	if damaged != nil {
+		if _, err := f.Seek(c.good, io.SeekStart); err != nil {
+			return s2Cache{}, fmt.Errorf("seek %s: %w", path, err)
+		}
+		// Scanned in a fixed buffer rather than read whole: the remainder is one short
+		// record when the answer is "tail", and there is no bound on it when the answer
+		// is "damage" — which is the case that must not also exhaust memory.
+		scan := make([]byte, 32<<10)
+		for {
+			n, err := f.Read(scan)
+			if bytes.IndexByte(scan[:n], '\n') >= 0 {
+				return s2Cache{}, fmt.Errorf("%s: the record at byte %d did not decode and complete "+
+					"lines follow it, so this is damage in the middle of the cache rather than the "+
+					"half-written tail of an interrupted run (%d records read before it). Resuming "+
+					"truncates to byte %d, which here would delete every valid record after the "+
+					"damage, so it is refused: repair or remove that one line, or delete %s and "+
+					"refetch: %w", path, c.good, len(c.keys), c.good, path, damaged)
+			}
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return s2Cache{}, fmt.Errorf("read %s: %w", path, err)
+			}
+		}
+		log.Printf("%s: ignoring incomplete trailing record (%v)", path, damaged)
 	}
 	return c, nil
 }
