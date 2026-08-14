@@ -22,6 +22,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -234,22 +235,38 @@ func TestPublicAPISurfaceIsUnchanged(t *testing.T) {
 // publicPackageDirs returns every importable package under pkg/ except engine,
 // which has a golden of its own. Discovery rather than a fixed list: a scorer
 // that exists and is watched by nothing is the gap this exists to close.
+//
+// Walked to any depth rather than read one level down, because the depth is not
+// something the layout promises. Packages sit at pkg/<name> and pkg/scorer/<name>
+// today; milestone 3's ANN scorer could as easily arrive as pkg/ann/hnsw, and a
+// pair of hardcoded roots would record its parent as an empty package and never
+// look inside — the CHANGELOG's claim to cover every package under pkg/ going
+// quietly false in exactly the way this test exists to prevent. A directory is a
+// package here when it holds a non-test .go file; anything else is only a path.
 func publicPackageDirs(t *testing.T) []string {
 	t.Helper()
-	var dirs []string
-	// ".." is pkg/, whose subdirectories are engine, fusion and scorer. scorer
-	// is a parent holding no .go files of its own, so it is walked, not recorded.
-	for _, root := range []string{"..", filepath.Join("..", "scorer")} {
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			t.Fatalf("ReadDir(%s): %v", root, err)
-		}
-		for _, e := range entries {
-			if !e.IsDir() || e.Name() == "engine" || e.Name() == "scorer" {
-				continue
+	seen := map[string]bool{}
+	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir():
+			// engine is covered by engine_api.txt, and testdata holds the goldens
+			// themselves. Neither is skipped at the root, which is pkg/ itself.
+			if path != ".." && (d.Name() == "engine" || d.Name() == "testdata") {
+				return fs.SkipDir
 			}
-			dirs = append(dirs, filepath.Join(root, e.Name()))
+		case strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go"):
+			seen[filepath.Dir(path)] = true
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDir(..): %v", err)
+	}
+	dirs := make([]string, 0, len(seen))
+	for dir := range seen {
+		dirs = append(dirs, dir)
 	}
 	sort.Strings(dirs)
 	return dirs
@@ -330,9 +347,9 @@ func exportedAPI(t *testing.T, dir string) []string {
 						}
 						blocks = append(blocks, typeAPI(s.Name.Name, s.Type))
 					case *ast.ValueSpec:
-						for _, n := range s.Names {
+						for i, n := range s.Names {
 							if n.IsExported() {
-								blocks = append(blocks, []string{d.Tok.String() + " " + n.Name})
+								blocks = append(blocks, []string{d.Tok.String() + " " + n.Name + valueAPI(s, i)})
 							}
 						}
 					}
@@ -423,6 +440,33 @@ func typeAPI(name string, expr ast.Expr) []string {
 	default:
 		// A defined type: DocID's width is part of the contract.
 		return []string{"type " + name + " " + types.ExprString(expr)}
+	}
+}
+
+// valueAPI renders what a caller can observe about the i'th name in a const or
+// var declaration beyond its name: the declared type, or when there is none the
+// expression the type is inferred from.
+//
+// A name alone is not the contract. Writing a type onto an untyped constant —
+// K1 = 1.2 becoming K1 float64 = 1.2 — stops `var f float32 = text.K1` from
+// compiling while nothing about the name changes, and the same goes for a
+// sentinel error narrowed from error to a concrete type. Neither has a
+// signature to record, so the declaration itself is what stands in for one.
+//
+// The inferred case records the whole expression, which means an error's
+// message is in the golden and editing one trips it. That is the intended
+// reading, not noise: these strings are what a caller sees at runtime, and the
+// same rule that asks whether a signature change costs anything asks it here.
+func valueAPI(s *ast.ValueSpec, i int) string {
+	switch {
+	case s.Type != nil:
+		return " " + types.ExprString(s.Type)
+	case i < len(s.Values):
+		return " = " + types.ExprString(s.Values[i])
+	default:
+		// A continuation line in an iota block: no type and no expression of its
+		// own, so the name is genuinely all there is to record.
+		return ""
 	}
 }
 

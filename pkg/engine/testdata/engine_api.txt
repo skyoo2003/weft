@@ -35,11 +35,11 @@ field Query.Seeds []string
 type Scorer interface
 method Scorer.Name() string
 method Scorer.Candidates(context.Context, Query, int) ([]Candidate, error)
-var ErrBadVersion
-var ErrCorrupt
-var ErrDimMismatch
-var ErrDuplicateKey
-var ErrEmptyKey
-var ErrNilScorer
-var ErrNoFuser
-var ErrNonFiniteVector
+var ErrBadVersion = errors.New("engine: unsupported index format version")
+var ErrCorrupt = errors.New("engine: index file is corrupt")
+var ErrDimMismatch = errors.New("engine: vector width differs from the corpus")
+var ErrDuplicateKey = errors.New("engine: duplicate document key")
+var ErrEmptyKey = errors.New("engine: document key is empty")
+var ErrNilScorer = errors.New("engine: nil Scorer")
+var ErrNoFuser = errors.New("engine: nil Fuser")
+var ErrNonFiniteVector = errors.New("engine: vector has a non-finite component")

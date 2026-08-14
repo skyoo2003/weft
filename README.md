@@ -124,7 +124,7 @@ make run        # interactive demo
 make example    # minimal example
 ```
 
-2,396 implementation lines under `pkg/`, 4,044 test lines, **zero external dependencies**. Go 1.26+.
+2,396 implementation lines under `pkg/`, 4,149 test lines, **zero external dependencies**. Go 1.26+.
 
 ## Limitations
 
