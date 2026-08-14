@@ -198,6 +198,17 @@ func ReadQrels(path string) (map[string]map[string]int, error) {
 		if out[qid] == nil {
 			out[qid] = make(map[string]int)
 		}
+		// A repeated pair carrying a different grade is an ambiguous file, not a later
+		// revision winning. Assigning would keep whichever row the scanner happened to
+		// reach last, so concatenating two assessment rounds — the way this actually
+		// happens — silently makes the ground truth, and therefore every nDCG computed
+		// against it, a function of row order. An identical repeat is left alone: it
+		// says the same thing twice and there is nothing to choose between.
+		if prev, dup := out[qid][did]; dup && prev != grade {
+			return nil, fmt.Errorf("%s line %d: query %s document %s is graded %d here and %d "+
+				"earlier in the same file, so the judgments depend on row order: %w",
+				path, line, qid, did, grade, prev, ErrBadRecord)
+		}
 		out[qid][did] = grade
 		rows++
 	}
@@ -296,6 +307,18 @@ func ReadQueryVectors(path string) (map[string]QueryVector, error) {
 		if !nonzero {
 			return nil, fmt.Errorf("%s line %d: query %q has an all-zero vector, which the vector "+
 				"scorer reads as no opinion: %w", path, line, rec.ID, ErrBadRecord)
+		}
+		// Rejected outright, unlike a repeated qrels row: gen_query_vectors.py writes
+		// exactly one line per query, so a second line for one id means the file was
+		// assembled from more than one generation. Both lines then carry the same query
+		// text, so the pairing check in loadQueries cannot tell them apart and neither
+		// can the all-or-none coverage count — whichever came last is the vector arm
+		// that gets measured, and comparing the two embeddings would only answer
+		// whether the file is ambiguous, which is already known.
+		if _, dup := out[rec.ID]; dup {
+			return nil, fmt.Errorf("%s line %d: query %q already has a vector earlier in the file: %w "+
+				"(two generations concatenated? regenerate with testdata/gen_query_vectors.py)",
+				path, line, rec.ID, ErrBadRecord)
 		}
 		out[rec.ID] = QueryVector{Text: rec.Text, Vec: rec.Vec}
 	}

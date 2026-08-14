@@ -188,6 +188,9 @@ func TestReadQrelsRejectsBadData(t *testing.T) {
 		{"short row", "query-id\tcorpus-id\tscore\n1\td1\n", ErrBadRecord},
 		{"non-numeric score", "query-id\tcorpus-id\tscore\n1\td1\thigh\n", ErrBadRecord},
 		{"empty id", "query-id\tcorpus-id\tscore\n1\t\t2\n", ErrMissingID},
+		// Two assessment rounds concatenated. Kept, the last row wins and the ground
+		// truth becomes a function of file order.
+		{"conflicting duplicate grades", "query-id\tcorpus-id\tscore\n1\td1\t2\n1\td1\t0\n", ErrBadRecord},
 		{"header only", "query-id\tcorpus-id\tscore\n", ErrEmptyDataset},
 		{"empty file", "", ErrEmptyDataset},
 	}
@@ -198,6 +201,21 @@ func TestReadQrelsRejectsBadData(t *testing.T) {
 				t.Errorf("error = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestReadQrelsAllowsAnIdenticalRepeat draws the line the conflict check is on. A
+// pair repeated with the same grade says one thing twice and there is nothing to
+// choose between, so it must not be refused: real qrels files are concatenations,
+// and rejecting harmless repetition would fail a run that measures correctly.
+func TestReadQrelsAllowsAnIdenticalRepeat(t *testing.T) {
+	path := writeFile(t, "test.tsv", "query-id\tcorpus-id\tscore\n1\td1\t2\n1\td1\t2\n")
+	got, err := ReadQrels(path)
+	if err != nil {
+		t.Fatalf("ReadQrels: %v", err)
+	}
+	if got["1"]["d1"] != 2 {
+		t.Errorf("qrels = %v, want query 1 -> d1 -> 2", got)
 	}
 }
 
@@ -259,6 +277,11 @@ func TestReadQueryVectorsRejectsBadData(t *testing.T) {
 		// is exactly text.
 		{"all-zero vector", `{"id": "1", "text": "a", "vec": [0, 0, 0]}` + "\n", ErrBadRecord},
 		{"all-zero vector, signed", `{"id": "1", "text": "a", "vec": [0, -0.0]}` + "\n", ErrBadRecord},
+		// Two generations concatenated. Same id, same text, different embedding: the
+		// text pairing check and the coverage count both pass, and file order picks
+		// which vector the arm is measured with.
+		{"duplicate id", `{"id": "1", "text": "a", "vec": [1, 2]}` + "\n" +
+			`{"id": "1", "text": "a", "vec": [3, 4]}` + "\n", ErrBadRecord},
 		{"empty file", "", ErrEmptyDataset},
 	}
 	for _, tc := range tests {

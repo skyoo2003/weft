@@ -143,12 +143,13 @@ func prepare(ctx context.Context, args []string) error {
 
 	// 2. Resume. The output is append-only JSONL, so what is already in it is
 	// exactly what does not need refetching.
-	done, models, good, err := doneKeys(outPath)
+	cache, err := scanS2Cache(outPath)
 	if err != nil {
 		return err
 	}
-	if len(done) > 0 {
-		log.Printf("resume: %d documents already in %s", len(done), outPath)
+	if len(cache.keys) > 0 {
+		log.Printf("resume: %d documents already in %s (%d joined to an identifier)",
+			len(cache.keys), outPath, cache.joined)
 	}
 
 	// A hard kill can leave a half-written trailing record. Reading tolerates that,
@@ -156,16 +157,16 @@ func prepare(ctx context.Context, args []string) error {
 	// everything written from here on unreadable — silently, and only discovered by
 	// the next resume, which would then refetch hours of work it already has. Drop
 	// the fragment instead.
-	if fi, err := os.Stat(outPath); err == nil && fi.Size() > good {
-		log.Printf("%s: dropping %d trailing bytes of an incomplete record", outPath, fi.Size()-good)
-		if err := os.Truncate(outPath, good); err != nil {
+	if fi, err := os.Stat(outPath); err == nil && fi.Size() > cache.good {
+		log.Printf("%s: dropping %d trailing bytes of an incomplete record", outPath, fi.Size()-cache.good)
+		if err := os.Truncate(outPath, cache.good); err != nil {
 			return fmt.Errorf("truncate %s: %w", outPath, err)
 		}
 	}
 
 	want := make(map[string]bool, len(uids))
 	for _, uid := range uids {
-		if !done[uid] {
+		if !cache.keys[uid] {
 			want[uid] = true
 		}
 	}
@@ -175,7 +176,7 @@ func prepare(ctx context.Context, args []string) error {
 		// operator makes to confirm the cache is finished, and it is the only one that
 		// sees every record — so it is the one place a model mismatch introduced by
 		// some earlier interrupted run is guaranteed to surface.
-		reportModels(models)
+		reportModels(cache.models)
 		return nil
 	}
 
@@ -195,6 +196,23 @@ func prepare(ctx context.Context, args []string) error {
 	// them the same keys come back on every rerun, each one rescanning 1.6 GB to be
 	// told again that they cannot be joined. A header with no usable identifier
 	// column at all is a different error and is still fatal.
+	//
+	// The two readings of that one error are only distinguishable from the cache. A
+	// finished join left records carrying a CorpusId behind it; a metadata file that
+	// belongs to another release, or one whose rows were all unreadable, leaves none.
+	// Without this guard the second case is *also* terminal, and terminal here means
+	// writing an asked-and-unjoinable record for every document in the corpus: build's
+	// coverage gate then sees a complete cache, and the run publishes vector and graph
+	// arms over an index with no vectors and no edges under their usual names. That is
+	// the failure of docs/EVAL.md section 4.1 rebuilt out of the check meant to stop
+	// it, so zero matches with no prior evidence of a join is refused.
+	if errors.Is(err, eval.ErrEmptyDataset) && cache.joined == 0 {
+		return fmt.Errorf("none of the %d cord_uids matched a row in %s, and no record in %s carries a "+
+			"CorpusId, so nothing shows this metadata release can be joined to this corpus at all; "+
+			"recording every document as unjoinable would let `weft-eval build` report vector and graph "+
+			"arms over an index with neither. Check that %s is the release named in docs/DATASETS.md: %w",
+			len(want), metaPath, outPath, metaPath, err)
+	}
 	log.Printf("join: %d of %d resolved to an identifier", len(ids), len(want))
 	for _, k := range sortedKeys(tally) {
 		log.Printf("  %-16s %d", k, tally[k])
@@ -258,7 +276,7 @@ func prepare(ctx context.Context, args []string) error {
 	}
 	if len(targets) == 0 {
 		log.Printf("nothing left to fetch; %s is complete", outPath)
-		reportModels(models)
+		reportModels(cache.models)
 		return nil
 	}
 
@@ -269,9 +287,9 @@ func prepare(ctx context.Context, args []string) error {
 			client.Pace, batches, estimate(len(targets)))
 	}
 
-	// models is seeded from the cache, not started empty: this run's own batches are
-	// added to what earlier runs already wrote, so the tally covers the whole file
-	// rather than the tail this invocation happened to fetch.
+	// cache.models is added to, not replaced: this run's own batches join what earlier
+	// runs already wrote, so the tally covers the whole file rather than the tail this
+	// invocation happened to fetch.
 	var fetched, missing, withVec, withRefs, rejected, edges int
 	start := time.Now()
 	for i := 0; i < len(targets); i += eval.S2BatchLimit {
@@ -302,7 +320,7 @@ func prepare(ctx context.Context, args []string) error {
 					// rebuilt by a later run that did not fetch this batch.
 					rec.Model = p.Model
 					withVec++
-					models[p.Model]++
+					cache.models[p.Model]++
 				}
 				if p.VectorRejected {
 					rejected++
@@ -331,7 +349,7 @@ func prepare(ctx context.Context, args []string) error {
 	log.Printf("  written    %d", fetched)
 	log.Printf("  not found  %d", missing)
 	log.Printf("  vectors    %d (%d rejected as non-finite)", withVec, rejected)
-	reportModels(models)
+	reportModels(cache.models)
 	log.Printf("  citing     %d documents, %d edges", withRefs, edges)
 	return nil
 }
@@ -362,32 +380,49 @@ func reportModels(models map[string]int) {
 	}
 }
 
-// doneKeys reads the keys already present in an append-only S2Record JSONL. It
-// returns those keys, a tally of the embedding model behind every cached vector,
-// and the byte offset just past the last record that decoded cleanly.
+// s2Cache is everything one pass over the append-only cache tells prepare about
+// what it already holds. It is a struct rather than four return values because
+// each field answers a question that only this pass can answer, and they kept
+// accumulating.
+type s2Cache struct {
+	// keys are the documents already asked about, whatever the answer was.
+	keys map[string]bool
+
+	// models tallies the embedding model behind every cached vector.
+	models map[string]int
+
+	// joined counts records carrying a CorpusId. It is the only evidence in the file
+	// that the metadata join has ever worked, which is what separates "every joinable
+	// document is already cached" from "this metadata release does not match this
+	// corpus" — see the ErrEmptyDataset guard in prepare.
+	joined int
+
+	// good is the byte offset just past the last record that decoded cleanly.
+	good int64
+}
+
+// scanS2Cache reads what is already in an append-only S2Record JSONL.
 //
 // A truncated final line is tolerated rather than fatal: it is the expected shape
 // of an interrupted run, and the key it belongs to simply gets fetched again. The
 // offset is what lets the caller drop that fragment before appending, which is the
 // difference between a resumable file and one that quietly stops being readable.
 //
-// The model tally rides along on this pass because it is the only pass prepare
-// makes over what it already holds, and provenance a resumed run cannot see is
-// provenance nothing checks — see eval.S2Record.Model. Records with no vector are
-// not counted: they belong to no embedding space.
-func doneKeys(path string) (map[string]bool, map[string]int, int64, error) {
+// The tallies ride along on this pass because it is the only pass prepare makes
+// over what it already holds, and a fact a resumed run cannot see is a fact nothing
+// checks — see eval.S2Record.Model. Records with no vector are not counted in
+// models: they belong to no embedding space.
+func scanS2Cache(path string) (s2Cache, error) {
+	c := s2Cache{keys: map[string]bool{}, models: map[string]int{}}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string]bool{}, map[string]int{}, 0, nil
+		return c, nil
 	}
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("open %s: %w", path, err)
+		return s2Cache{}, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 
-	done := make(map[string]bool)
-	models := make(map[string]int)
-	var good int64
 	dec := json.NewDecoder(f)
 	for {
 		var rec eval.S2Record
@@ -400,12 +435,15 @@ func doneKeys(path string) (map[string]bool, map[string]int, int64, error) {
 			}
 			break
 		}
-		good = dec.InputOffset()
+		c.good = dec.InputOffset()
 		if rec.Key != "" {
-			done[rec.Key] = true
+			c.keys[rec.Key] = true
+		}
+		if rec.CorpusID != "" {
+			c.joined++
 		}
 		if len(rec.Vector) > 0 {
-			models[rec.Model]++
+			c.models[rec.Model]++
 		}
 	}
 
@@ -422,23 +460,23 @@ func doneKeys(path string) (map[string]bool, map[string]int, int64, error) {
 	// the separator and the fragment are distinguishable: whitespace after the last
 	// value is the separator and belongs to what has been written, anything else is
 	// the start of a record that never finished.
-	if good > 0 {
-		if _, err := f.Seek(good, io.SeekStart); err != nil {
-			return nil, nil, 0, fmt.Errorf("seek %s: %w", path, err)
+	if c.good > 0 {
+		if _, err := f.Seek(c.good, io.SeekStart); err != nil {
+			return s2Cache{}, fmt.Errorf("seek %s: %w", path, err)
 		}
 		var buf [16]byte
 		n, err := f.Read(buf[:])
 		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, nil, 0, fmt.Errorf("read %s: %w", path, err)
+			return s2Cache{}, fmt.Errorf("read %s: %w", path, err)
 		}
 		for _, b := range buf[:n] {
 			if b != '\n' && b != '\r' && b != ' ' && b != '\t' {
 				break
 			}
-			good++
+			c.good++
 		}
 	}
-	return done, models, good, nil
+	return c, nil
 }
 
 func estimate(docs int) time.Duration {
@@ -470,12 +508,64 @@ func build(ctx context.Context, args []string) error {
 	}
 	log.Printf("s2: %d records", len(recs))
 
-	byCorpusID, duplicated := corpusIDIndex(recs)
+	// The corpus keys, in a pass of their own before anything is indexed. Two things
+	// below need to know what "in this corpus" means and cannot wait for the streaming
+	// pass to finish: the coverage gate, so a cache that does not cover the corpus
+	// costs a message rather than a full build, and the reverse index, which must not
+	// let a record from outside the corpus claim a CorpusId. A second read of
+	// corpus.jsonl is a few seconds against a build measured in minutes.
+	corpusKeys := make(map[string]bool)
+	if err := eval.ReadCorpus(corpusPath, func(d eval.CorpusDoc) error {
+		corpusKeys[d.ID] = true
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	var uncached int
+	for key := range corpusKeys {
+		if _, ok := recs[key]; !ok {
+			uncached++
+		}
+	}
+
+	// A document the cache says nothing about is not the same as a document the cache
+	// says has nothing. prepare writes a record for every key it asks about, including
+	// a bare tombstone for the ones with no Semantic Scholar side at all, so a finished
+	// prepare covers the corpus exactly. A key missing from the cache therefore means
+	// prepare did not finish — `-limit`, an interrupt, or a cache from an older corpus
+	// — and the document silently enters the index with no vector and no links.
+	//
+	// Nothing downstream can tell that apart from a document the graph genuinely cannot
+	// reach, and the run still labels its arms text+vector and text+vector+graph. That
+	// is precisely how docs/EVAL.md section 4.1 produced a confident measurement of a
+	// corpus that was 40% absent, so it fails here, before a document is tokenised
+	// rather than after the commit. -partial is for deliberately smoke-testing the
+	// pipeline on a slice.
+	if uncached > 0 {
+		pct := 100 * float64(uncached) / float64(len(corpusKeys))
+		if !partial {
+			return fmt.Errorf("%d of %d corpus documents (%.1f%%) have no record in %s, so they would "+
+				"be indexed with no vector and no links while the run still reports vector and graph "+
+				"arms; finish `weft-eval prepare` (it resumes), or pass -partial to build the slice "+
+				"deliberately", uncached, len(corpusKeys), pct, s2Path)
+		}
+		log.Printf("WARNING: -partial: %d of %d documents (%.1f%%) are text-only because %s has no",
+			uncached, len(corpusKeys), pct, s2Path)
+		log.Printf("WARNING: record for them. The vector and graph arms measured on this index are")
+		log.Printf("WARNING: NOT comparable to a full build and must not be published.")
+	}
+
+	byCorpusID, duplicated, foreign := corpusIDIndex(recs, corpusKeys)
 	log.Printf("s2: %d resolvable corpus ids (%d further records share one of them; "+
 		"the lowest cord_uid holds the mapping)", len(byCorpusID), duplicated)
+	if foreign > 0 {
+		log.Printf("s2: %d records are for documents outside this corpus and hold no mapping "+
+			"(cache from a larger or older corpus)", foreign)
+	}
 
 	ix := engine.New()
-	var added, withVec, withLinks, links, dangling, dimSkipped, uncached int
+	var added, withVec, withLinks, links, dangling, dimSkipped int
 	dim := 0
 
 	err = eval.ReadCorpus(corpusPath, func(d eval.CorpusDoc) error {
@@ -489,11 +579,9 @@ func build(ctx context.Context, args []string) error {
 			// is measured against.
 			Text: d.Title + " " + d.Text,
 		}
-		r, cached := recs[d.ID]
-		if !cached {
-			uncached++
-		}
-		if cached {
+		// Absent only under -partial: the gate above already refused an incomplete
+		// cache, so on a publishable build every document has a record.
+		if r, cached := recs[d.ID]; cached {
 			if n := len(r.Vector); n > 0 {
 				if dim == 0 {
 					dim = n
@@ -535,34 +623,6 @@ func build(ctx context.Context, args []string) error {
 	log.Printf("  vectors    %d (dim %d, %d skipped for width)", withVec, dim, dimSkipped)
 	log.Printf("  linked     %d documents, %d in-corpus edges", withLinks, links)
 	log.Printf("  dangling   %d references outside the corpus (skipped at traversal by design)", dangling)
-
-	// A document the cache says nothing about is not the same as a document the
-	// cache says has nothing. prepare writes a record for every key it asks about,
-	// including a bare tombstone for the ones with no Semantic Scholar side at all,
-	// so a finished prepare covers the corpus exactly. A key missing from the cache
-	// therefore means prepare did not finish — `-limit`, an interrupt, or a cache
-	// from an older corpus — and the document silently enters the index with no
-	// vector and no links.
-	//
-	// Nothing downstream can tell that apart from a document the graph genuinely
-	// cannot reach, and the run still labels its arms text+vector and
-	// text+vector+graph. That is precisely how docs/EVAL.md section 4.1 produced a
-	// confident measurement of a corpus that was 40% absent, so it fails here, before
-	// the commit, rather than being counted in a table later. -partial is for
-	// deliberately smoke-testing the pipeline on a slice.
-	if uncached > 0 {
-		pct := 100 * float64(uncached) / float64(added)
-		if !partial {
-			return fmt.Errorf("%d of %d corpus documents (%.1f%%) have no record in %s, so they would "+
-				"be indexed with no vector and no links while the run still reports vector and graph "+
-				"arms; finish `weft-eval prepare` (it resumes), or pass -partial to build the slice "+
-				"deliberately", uncached, added, pct, s2Path)
-		}
-		log.Printf("WARNING: -partial: %d of %d documents (%.1f%%) are text-only because %s has no",
-			uncached, added, pct, s2Path)
-		log.Printf("WARNING: record for them. The vector and graph arms measured on this index are")
-		log.Printf("WARNING: NOT comparable to a full build and must not be published.")
-	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
@@ -606,10 +666,23 @@ func build(ctx context.Context, args []string) error {
 // different rankings and different published numbers out of the same cache. Which
 // copy wins matters far less than that the same one always does; duplicates carry
 // near-identical text, and reproducibility is what this harness is for.
-func corpusIDIndex(recs map[string]eval.S2Record) (map[string]string, int) {
+//
+// Only records whose key is in corpus are eligible, and the count of the rest is
+// returned. A cache from a larger or older corpus can cover every current key and
+// still hold records for documents that are not here any more, and those keys take
+// part in the same sorted first-writer-wins race: one of them sorting below the
+// present copy is enough to hand the mapping to a key the index does not hold. Every
+// citation to that paper then resolves to nothing, and real in-corpus edges are
+// counted as dangling and dropped — a quietly sparser graph, from a cache the
+// coverage gate above accepts as complete because it does cover the corpus.
+func corpusIDIndex(recs map[string]eval.S2Record, corpus map[string]bool) (map[string]string, int, int) {
 	byCorpusID := make(map[string]string, len(recs))
-	var duplicated int
+	var duplicated, foreign int
 	for _, key := range sortedKeys(recs) {
+		if !corpus[key] {
+			foreign++
+			continue
+		}
 		id := recs[key].CorpusID
 		if id == "" {
 			continue
@@ -620,7 +693,7 @@ func corpusIDIndex(recs map[string]eval.S2Record) (map[string]string, int) {
 		}
 		byCorpusID[id] = key
 	}
-	return byCorpusID, duplicated
+	return byCorpusID, duplicated, foreign
 }
 
 func readS2Records(path string) (map[string]eval.S2Record, error) {

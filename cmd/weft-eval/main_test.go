@@ -43,47 +43,47 @@ func linesParse(t *testing.T, path string) error {
 	return nil
 }
 
-// TestDoneKeysKeepsTheRecordSeparator is the regression for the resumable cache's
+// TestScanS2CacheKeepsTheRecordSeparator is the regression for the resumable cache's
 // worst failure mode. json.Decoder.InputOffset stops at the closing brace of the last
 // value, one byte before the newline the encoder wrote after it; an offset that
 // excluded that newline made prepare read a healthy file as carrying a one-byte
 // fragment, truncate the separator away, and append the next record onto the same
 // line.
-func TestDoneKeysKeepsTheRecordSeparator(t *testing.T) {
+func TestScanS2CacheKeepsTheRecordSeparator(t *testing.T) {
 	path := writeCache(t, `{"key":"a"}`+"\n"+`{"key":"b"}`+"\n")
 	fi, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
 
-	done, _, good, err := doneKeys(path)
+	cache, err := scanS2Cache(path)
 	if err != nil {
-		t.Fatalf("doneKeys: %v", err)
+		t.Fatalf("scanS2Cache: %v", err)
 	}
-	if len(done) != 2 || !done["a"] || !done["b"] {
-		t.Errorf("done = %v, want a and b", done)
+	if len(cache.keys) != 2 || !cache.keys["a"] || !cache.keys["b"] {
+		t.Errorf("keys = %v, want a and b", cache.keys)
 	}
-	if good != fi.Size() {
+	if good := cache.good; good != fi.Size() {
 		t.Fatalf("good offset %d, file is %d bytes: a complete file has nothing to "+
 			"truncate, and dropping the difference removes the record separator", good, fi.Size())
 	}
 }
 
-// TestDoneKeysDropsOnlyTheTruncatedRecord: an interrupted run leaves a half-written
+// TestScanS2CacheDropsOnlyTheTruncatedRecord: an interrupted run leaves a half-written
 // value after a valid separator. The fragment has to go and the separator has to
 // stay, and the check is that appending afterwards still produces one record per
 // line.
-func TestDoneKeysDropsOnlyTheTruncatedRecord(t *testing.T) {
+func TestScanS2CacheDropsOnlyTheTruncatedRecord(t *testing.T) {
 	path := writeCache(t, `{"key":"a"}`+"\n"+`{"key":"b"}`+"\n"+`{"key":"c","ref`)
 
-	done, _, good, err := doneKeys(path)
+	cache, err := scanS2Cache(path)
 	if err != nil {
-		t.Fatalf("doneKeys: %v", err)
+		t.Fatalf("scanS2Cache: %v", err)
 	}
-	if len(done) != 2 || done["c"] {
-		t.Errorf("done = %v, want only the two complete records", done)
+	if len(cache.keys) != 2 || cache.keys["c"] {
+		t.Errorf("keys = %v, want only the two complete records", cache.keys)
 	}
-	if err := os.Truncate(path, good); err != nil {
+	if err := os.Truncate(path, cache.good); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 
@@ -99,12 +99,12 @@ func TestDoneKeysDropsOnlyTheTruncatedRecord(t *testing.T) {
 	if err := linesParse(t, path); err != nil {
 		t.Errorf("after resume the cache is no longer one record per line: %v", err)
 	}
-	again, _, _, err := doneKeys(path)
+	again, err := scanS2Cache(path)
 	if err != nil {
-		t.Fatalf("doneKeys after resume: %v", err)
+		t.Fatalf("scanS2Cache after resume: %v", err)
 	}
-	if len(again) != 3 || !again["c"] {
-		t.Errorf("done = %v, want a, b and c", again)
+	if len(again.keys) != 3 || !again.keys["c"] {
+		t.Errorf("keys = %v, want a, b and c", again.keys)
 	}
 }
 
@@ -124,7 +124,12 @@ func TestCorpusIDIndexIsDeterministic(t *testing.T) {
 		"ccc": {Key: "ccc"}, // Unjoinable: a tombstone written by prepare.
 	}
 
-	want, wantDup := corpusIDIndex(recs)
+	corpus := map[string]bool{"zzz": true, "aaa": true, "mmm": true, "bbb": true, "ccc": true}
+
+	want, wantDup, foreign := corpusIDIndex(recs, corpus)
+	if foreign != 0 {
+		t.Errorf("foreign = %d, want 0: every record here is in the corpus", foreign)
+	}
 	if wantDup != 2 {
 		t.Errorf("duplicated = %d, want 2", wantDup)
 	}
@@ -139,7 +144,7 @@ func TestCorpusIDIndexIsDeterministic(t *testing.T) {
 	}
 
 	for i := range 200 {
-		got, dup := corpusIDIndex(recs)
+		got, dup, _ := corpusIDIndex(recs, corpus)
 		if dup != wantDup || len(got) != len(want) {
 			t.Fatalf("run %d: %d ids / %d duplicated, want %d / %d", i, len(got), dup, len(want), wantDup)
 		}
@@ -148,6 +153,81 @@ func TestCorpusIDIndexIsDeterministic(t *testing.T) {
 				t.Fatalf("run %d: CorpusId %s -> %q, the first run said %q", i, id, got[id], key)
 			}
 		}
+	}
+}
+
+// TestCorpusIDIndexIgnoresRecordsOutsideTheCorpus: a cache from a larger or older
+// corpus can cover every current key and still hold records for documents that are
+// gone. Those keys used to take part in the same sorted first-writer-wins race, so
+// one of them sorting below the present copy handed the CorpusId mapping to a key
+// the index does not hold — every citation to that paper then resolved to nothing
+// and real in-corpus edges were dropped as dangling, with the coverage gate
+// satisfied because the cache did cover the corpus.
+func TestCorpusIDIndexIgnoresRecordsOutsideTheCorpus(t *testing.T) {
+	recs := map[string]eval.S2Record{
+		// Sorts below "m" and shares its CorpusId: the stale record wins the race
+		// unless corpus membership is checked first.
+		"aaa": {Key: "aaa", CorpusID: "100"},
+		"m":   {Key: "m", CorpusID: "100"},
+		"n":   {Key: "n", CorpusID: "200", Refs: []string{"100"}},
+	}
+	corpus := map[string]bool{"m": true, "n": true}
+
+	got, dup, foreign := corpusIDIndex(recs, corpus)
+	if foreign != 1 {
+		t.Errorf("foreign = %d, want 1", foreign)
+	}
+	if got["100"] != "m" {
+		t.Errorf("CorpusId 100 -> %q, want the in-corpus key %q: n's citation resolves to a "+
+			"document this index does not hold and the edge is silently lost", got["100"], "m")
+	}
+	// The stale record is skipped before the duplicate check, so it must not be
+	// reported as a cord_uid that merely lost a race with a sibling copy.
+	if dup != 0 {
+		t.Errorf("duplicated = %d, want 0: a record outside the corpus is not a duplicate", dup)
+	}
+}
+
+// TestPrepareRefusesAJoinWithNoEvidenceItCanWork is the guard on the one error that
+// means two different things. ReadCORD19IDs reports ErrEmptyDataset both when every
+// joinable document is already cached — the normal end of a resumed run — and when
+// the metadata release does not match this corpus at all. Treated as the first, the
+// second writes an asked-and-unjoinable record for every document, build's coverage
+// gate then reads the cache as complete, and the vector and graph arms get published
+// over an index with no vectors and no edges.
+func TestPrepareRefusesAJoinWithNoEvidenceItCanWork(t *testing.T) {
+	const metadata = "cord_uid,doi,pmcid,pubmed_id,s2_id\nx,,,,999\n" // no row for a or b
+	dir := evalDir(t, map[string]string{
+		corpusFile:   twoDocCorpus,
+		metadataFile: metadata,
+	})
+
+	err := prepare(context.Background(), []string{"-data", dir})
+	if err == nil {
+		t.Fatal("prepare succeeded against metadata matching no document in the corpus; it " +
+			"would tombstone the whole corpus and let build publish empty vector and graph arms")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, s2File)); statErr == nil {
+		t.Error("a cache was written for a join that never worked")
+	}
+
+	// The same zero-match answer is the normal end of a resumed run, and the cache is
+	// what tells them apart: a record carrying a CorpusId is evidence the join worked
+	// before, so the remaining keys really are the unjoinable ones.
+	dir = evalDir(t, map[string]string{
+		corpusFile:   twoDocCorpus,
+		metadataFile: metadata,
+		s2File:       `{"key":"a","corpus_id":"100"}` + "\n",
+	})
+	if err := prepare(context.Background(), []string{"-data", dir}); err != nil {
+		t.Fatalf("prepare with prior evidence of a working join: %v", err)
+	}
+	cache, err := scanS2Cache(filepath.Join(dir, s2File))
+	if err != nil {
+		t.Fatalf("scanS2Cache: %v", err)
+	}
+	if !cache.keys["b"] {
+		t.Error("b was not recorded as asked-and-unjoinable, so every rerun rescans the metadata for it")
 	}
 }
 
@@ -172,12 +252,12 @@ func TestReadS2RecordsAcceptsTombstones(t *testing.T) {
 	}
 }
 
-// TestDoneKeysTalliesTheModelsAlreadyCached is the resume regression for embedding
+// TestScanS2CacheTalliesTheModelsAlreadyCached is the resume regression for embedding
 // provenance. The model tally used to live only in the invocation that fetched a
 // batch, so a prepare that died mid-run took the provenance of everything it had
 // written with it, and the run that finished the job reported only its own tail as
 // clean. Two embedding spaces in one cache would then reach build with nothing said.
-func TestDoneKeysTalliesTheModelsAlreadyCached(t *testing.T) {
+func TestScanS2CacheTalliesTheModelsAlreadyCached(t *testing.T) {
 	path := writeCache(t, strings.Join([]string{
 		`{"key":"a","vec":[1,2],"model":"specter_v2"}`,
 		`{"key":"b","vec":[1,2],"model":"specter_v1"}`,
@@ -186,10 +266,11 @@ func TestDoneKeysTalliesTheModelsAlreadyCached(t *testing.T) {
 		"",
 	}, "\n"))
 
-	_, models, _, err := doneKeys(path)
+	cache, err := scanS2Cache(path)
 	if err != nil {
-		t.Fatalf("doneKeys: %v", err)
+		t.Fatalf("scanS2Cache: %v", err)
 	}
+	models := cache.models
 	want := map[string]int{"specter_v2": 1, "specter_v1": 1, "": 1}
 	if len(models) != len(want) {
 		t.Fatalf("models = %v, want %v", models, want)

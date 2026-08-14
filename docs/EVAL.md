@@ -769,6 +769,19 @@ warning that its arms are not publishable. `prepare` also reports the embedding 
 behind every vector *in the whole cache*, not just the batches that run fetched, so an
 interrupted preparation cannot hide two embedding spaces in one index.
 
+Every pairing between two of these inputs is now checked rather than assumed, because
+each pair is two files selected by separate flags and nothing else compares them: the
+index against the cache (coverage, above), the queries against their vectors (section
+5.4 — by text, since ids are stable enough to pair a stale file cleanly), and the index
+against the qrels. The last one has no wrong lookup to catch it: a judged-relevant
+document the index does not hold never appears in a ranking, it just stays in the ideal
+one, so every arm loses the same part of its score and the run reads as a ranking that
+got worse. The coverage gate itself needed one further guard. `prepare` records a key
+for every document it asks about, so a metadata release that joins to nothing would
+have recorded the entire corpus as asked-and-unjoinable and satisfied the gate with a
+cache that never joined once; a zero-match join is now refused unless something already
+in the cache proves the join can work at all.
+
 Bootstrap seed 20260814 and the frozen constants are compiled in, so `make eval`
 reprints the intervals in this document rather than approximations of them.
 

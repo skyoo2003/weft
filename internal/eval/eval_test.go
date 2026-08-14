@@ -206,6 +206,18 @@ func TestEvaluateRejectsMisconfiguration(t *testing.T) {
 			want: ErrForeignDocID,
 		},
 		{
+			// The qrels half of the foreign-id hazard. d9 is judged relevant and not in
+			// testIndex, so it can only raise IDCG: every arm scores lower and the run
+			// still completes, which reads as a worse ranking rather than as the stale
+			// input pairing it is.
+			name: "a judged document from another corpus snapshot is caught, not scored",
+			arm:  Arm{Name: "a", Scorers: []engine.Scorer{ts}, Fuse: fusion.Fuse},
+			qs: []Query{{ID: "q1", Query: engine.Query{Text: "alpha"},
+				Qrels: map[string]int{"d0": 1, "d9": 2}}},
+			k:    3,
+			want: ErrForeignQrelDoc,
+		},
+		{
 			name: "nil fuser is engine's error, not a second copy of the check",
 			arm:  Arm{Name: "a", Scorers: []engine.Scorer{ts}},
 			qs:   okQueries,
@@ -230,6 +242,27 @@ func TestEvaluateRejectsMisconfiguration(t *testing.T) {
 				t.Errorf("Evaluate error = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestEvaluateAllowsAbsentNonRelevantJudgments draws the line the qrels check is
+// on. A judged-nonrelevant document is dropped by idealDCG before it can occupy an
+// ideal slot, so its absence from the index changes no number — rejecting it would
+// fail a run whose measurement is correct, which is the mirror of the mistake the
+// check exists to prevent.
+func TestEvaluateAllowsAbsentNonRelevantJudgments(t *testing.T) {
+	ix := testIndex(t)
+	arm := Arm{Name: "a", Scorers: []engine.Scorer{text.New(ix)}, Fuse: fusion.Fuse}
+	qs := []Query{{ID: "q1", Query: engine.Query{Text: "alpha"},
+		Qrels: map[string]int{"d0": 1, "absent": 0}}}
+
+	run, err := Evaluate(context.Background(), ix, qs, arm, 3)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if run.PerQuery["q1"] != 1.0 {
+		t.Errorf("PerQuery[q1] = %v, want 1.0: d0 ranks first and the absent grade-0 key is not scored",
+			run.PerQuery["q1"])
 	}
 }
 

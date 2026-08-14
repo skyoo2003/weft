@@ -38,6 +38,19 @@ var (
 	// anyway to look it up in qrels. Caught, it is one error; missed, it is an
 	// nDCG computed over keys belonging to other documents.
 	ErrForeignDocID = errors.New("eval: fused DocID is not in this index")
+
+	// ErrForeignQrelDoc reports a relevant judgment naming a document the index
+	// does not hold. It is the qrels half of the same pairing hazard: the index and
+	// the judgments are separate inputs, produced by separate commands, and nothing
+	// but this checks that they describe the same corpus.
+	//
+	// Unlike a foreign DocID, this one cannot surface as a wrong lookup, because the
+	// absent key simply never appears in a ranking. It surfaces as arithmetic: the
+	// grade stays in IDCG, where it raises the denominator by a document no arm can
+	// possibly retrieve, so every arm loses part of its score. The result is the
+	// failure this harness exists to prevent — a run that completes, reports a
+	// plausible number, and reads as a ranking that got worse.
+	ErrForeignQrelDoc = errors.New("eval: judged document is not in this index")
 )
 
 // Arm is one ranking configuration to measure.
@@ -138,6 +151,14 @@ func Evaluate(ctx context.Context, ix *engine.Index, qs []Query, a Arm, k int) (
 		return Run{}, fmt.Errorf("arm %s: %w", a.Name, ErrNoQueries)
 	}
 
+	// Checked once for the whole query set, before the first search, because it is a
+	// property of the inputs rather than of this arm: a stale pairing costs a message
+	// instead of a full sweep over 171K documents. Every arm gets the same answer, so
+	// paying for it per arm is the cost of not having a place to cache it.
+	if err := checkQrels(ix, qs); err != nil {
+		return Run{}, fmt.Errorf("arm %s: %w", a.Name, err)
+	}
+
 	fetch, err := fetchDepth(k, a.Overfetch)
 	if err != nil {
 		return Run{}, fmt.Errorf("arm %s: %w", a.Name, err)
@@ -172,6 +193,40 @@ func Evaluate(ctx context.Context, ix *engine.Index, qs []Query, a Arm, k int) (
 		NDCG:     sum / float64(len(qs)),
 		PerQuery: per,
 	}, nil
+}
+
+// checkQrels rejects a query set whose relevant judgments name documents this
+// index does not hold — a qrels file and an index built from different corpus
+// snapshots, which is one `-data` flag away at every call site.
+//
+// Only positive grades are checked. idealDCG drops everything at or below 0 before
+// sorting, so a judged-nonrelevant document that is absent from the index changes
+// no number and refusing it would fail runs that measure correctly.
+func checkQrels(ix *engine.Index, qs []Query) error {
+	for _, q := range qs {
+		missing, first := 0, ""
+		for key, grade := range q.Qrels {
+			if grade <= 0 {
+				continue
+			}
+			if _, ok := ix.Resolve(key); ok {
+				continue
+			}
+			missing++
+			// Map iteration is randomised, so the smallest key is named rather than
+			// whichever came up first: an error that changes between identical runs is an
+			// error nobody can act on.
+			if first == "" || key < first {
+				first = key
+			}
+		}
+		if missing > 0 {
+			return fmt.Errorf("query %s: %d of its %d judgments are relevant documents this index "+
+				"does not hold (%q is one), so they stay in the ideal ranking that no arm can reach: %w",
+				q.ID, missing, len(q.Qrels), first, ErrForeignQrelDoc)
+		}
+	}
+	return nil
 }
 
 // rankedKeys searches to depth fetch, truncates to k and resolves DocIDs to
