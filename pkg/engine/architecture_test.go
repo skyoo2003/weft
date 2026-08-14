@@ -19,6 +19,7 @@ package engine_test
 
 import (
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -324,7 +325,8 @@ func exportedAPI(t *testing.T, dir string) []string {
 		t.Fatalf("ReadDir(%s): %v", dir, err)
 	}
 	fset := token.NewFileSet()
-	var blocks [][]string
+	var files []*ast.File
+	tags := map[*ast.File]string{}
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -334,6 +336,21 @@ func exportedAPI(t *testing.T, dir string) []string {
 		if err != nil {
 			t.Fatalf("ParseFile(%s): %v", name, err)
 		}
+		files = append(files, f)
+		tags[f] = buildTag(t, dir, name)
+	}
+	if len(files) == 0 {
+		t.Fatalf("%s holds no non-test .go file", dir)
+	}
+
+	// The package clause, once: Go allows a directory only one. It is not
+	// derivable from the directory name and it is what a caller writes. Renaming
+	// package text to package lexical while leaving the directory alone keeps
+	// every declaration below byte-identical and stops text.New from compiling.
+	values := packageValues(files)
+	blocks := [][]string{{"package " + files[0].Name.Name}}
+	for _, f := range files {
+		tag := tags[f]
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
@@ -341,9 +358,9 @@ func exportedAPI(t *testing.T, dir string) []string {
 					continue
 				}
 				if d.Recv == nil {
-					blocks = append(blocks, []string{"func " + d.Name.Name + signature(d.Type)})
+					blocks = append(blocks, []string{"func " + d.Name.Name + signature(d.Type) + tag})
 				} else if recv := receiverName(d.Recv); ast.IsExported(recv) {
-					blocks = append(blocks, []string{"method " + recv + "." + d.Name.Name + signature(d.Type)})
+					blocks = append(blocks, []string{"method " + recv + "." + d.Name.Name + signature(d.Type) + tag})
 				}
 			case *ast.GenDecl:
 				for si, spec := range d.Specs {
@@ -352,12 +369,17 @@ func exportedAPI(t *testing.T, dir string) []string {
 						if !s.Name.IsExported() {
 							continue
 						}
-						blocks = append(blocks, typeAPI(s.Name.Name, s.Assign.IsValid(), s.Type))
+						block := typeAPI(s.Name.Name, s.Assign.IsValid(), s.TypeParams, s.Type)
+						block[0] += tag
+						blocks = append(blocks, block)
 					case *ast.ValueSpec:
 						for i, n := range s.Names {
-							if n.IsExported() {
-								blocks = append(blocks, []string{d.Tok.String() + " " + n.Name + valueAPI(d, si, i)})
+							if !n.IsExported() {
+								continue
 							}
+							api, exprs := valueAPI(d, si, i)
+							line := d.Tok.String() + " " + n.Name + api + expand(exprs, values) + tag
+							blocks = append(blocks, []string{line})
 						}
 					}
 				}
@@ -380,8 +402,11 @@ func exportedAPI(t *testing.T, dir string) []string {
 // up its contract. Member types are recorded alongside member names, because
 // retyping Document.Vector or adding a parameter to Fuser changes what engine
 // promises without changing a single name.
-func typeAPI(name string, alias bool, expr ast.Expr) []string {
-	head := "type " + name
+func typeAPI(name string, alias bool, tparams *ast.FieldList, expr ast.Expr) []string {
+	// A type parameter list is part of the declaration a caller instantiates.
+	// Narrowing Box[T any] to Box[T comparable] stops Box[[]byte] compiling
+	// everywhere it is already written, and nothing below the head would move.
+	head := "type " + name + typeParams(tparams)
 	if alias {
 		// type X = T and type X T are different promises: only the alias lets a
 		// T reach a parameter of type X without a conversion. Dropping the "="
@@ -430,6 +455,15 @@ func typeAPI(name string, alias bool, expr ast.Expr) []string {
 		// Recording method signatures is what makes that cost visible, and
 		// recording embedded interfaces covers the Streamer extension sketched in
 		// docs/FINDINGS.md section 3.1.
+		//
+		// Unexported methods are recorded here where an unexported struct field
+		// is not, and the asymmetry is what a caller can observe. A struct's
+		// first unexported field takes away unkeyed literals and the second
+		// takes nothing more, so one marker says all of it. An interface's first
+		// unexported method takes away implementing it at all — nobody outside
+		// the package can write a method whose name they cannot spell — and
+		// sealing engine.Scorer would end the extension path this repository is
+		// built on without moving a single exported name.
 		out := []string{head + " interface"}
 		for _, m := range t.Methods.List {
 			ft, ok := m.Type.(*ast.FuncType)
@@ -438,9 +472,7 @@ func typeAPI(name string, alias bool, expr ast.Expr) []string {
 				continue
 			}
 			for _, n := range m.Names {
-				if n.IsExported() {
-					out = append(out, "method "+name+"."+n.Name+signature(ft))
-				}
+				out = append(out, "method "+name+"."+n.Name+signature(ft))
 			}
 		}
 		return out
@@ -471,13 +503,24 @@ func typeAPI(name string, alias bool, expr ast.Expr) []string {
 // message is in the golden and editing one trips it. That is the intended
 // reading, not noise: these strings are what a caller sees at runtime, and the
 // same rule that asks whether a signature change costs anything asks it here.
-func valueAPI(d *ast.GenDecl, si, i int) string {
+func valueAPI(d *ast.GenDecl, si, i int) (string, []ast.Expr) {
 	s := d.Specs[si].(*ast.ValueSpec)
+	var (
+		out   string
+		exprs []ast.Expr
+	)
 	if s.Type != nil {
-		return " " + types.ExprString(s.Type)
+		out, exprs = " "+types.ExprString(s.Type), append(exprs, s.Type)
 	}
+	// The type does not stand in for the value once both exist. const K1 float64
+	// = 1.2 becoming 1.3 re-ranks every caller's results and leaves the declared
+	// type exactly where it was, so recording the type alone would let precisely
+	// the change this file is here to catch through.
 	if i < len(s.Values) {
-		return " = " + types.ExprString(s.Values[i])
+		return out + " = " + types.ExprString(s.Values[i]), append(exprs, s.Values[i])
+	}
+	if s.Type != nil {
+		return out, exprs
 	}
 	// A continuation line in a const block, which has neither of its own: it
 	// repeats the last spec that had one, and iota is its position in the block.
@@ -490,19 +533,150 @@ func valueAPI(d *ast.GenDecl, si, i int) string {
 		if !ok || i >= len(prev.Values) {
 			continue
 		}
-		out := " = " + types.ExprString(prev.Values[i]) + " (iota " + strconv.Itoa(si) + ")"
+		out, exprs = " = "+types.ExprString(prev.Values[i])+" (iota "+strconv.Itoa(si)+")", []ast.Expr{prev.Values[i]}
 		if prev.Type != nil {
 			out = " " + types.ExprString(prev.Type) + out
+			exprs = append(exprs, prev.Type)
 		}
-		return out
+		return out, exprs
 	}
-	return ""
+	return "", nil
+}
+
+// packageValues maps each unexported package-level constant and variable to what
+// valueAPI records for it, so expand can follow a reference into one.
+func packageValues(files []*ast.File) map[string]string {
+	out := map[string]string{}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			d, ok := decl.(*ast.GenDecl)
+			if !ok || (d.Tok != token.CONST && d.Tok != token.VAR) {
+				continue
+			}
+			for si, spec := range d.Specs {
+				s, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, n := range s.Names {
+					if n.IsExported() || n.Name == "_" {
+						continue
+					}
+					if api, _ := valueAPI(d, si, i); api != "" {
+						out[n.Name] = strings.TrimSpace(api)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// expand records the unexported package-level values an exported declaration is
+// written in terms of.
+//
+// const RRFk = k puts the number a caller's ranking depends on in k, where
+// nothing exported names it: k goes 60 to 61, every result reorders, and the
+// line above it never moves. Recording k's own declaration alongside it closes
+// that, and it goes one level deep on purpose — a private constant defined from
+// a second private constant is a shape no package here has, and following it
+// would mean deciding what to do about a cycle that Go has already rejected.
+func expand(exprs []ast.Expr, values map[string]string) string {
+	seen := map[string]bool{}
+	var found []string
+	var visit func(ast.Node) bool
+	visit = func(n ast.Node) bool {
+		// The Sel in X.Sel belongs to whatever X is — time.Hour is not this
+		// package's Hour — so only X is worth walking into.
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			ast.Inspect(sel.X, visit)
+			return false
+		}
+		id, ok := n.(*ast.Ident)
+		if !ok || seen[id.Name] {
+			return true
+		}
+		if v, ok := values[id.Name]; ok {
+			seen[id.Name] = true
+			found = append(found, id.Name+" "+v)
+		}
+		return true
+	}
+	for _, e := range exprs {
+		ast.Inspect(e, visit)
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	sort.Strings(found)
+	return " (" + strings.Join(found, "; ") + ")"
+}
+
+// apiContexts are the platforms these goldens describe.
+//
+// Every file here is unconstrained today, so every context takes every file and
+// no declaration carries a marker. The moment one does not, the difference is
+// the point: moving an exported declaration from foo_linux.go to foo_windows.go
+// leaves its text identical while taking the symbol away from every Linux
+// caller, and a golden that treats each non-test .go file as unconditionally
+// importable records that break as no change at all.
+//
+// Three platforms rather than all of them, because the list is what the golden
+// claims to speak for and a claim about platforms nobody builds is not worth the
+// file it is written in. A file excluded from all three is recorded as such.
+var apiContexts = []string{"linux/amd64", "darwin/arm64", "windows/amd64"}
+
+// buildTag marks a file that some apiContexts entry does not take, and is empty
+// for a file all of them take.
+func buildTag(t *testing.T, dir, name string) string {
+	t.Helper()
+	var in []string
+	for _, c := range apiContexts {
+		goos, goarch, _ := strings.Cut(c, "/")
+		// A copy: MatchFile reads GOOS, GOARCH and the tag lists off the context
+		// it is called on, and the point is to ask about a platform other than
+		// the one running the test. CgoEnabled is pinned rather than inherited
+		// for the same reason — an answer that depends on the host machine is
+		// not something a golden can record.
+		ctx := build.Default
+		ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = goos, goarch, false
+		ok, err := ctx.MatchFile(dir, name)
+		if err != nil {
+			t.Fatalf("MatchFile(%s): %v", filepath.Join(dir, name), err)
+		}
+		if ok {
+			in = append(in, c)
+		}
+	}
+	if len(in) == len(apiContexts) {
+		return ""
+	}
+	return " [" + strings.Join(in, " ") + "]"
+}
+
+// typeParams renders a type parameter list, names included: unlike a parameter
+// name, a type parameter's name is written by whoever instantiates the type.
+func typeParams(fl *ast.FieldList) string {
+	if fl == nil || len(fl.List) == 0 {
+		return ""
+	}
+	var out []string
+	for _, f := range fl.List {
+		var names []string
+		for _, n := range f.Names {
+			names = append(names, n.Name)
+		}
+		out = append(out, strings.TrimSpace(strings.Join(names, ", ")+" "+types.ExprString(f.Type)))
+	}
+	return "[" + strings.Join(out, ", ") + "]"
 }
 
 // signature renders a function's parameter and result types, dropping the
 // leading "func" keyword so the line reads "func Search(...) (...)".
 func signature(ft *ast.FuncType) string {
-	s := "(" + strings.Join(fieldTypes(ft.Params), ", ") + ")"
+	// Type parameters come before the parentheses and are the caller's problem
+	// in a way parameter names are not: they decide what may be passed at all.
+	s := typeParams(ft.TypeParams) + "(" + strings.Join(fieldTypes(ft.Params), ", ") + ")"
 	switch res := fieldTypes(ft.Results); len(res) {
 	case 0:
 	case 1:

@@ -12,6 +12,7 @@ method Index.Len() int
 method Index.Lookup(string) []Posting
 method Index.Resolve(string) (DocID, bool)
 method Index.Stats() (int, float64)
+package engine
 type Candidate struct
 field Candidate.Doc DocID
 field Candidate.Score float64
