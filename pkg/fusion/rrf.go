@@ -82,8 +82,12 @@ func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
 // scaling the slice alone turns it into 1:1 — which is Fuse, the one fusion a caller
 // reaching for this function is asking not to get. It is stored as 1:0.5 instead.
 //
-// A weight with no corresponding stream is ignored. Positional coupling cuts both
-// ways: a caller that drops or reorders a scorer without editing its weights gets a
+// A weight with no corresponding stream is ignored, including by the scaling — which
+// is why the scaling cannot happen until the streams arrive. A surplus weight taking
+// part in it is not ignoring it: FuseWeighted(1e-320, math.MaxFloat64) handed a single
+// stream would divide that stream's weight by the unused one, underflow it to 0, and
+// switch off the only stream there was. Positional coupling cuts both ways otherwise:
+// a caller that drops or reorders a scorer without editing its weights gets a
 // different ranking and no complaint, so the two lists belong next to each other at
 // the call site.
 //
@@ -105,9 +109,16 @@ func FuseWeighted(weights ...float64) engine.Fuser {
 	// Cloned because the caller is free to reuse or mutate the slice it passed,
 	// and a Fuser outlives the call that built it.
 	w := slices.Clone(weights)
-	dflt := scaleDown(w)
 	return func(streams [][]engine.Candidate, k int) []engine.Candidate {
-		return fuse(streams, k, w, dflt)
+		// Scaled here rather than above, over only the weights a stream claims: how
+		// many streams there are is not known until now, and a weight past the last
+		// stream is documented as ignored. Cloned again because scaleDown divides in
+		// place and w has to survive as the caller wrote it — a Fuser is reusable,
+		// and a second call with a different stream count would otherwise scale an
+		// already-scaled slice.
+		active := slices.Clone(w[:min(len(w), len(streams))])
+		dflt := scaleDown(active)
+		return fuse(streams, k, active, dflt)
 	}
 }
 

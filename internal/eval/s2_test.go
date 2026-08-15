@@ -108,6 +108,52 @@ func TestParseS2BatchRejectsNonFiniteVector(t *testing.T) {
 	}
 }
 
+// TestParseS2BatchRejectsZeroVector is the other way a present vector is not a vector.
+//
+// The non-finite case above is caught because engine.Add refuses it. An all-zero vector
+// is the opposite: engine.Add takes it, the index stores it, build counts it as
+// coverage, and pkg/scorer/vector then skips the document at query time because a zero
+// norm has no direction. So the arm reports a corpus it covers and never scores it —
+// which reads as a weak vector scorer rather than as a cache full of empty vectors.
+func TestParseS2BatchRejectsZeroVector(t *testing.T) {
+	tests := []struct {
+		name, vec string
+		want      bool
+	}{
+		{"all zero", `[0, 0, 0]`, true},
+		{"signed zero", `[0, -0.0, 0]`, true},
+		// The boundary: one component that survives narrowing to float32 is enough
+		// for a direction, however small. The test is on the vector being zero, not
+		// on it looking small.
+		{"one tiny nonzero", `[0, 1e-30, 0]`, false},
+		{"ordinary", `[0, 2.0, 0]`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`[{"externalIds": {"CorpusId": 1}, "embedding": ` +
+				`{"model": "specter_v2", "vector": ` + tc.vec + `}}]`)
+			got, err := parseS2Batch(raw, 1)
+			if err != nil {
+				t.Fatalf("parseS2Batch: %v", err)
+			}
+			if got[0].VectorRejected != tc.want {
+				t.Errorf("VectorRejected = %v, want %v (vector %s)", got[0].VectorRejected, tc.want, tc.vec)
+			}
+			if tc.want && got[0].Vector != nil {
+				t.Errorf("Vector = %v, want nil: a rejected vector must not also be stored",
+					got[0].Vector)
+			}
+			if !tc.want && got[0].Vector == nil {
+				t.Error("Vector = nil: a usable vector was discarded")
+			}
+			// Either way the paper still contributes its citation edges and its id.
+			if got[0].CorpusID != "1" {
+				t.Errorf("CorpusID = %q, want 1", got[0].CorpusID)
+			}
+		})
+	}
+}
+
 // TestCorpusIDAcceptsNumberAndString pins the reason externalIds is decoded as
 // json.RawMessage: CorpusId arrives as a JSON number while every other identifier
 // is a string, and decoding through map[string]any would render a large id in

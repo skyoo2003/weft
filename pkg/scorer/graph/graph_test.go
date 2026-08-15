@@ -131,6 +131,99 @@ func TestRepeatedSeedVotesOnce(t *testing.T) {
 	}
 }
 
+// TestSeedOrderDoesNotChangeScores is the regression for a ranking that moved when
+// nothing about the graph did.
+//
+// The sum used to accumulate per seed, in the caller's seed order, and float addition
+// is not associative. A document reached at hops {1,1,1,2,3} therefore summed to
+// 2.083333333333333 or 2.0833333333333335 depending on which seed was listed first —
+// so two documents with the same multiset of distances, which the formula says tie,
+// came out unequal and TopK's DocID tiebreak never ran. Permuting Query.Seeds then
+// reordered the result.
+//
+// Bit equality, not a tolerance: the whole failure is in the last bit, and any epsilon
+// wide enough to be a tolerance hides it.
+func TestSeedOrderDoesNotChangeScores(t *testing.T) {
+	// mid and far put one document at three different distances from the five seeds:
+	// three at one hop, one at two, one at three. That is the {½,½,½,⅓,¼} multiset
+	// above, and it needs SeedN seeds and the full MaxDepth to reach.
+	ix := index(t,
+		node{"s0", []string{"target"}},
+		node{"s1", []string{"target"}},
+		node{"s2", []string{"target"}},
+		node{"s3", []string{"mid"}},
+		node{"s4", []string{"far"}},
+		node{"mid", []string{"target"}},
+		node{"far", []string{"near"}},
+		node{"near", []string{"target"}},
+		node{"target", nil},
+	)
+	seeds := []string{"s0", "s1", "s2", "s3", "s4"}
+	target, ok := ix.Resolve("target")
+	if !ok {
+		t.Fatal("target missing from the fixture")
+	}
+
+	want := scores(t, New(ix, nil), engine.Query{Seeds: seeds}, 10)[target]
+	// 3·½ + ⅓ + ¼, summed in hop order, so that the test still means something if
+	// every ordering drifts together. Pinned as a decimal literal rather than as that
+	// expression: Go folds an untyped constant expression at arbitrary precision, and
+	// 25/12 rounded once is 2.0833333333333335, which is not what three float64
+	// roundings of the same terms come to.
+	if want != 2.083333333333333 {
+		t.Errorf("target scored %.17g, want 2.083333333333333 (3/2 + 1/3 + 1/4 by hop)", want)
+	}
+
+	// Every rotation and the reversal. The old accumulation differs from the first
+	// ordering on at least one of these; which one is not the point.
+	for i := range seeds {
+		p := append(append([]string(nil), seeds[i:]...), seeds[:i]...)
+		if got := scores(t, New(ix, nil), engine.Query{Seeds: p}, 10)[target]; got != want {
+			t.Errorf("seeds %v: target scored %.17g, want %.17g — the same distances in a "+
+				"different seed order", p, got, want)
+		}
+	}
+	rev := append([]string(nil), seeds...)
+	for l, r := 0, len(rev)-1; l < r; l, r = l+1, r-1 {
+		rev[l], rev[r] = rev[r], rev[l]
+	}
+	if got := scores(t, New(ix, nil), engine.Query{Seeds: rev}, 10)[target]; got != want {
+		t.Errorf("seeds %v: target scored %.17g, want %.17g", rev, got, want)
+	}
+}
+
+// TestEqualDistanceMultisetsTie is the half of permutation invariance a caller can see.
+//
+// Two documents the same distances from the same seeds have to hold the same float64,
+// or TopK ranks them by a rounding artifact instead of falling through to its DocID
+// tiebreak — the same thing pkg/fusion's rank-major sweep exists to prevent.
+func TestEqualDistanceMultisetsTie(t *testing.T) {
+	// a and b are both {1,1,1,2,3} hops from the seeds, reached through different
+	// seeds at each distance so the per-seed accumulation order differs between them.
+	ix := index(t,
+		node{"s0", []string{"a", "b"}},
+		node{"s1", []string{"a", "b"}},
+		node{"s2", []string{"a", "b"}},
+		node{"s3", []string{"amid", "bfar"}},
+		node{"s4", []string{"afar", "bmid"}},
+		node{"amid", []string{"a"}},
+		node{"bmid", []string{"b"}},
+		node{"afar", []string{"anear"}},
+		node{"bfar", []string{"bnear"}},
+		node{"anear", []string{"a"}},
+		node{"bnear", []string{"b"}},
+		node{"a", nil},
+		node{"b", nil},
+	)
+	got := scores(t, New(ix, nil), engine.Query{Seeds: []string{"s0", "s1", "s2", "s3", "s4"}}, 20)
+	a, _ := ix.Resolve("a")
+	b, _ := ix.Resolve("b")
+	if got[a] != got[b] {
+		t.Errorf("a scored %.17g and b scored %.17g — the same distance multiset must be "+
+			"the same float64, so TopK settles them on DocID", got[a], got[b])
+	}
+}
+
 // TestOneSeedIsUnchangedByTheSum pins backward compatibility: with a single seed the
 // sum has one term, so every score is the nearest-seed value it was before. Most of
 // the rest of this file relies on that.

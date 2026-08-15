@@ -154,7 +154,22 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 	// seed listed twice votes twice and every document it reaches doubles its score.
 	isSeed := make(map[engine.DocID]bool, len(seeds))
 
-	score := make(map[engine.DocID]float64, len(seeds))
+	// Tallied by hop count rather than accumulated as each traversal finishes. Float
+	// addition is not associative, so the order a document's per-seed contributions
+	// arrive in decides its last bit — and that order is the caller's seed order. Two
+	// documents holding the same multiset of distances then get mathematically equal
+	// scores that differ as float64, so TopK's DocID tiebreak never gets to settle
+	// them, and merely permuting Query.Seeds flips which one wins. With SeedN=5 and
+	// MaxDepth=3 that is reachable on a five-seed query: {0.5,0.5,0.5,⅓,0.25} sums to
+	// 2.083333333333333 in one order and 2.0833333333333335 in another.
+	//
+	// Counting the seeds at each distance and summing one term per distance, in
+	// distance order, is the same number by every seed ordering — and the n seeds at
+	// one hop become a single n/(1+hops) rather than n roundings of 1/(1+hops).
+	// pkg/fusion sweeps rank-major for exactly this reason, one level up.
+	//
+	// The array is indexed by hop count, which bfs bounds at MaxDepth.
+	tally := make(map[engine.DocID][MaxDepth + 1]int32, len(seeds))
 	for _, seed := range seeds {
 		if isSeed[seed] {
 			continue
@@ -165,7 +180,9 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 			return nil, err
 		}
 		for id, hops := range dist {
-			score[id] += 1 / float64(1+hops)
+			t := tally[id]
+			t[hops]++
+			tally[id] = t
 		}
 	}
 
@@ -175,13 +192,22 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		return nil, err
 	}
 
-	// Unreachable documents never entered score, so they never appear.
-	cands := make([]engine.Candidate, 0, len(score))
-	for id, sc := range score {
+	// Unreachable documents never entered the tally, so they never appear.
+	cands := make([]engine.Candidate, 0, len(tally))
+	for id, t := range tally {
 		if isSeed[id] && !s.includeSeeds {
 			continue // A seed is not a discovery.
 		}
-		cands = append(cands, engine.Candidate{Doc: id, Score: sc})
+		// Ascending hop order, which is what makes this independent of the order the
+		// seeds were traversed in. Map iteration order is random and does not matter:
+		// each document sums only its own row.
+		var score float64
+		for hops, n := range t {
+			if n > 0 {
+				score += float64(n) / float64(1+hops)
+			}
+		}
+		cands = append(cands, engine.Candidate{Doc: id, Score: score})
 	}
 	return engine.TopK(cands, k), nil
 }

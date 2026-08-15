@@ -360,7 +360,7 @@ func prepare(ctx context.Context, args []string) error {
 	log.Printf("prepare done in %s", time.Since(start).Round(time.Second))
 	log.Printf("  written    %d", fetched)
 	log.Printf("  not found  %d", missing)
-	log.Printf("  vectors    %d (%d rejected as non-finite)", withVec, rejected)
+	log.Printf("  vectors    %d (%d rejected as unusable: non-finite or all zero)", withVec, rejected)
 	reportModels(cache.models)
 	log.Printf("  citing     %d documents, %d edges", withRefs, edges)
 	return nil
@@ -632,7 +632,15 @@ func build(ctx context.Context, args []string) error {
 
 	ix := engine.New()
 	var added, withVec, withLinks, links, dangling, dimSkipped int
-	dim := 0
+
+	// The width every vector is checked against, decided over the whole cache before
+	// a document is indexed rather than by whichever vector the corpus order happens
+	// to present first. Taking the first one makes a single malformed response
+	// authoritative and skips every correct vector behind it — and the build still
+	// commits, so the run goes on to publish a vector arm backed by the one outlier.
+	// That is the same shape as docs/EVAL.md section 4.1: a confident number over a
+	// corpus that is not there.
+	dim, dimTally := dominantDim(recs, corpusKeys)
 
 	err = eval.ReadCorpus(corpusPath, func(d eval.CorpusDoc) error {
 		if err := ctx.Err(); err != nil {
@@ -649,9 +657,6 @@ func build(ctx context.Context, args []string) error {
 		// cache, so on a publishable build every document has a record.
 		if r, cached := recs[d.ID]; cached {
 			if n := len(r.Vector); n > 0 {
-				if dim == 0 {
-					dim = n
-				}
 				if n == dim {
 					doc.Vector = r.Vector
 					withVec++
@@ -687,6 +692,16 @@ func build(ctx context.Context, args []string) error {
 	docs, avgdl := ix.Stats()
 	log.Printf("index: %d documents, avgdl %.1f", docs, avgdl)
 	log.Printf("  vectors    %d (dim %d, %d skipped for width)", withVec, dim, dimSkipped)
+	if len(dimTally) > 1 {
+		// Named rather than merely counted. More than one width in one cache means
+		// more than one embedding space, which is the same measurement failure
+		// reportModels warns about arriving by a different route — and the minority
+		// is skipped, so the vector arm covers fewer documents than the count above
+		// suggests it might.
+		log.Printf("WARNING: %s holds %d vector widths %v; only the %d-dim ones are indexed,",
+			s2Path, len(dimTally), dimTally, dim)
+		log.Printf("WARNING: so %d documents are text-only in a corpus reported as covered.", dimSkipped)
+	}
 	log.Printf("  linked     %d documents, %d in-corpus edges", withLinks, links)
 	log.Printf("  dangling   %d references outside the corpus (skipped at traversal by design)", dangling)
 
@@ -760,6 +775,36 @@ func corpusIDIndex(recs map[string]eval.S2Record, corpus map[string]bool) (map[s
 		byCorpusID[id] = key
 	}
 	return byCorpusID, duplicated, foreign
+}
+
+// dominantDim is the vector width held by the most in-corpus records, and the tally
+// behind it.
+//
+// Only records whose key is in the corpus vote. A cache built for a larger or older
+// corpus can carry vectors for documents that are not here any more, and those are not
+// evidence about the width this build should index at.
+//
+// A tie goes to the narrower width, which is arbitrary and only has to be stable: two
+// builds over one cache have to agree, and a tie means the cache holds two embedding
+// spaces in equal measure, which is a thing for the caller to report rather than a
+// thing to pick well. The zero return for a cache with no vectors at all is the width
+// no record matches, so nothing is indexed with a vector — which is correct, and which
+// the coverage line then shows as 0.
+func dominantDim(recs map[string]eval.S2Record, corpus map[string]bool) (int, map[int]int) {
+	tally := make(map[int]int)
+	for key, r := range recs {
+		if corpus[key] && len(r.Vector) > 0 {
+			tally[len(r.Vector)]++
+		}
+	}
+	best := 0
+	for n, count := range tally {
+		// tally[best] is 0 on the first iteration, so the first width always wins.
+		if count > tally[best] || (count == tally[best] && n < best) {
+			best = n
+		}
+	}
+	return best, tally
 }
 
 func readS2Records(path string) (map[string]eval.S2Record, error) {

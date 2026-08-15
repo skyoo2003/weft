@@ -456,3 +456,60 @@ func TestFuseWeightedUnderflowingWeightSilencesAStream(t *testing.T) {
 		t.Errorf("weight 1e-320 = %v, want [1 2 3 4 5 6]: nothing underflows there", got)
 	}
 }
+
+// TestFuseWeightedSurplusWeightsDoNotScaleTheActiveOnes is the regression for a weight
+// documented as ignored that decided the whole result.
+//
+// scaleDown used to run once in FuseWeighted, over every weight it was handed, because
+// that is the only place the slice was known — the stream count is not. So a weight past
+// the last stream still set the maximum every active weight was divided by. At an
+// ordinary ratio that is invisible, since scaling all the weights scales every score and
+// TopK sorts the same list; past 1e308 it is not, because the division underflows and the
+// stream is switched off by the rule that exists for weights the caller actually zeroed.
+//
+// Both halves are asserted. The surplus weight must not change the result, and the result
+// it must not change has to be non-empty — otherwise the test passes on two empty
+// rankings, which is the bug.
+func TestFuseWeightedSurplusWeightsDoNotScaleTheActiveOnes(t *testing.T) {
+	one := [][]engine.Candidate{weightStreams()[0]}
+
+	want := docs(FuseWeighted(1e-320)(one, 3))
+	if !equal(want, 1, 2, 3) {
+		t.Fatalf("FuseWeighted(1e-320) over one stream = %v, want [1 2 3]", want)
+	}
+	// Every surplus weight is out of reach of the single stream, so each of these is
+	// the fusion above. math.MaxFloat64 is the one that used to underflow it away;
+	// the others are ordinary and are here because "ignored" has to mean ignored at
+	// any magnitude, including the out-of-contract values fuse folds to 0.
+	for _, surplus := range []float64{math.MaxFloat64, 2, 1, 0, -1, math.NaN(), math.Inf(1)} {
+		if got := docs(FuseWeighted(1e-320, surplus)(one, 3)); !equal(got, want...) {
+			t.Errorf("FuseWeighted(1e-320, %v) over one stream = %v, want %v: the second "+
+				"weight has no stream and must not scale the first", surplus, got, want)
+		}
+	}
+}
+
+// TestFuseWeightedIsReusableAcrossStreamCounts pins what moving the scaling into the
+// returned closure has to not break.
+//
+// scaleDown divides in place, so the closure now clones before it scales. Without that
+// the first call would leave the scaled weights behind and the second would scale them
+// again — a Fuser that quietly returns a different ranking the more often it is used,
+// which is the failure mode hardest to find from a search result.
+func TestFuseWeightedIsReusableAcrossStreamCounts(t *testing.T) {
+	streams := weightStreams()
+	fuser := FuseWeighted(1e6, 1e3)
+
+	first := docs(fuser(streams, 6))
+	for i := range 3 {
+		if got := docs(fuser(streams, 6)); !equal(got, first...) {
+			t.Fatalf("call %d = %v, want %v: the Fuser rescaled its own weights", i+2, got, first)
+		}
+	}
+	// And a call with fewer streams in between, which is what now decides how much of
+	// the slice takes part in the scaling.
+	fuser([][]engine.Candidate{streams[0]}, 3)
+	if got := docs(fuser(streams, 6)); !equal(got, first...) {
+		t.Errorf("after a one-stream call = %v, want %v", got, first)
+	}
+}

@@ -65,10 +65,14 @@ type S2Paper struct {
 	// answering with a different one puts two embedding spaces in one corpus.
 	Model string
 
-	// VectorRejected records that a vector was present but not usable — a
-	// non-finite component, which engine.Add refuses outright. Distinguishing it
-	// from "no vector" matters when reporting vector coverage: one is the API
-	// having nothing, the other is us discarding something.
+	// VectorRejected records that a vector was present but not usable, in either of
+	// the two ways it can be: a non-finite component, which engine.Add refuses
+	// outright, or every component zero, which engine.Add accepts and
+	// pkg/scorer/vector then skips for having no direction. Distinguishing this from
+	// "no vector" matters when reporting vector coverage: one is the API having
+	// nothing, the other is us discarding something. Counting either as coverage
+	// would be worse than both — a document the vector arm is measured over and
+	// never scores.
 	VectorRejected bool
 }
 
@@ -164,6 +168,7 @@ func parseS2Batch(raw []byte, n int) ([]*S2Paper, error) {
 			// caller tallies the label and says so.
 			p.Model = e.Model
 			v := make([]float32, len(e.Vector))
+			var nonzero bool
 			for j, c := range e.Vector {
 				// Checked after the narrowing, not before. encoding/json already
 				// refuses a number outside float64, so a non-finite float64 cannot
@@ -173,12 +178,27 @@ func parseS2Batch(raw []byte, n int) ([]*S2Paper, error) {
 				// rejects, and one of them would abort a 171K-document build.
 				f := float32(c)
 				if math.IsNaN(float64(f)) || math.IsInf(float64(f), 0) {
-					v, p.VectorRejected = nil, true
+					v = nil
 					break
+				}
+				if f != 0 {
+					nonzero = true
 				}
 				v[j] = f
 			}
-			p.Vector = v
+			// An all-zero vector is rejected alongside the non-finite ones, and for
+			// the opposite reason: engine.Add takes it happily, and pkg/scorer/vector
+			// then skips the document at query time because a zero norm has no
+			// direction to compare against. Kept, it is a vector that counts toward
+			// build's coverage and toward nothing else — which is how a text+vector
+			// arm gets published over a corpus whose vector stream has almost no
+			// opinions, reading as a weak scorer rather than as absent data. That is
+			// docs/EVAL.md section 4.1 again, one layer down. Rejected, it lands in
+			// the count prepare already prints for the vectors it discarded.
+			if !nonzero {
+				v = nil
+			}
+			p.Vector, p.VectorRejected = v, v == nil
 		}
 		out[i] = p
 	}

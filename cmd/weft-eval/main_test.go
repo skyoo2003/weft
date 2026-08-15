@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/skyoo2003/weft/internal/eval"
+	"github.com/skyoo2003/weft/pkg/engine"
 )
 
 // writeCache writes s to a temporary s2.jsonl and returns its path.
@@ -477,6 +478,92 @@ func TestBuildAcceptsATombstoneOnlyCache(t *testing.T) {
 	})
 	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
 		t.Fatalf("build over a complete tombstone-only cache: %v", err)
+	}
+}
+
+// TestDominantDimIgnoresAnOutlierAndForeignRecords covers the two rules that decide
+// which width a build indexes at, before any document is tokenised.
+func TestDominantDimIgnoresAnOutlierAndForeignRecords(t *testing.T) {
+	vec := func(n int) eval.S2Record {
+		return eval.S2Record{Vector: make([]float32, n)}
+	}
+	tests := []struct {
+		name   string
+		recs   map[string]eval.S2Record
+		corpus []string
+		want   int
+	}{
+		{"one outlier does not win", map[string]eval.S2Record{
+			"a": vec(2), "b": vec(768), "c": vec(768),
+		}, []string{"a", "b", "c"}, 768},
+		{"a record outside the corpus does not vote", map[string]eval.S2Record{
+			"gone": vec(2), "a": vec(768),
+		}, []string{"a"}, 768},
+		{"a record with no vector does not vote", map[string]eval.S2Record{
+			"a": {}, "b": vec(768),
+		}, []string{"a", "b"}, 768},
+		// Stable rather than clever: a tie means two embedding spaces in equal
+		// measure, and what matters is that two builds over one cache agree.
+		{"a tie takes the narrower width", map[string]eval.S2Record{
+			"a": vec(2), "b": vec(768),
+		}, []string{"a", "b"}, 2},
+		{"no vectors at all", map[string]eval.S2Record{"a": {}}, []string{"a"}, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			corpus := make(map[string]bool, len(tc.corpus))
+			for _, k := range tc.corpus {
+				corpus[k] = true
+			}
+			// Run it a few times: recs is a map, so a rule that depended on
+			// iteration order would pass intermittently rather than fail.
+			for range 8 {
+				if got, _ := dominantDim(tc.recs, corpus); got != tc.want {
+					t.Fatalf("dominantDim = %d, want %d", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildIndexesTheDominantVectorWidth is the same rule end to end, in the shape that
+// makes it matter.
+//
+// The width used to be whichever vector the corpus order presented first. One malformed
+// response ahead of an otherwise uniform corpus therefore became authoritative, every
+// correct vector behind it was skipped for width — and build still committed, so the run
+// went on to publish a vector arm backed by the single outlier.
+func TestBuildIndexesTheDominantVectorWidth(t *testing.T) {
+	dir := evalDir(t, map[string]string{
+		// "bad" is first in corpus order, which is the whole point.
+		corpusFile: `{"_id":"bad","title":"one","text":"alpha"}` + "\n" +
+			`{"_id":"x","title":"two","text":"beta"}` + "\n" +
+			`{"_id":"y","title":"three","text":"gamma"}` + "\n",
+		s2File: `{"key":"bad","vec":[1]}` + "\n" +
+			`{"key":"x","vec":[1,0,0]}` + "\n" +
+			`{"key":"y","vec":[0,1,0]}` + "\n",
+	})
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	ix, err := engine.Open(filepath.Join(dir, indexDir))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for key, want := range map[string]int{"x": 3, "y": 3, "bad": 0} {
+		id, ok := ix.Resolve(key)
+		if !ok {
+			t.Fatalf("%s is not in the index", key)
+		}
+		doc, ok := ix.Doc(id)
+		if !ok {
+			t.Fatalf("Doc(%s): not found", key)
+		}
+		if len(doc.Vector) != want {
+			t.Errorf("%s has a %d-dim vector, want %d: the majority width is what gets "+
+				"indexed, not the first one seen", key, len(doc.Vector), want)
+		}
 	}
 }
 
