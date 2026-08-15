@@ -51,10 +51,15 @@ func section(t *testing.T, segDir, name string, kind byte) *segReader {
 		t.Fatalf("OpenRoot(%s): %v", segDir, err)
 	}
 	defer root.Close()
-	r, err := openSection(root, name, kind)
+	r, b, err := openSection(root, name, kind, false)
 	if err != nil {
 		t.Fatalf("openSection(%s): %v", name, err)
 	}
+	// The mapping outlives the test that reads through it. Unmapping at the end
+	// of the subtest would be tidier and would also turn any slice still
+	// pointing into the region into a segmentation fault rather than a test
+	// failure, which is a bad trade in a test.
+	t.Cleanup(func() { unmapFile(b) }) //nolint:errcheck // test teardown
 	return r
 }
 

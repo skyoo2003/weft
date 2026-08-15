@@ -695,6 +695,17 @@ func segmentFiles(t *testing.T, dir string) []string {
 	return files
 }
 
+// The two exhaustive sweeps below now ask Scrub rather than Open, and the
+// change is the milestone's, not a weakening. Open no longer computes a
+// section's whole-file checksum — that read is the cost lazy loading exists to
+// remove — so the promise "any damage anywhere is ErrCorrupt" moved to the call
+// that still reads everything. What Open promises is narrower and is asserted
+// separately in lazy_test.go: damage inside a unit it touches is refused.
+//
+// One flip shows the difference exactly. A byte flip in the version field used
+// to report ErrCorrupt, because the checksum ran first and caught it before the
+// version was read; on the lazy path it reports ErrBadVersion, because nothing
+// has told the reader those bytes are damaged. Scrub still calls it corruption.
 func TestEveryByteFlipIsCaught(t *testing.T) {
 	dir, _ := commitTiny(t)
 	for _, path := range segmentFiles(t, dir) {
@@ -708,7 +719,7 @@ func TestEveryByteFlipIsCaught(t *testing.T) {
 			if err := os.WriteFile(path, b, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+			if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("%s byte %d flipped: got %v, want ErrCorrupt",
 					filepath.Base(path), i, err)
 			}
@@ -730,7 +741,7 @@ func TestEveryTruncationIsCaught(t *testing.T) {
 			if err := os.WriteFile(path, orig[:n], 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+			if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("%s truncated to %d bytes: got %v, want ErrCorrupt",
 					filepath.Base(path), n, err)
 			}

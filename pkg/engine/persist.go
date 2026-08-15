@@ -192,7 +192,61 @@ func Open(dir string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}
-	segRoot, err := root.OpenRoot(segs[0])
+	ix, err := loadSegment(root, segs[0], false)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", segs[0], err)
+	}
+	return ix, nil
+}
+
+// Scrub verifies every byte of the last committed generation in dir and reports
+// the first thing wrong with it.
+//
+// It exists because Open stopped doing this. Milestone 2 verified an index
+// completely on every Open and got it for free, since Open read every byte
+// anyway; a lazy reader does not, and cannot verify what it never loads. The
+// checks did not go away, they split — the frame header and meta at Open, each
+// record, block and entry against its own checksum as it is touched, and
+// everything here.
+//
+// The gap that leaves is worth stating plainly: a unit nothing ever reads is
+// never verified. Rot in a document no query reaches will sit there until
+// somebody runs this. Scrub is what a caller runs after a suspicious crash, on
+// a schedule, or before trusting a copied directory — not on the hot path.
+//
+// It reports ErrCorrupt for damage, ErrBadVersion for a format this build does
+// not read, and fs.ErrNotExist for a directory with no manifest, exactly as
+// Open does.
+func Scrub(dir string) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("scrub %s: %w", dir, err)
+	}
+	defer root.Close()
+
+	_, segs, err := readManifest(root)
+	if err != nil {
+		return fmt.Errorf("scrub %s: %w", dir, err)
+	}
+	for _, seg := range segs {
+		if _, err := loadSegment(root, seg, true); err != nil {
+			return fmt.Errorf("scrub %s: %w", seg, err)
+		}
+	}
+	return nil
+}
+
+// loadSegment reads one segment directory into an Index. frame says whether to
+// compute each section's whole-file checksum — the one check whose cost is the
+// size of the index, and therefore the single difference between what Open does
+// and what Scrub does.
+//
+// Both paths run every other check. A segment that loads here has had its
+// documents, postings, block metadata and both seek sections re-derived and
+// compared against what the file records; frame only adds the ability to notice
+// damage in bytes no decoder reads.
+func loadSegment(root *os.Root, seg string, frame bool) (*Index, error) {
+	segRoot, err := root.OpenRoot(seg)
 	if err != nil {
 		// Same reasoning as openSection: the manifest named it, so a segment
 		// that is missing — or is a plain file standing where its directory
@@ -202,49 +256,61 @@ func Open(dir string) (*Index, error) {
 		// genuinely there and still will not open is the filesystem refusing
 		// us, not corruption, and reports as itself. Lstat, not Stat, for the
 		// reason openSection gives: Stat follows the link in question.
-		fi, serr := root.Lstat(segs[0])
+		fi, serr := root.Lstat(seg)
 		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.IsDir()) {
-			return nil, fmt.Errorf("open %s: the manifest names this segment but no directory stands there: %w", segs[0], ErrCorrupt)
+			return nil, fmt.Errorf("the manifest names this segment but no directory stands there: %w", ErrCorrupt)
 		}
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
+		return nil, err
 	}
 	defer segRoot.Close()
 
 	rs := make([]*segReader, len(segSections))
-	for i, s := range segSections {
-		if rs[i], err = openSection(segRoot, s.name, s.kind); err != nil {
-			return nil, fmt.Errorf("open %s: %w", segs[0], err)
+	// Every mapping is released before this returns. The decoders below copy
+	// what they keep — segReader.str allocates a string, vectors are built with
+	// make — so nothing in the returned Index points into a region that is
+	// about to be gone. That stops being true the moment the index reads
+	// lazily, and the mappings will have to outlive this function then.
+	maps := make([][]byte, 0, len(segSections))
+	defer func() {
+		for _, b := range maps {
+			unmapFile(b) //nolint:errcheck,gosec // nothing left to do about it here
 		}
+	}()
+	for i, s := range segSections {
+		r, b, err := openSection(segRoot, s.name, s.kind, frame)
+		if err != nil {
+			return nil, err
+		}
+		maps = append(maps, b)
+		rs[i] = r
 	}
 	metaR, docsR, postR, termsR, docoffR, keysR := rs[0], rs[1], rs[2], rs[3], rs[4], rs[5]
 
 	docCount, totalLen, vecDim, err := decodeMeta(metaR)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
+		return nil, err
 	}
 	ix, err := decodeDocs(docsR)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
+		return nil, err
 	}
 	// The seek sections are checked against the documents they claim to index.
-	// Nothing in this eager path reads them afterwards — Open still decodes
-	// every record — so without this they would be write-only until milestone
-	// 3's lazy reader arrives and discovers they have been wrong all along.
-	// That is D-001's rot problem in a new place, and it gets D-001's answer:
-	// the decoder re-derives what the section records and refuses a
-	// disagreement. Milestone 3 moves the cost into Scrub, not out of
-	// existence.
+	// Nothing on this path reads them afterwards — the index is still decoded
+	// eagerly — so without this they would be write-only until the lazy reader
+	// arrives and discovers they have been wrong all along. That is D-001's rot
+	// problem in a new place, and it gets D-001's answer: re-derive what the
+	// section records and refuse a disagreement.
 	if err := verifySeekSections(docoffR, keysR, docsR, ix); err != nil {
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
+		return nil, err
 	}
 	// meta is the statistics snapshot BM25 trusts, so it does not get to
 	// disagree with the documents it describes.
 	if docCount != len(ix.docs) || totalLen != ix.totalLen || vecDim != ix.vecDim {
-		return nil, fmt.Errorf("open %s: meta says %d docs/%d tokens/%d dims, documents hold %d/%d/%d: %w",
-			segs[0], docCount, totalLen, vecDim, len(ix.docs), ix.totalLen, ix.vecDim, ErrCorrupt)
+		return nil, fmt.Errorf("meta says %d docs/%d tokens/%d dims, documents hold %d/%d/%d: %w",
+			docCount, totalLen, vecDim, len(ix.docs), ix.totalLen, ix.vecDim, ErrCorrupt)
 	}
 	if err := decodePostings(postR, termsR, ix); err != nil {
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
+		return nil, err
 	}
 	return ix, nil
 }

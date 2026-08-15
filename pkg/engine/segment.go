@@ -591,24 +591,103 @@ func (r *segReader) done() error {
 // the very link that made the read fail: it either resolves out of the root and
 // fails too, leaving a planted symlink reported as a raw path error, or it
 // resolves to a regular file and calls the link one.
-func openSection(root *os.Root, name string, kind byte) (*segReader, error) {
-	b, err := root.ReadFile(name)
+// frame says whether to compute the whole-file checksum first. It runs before
+// the header is parsed, and that order is the point: parseSection carried the
+// same rule for the same reason — a flipped bit in the version byte must not
+// masquerade as ErrBadVersion. On the lazy path nobody computes the checksum,
+// so that flip does report a wrong version, and Scrub is what calls it damage.
+func openSection(root *os.Root, name string, kind byte, frame bool) (*segReader, []byte, error) {
+	f, err := root.Open(name)
 	if err != nil {
 		fi, serr := root.Lstat(name)
 		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.Mode().IsRegular()) {
-			return nil, fmt.Errorf("%s: the manifest names this segment but no section file stands here: %w", name, ErrCorrupt)
+			return nil, nil, fmt.Errorf("%s: the manifest names this segment but no section file stands here: %w", name, ErrCorrupt)
 		}
-		return nil, err
+		return nil, nil, err
 	}
-	return parseSection(name, b, kind)
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	// A directory opens and then fails to Stat as a regular file, so the kind
+	// question is asked here as well as above: root.Open succeeds on a
+	// directory on some platforms and the read is what fails.
+	if !fi.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s: the manifest names this segment but no section file stands here: %w", name, ErrCorrupt)
+	}
+	if fi.Size() > int64(maxInt) {
+		return nil, nil, fmt.Errorf("%s: %d bytes does not fit in memory on this platform: %w", name, fi.Size(), ErrCorrupt)
+	}
+
+	b, err := mapFile(f, int(fi.Size()))
+	if err != nil {
+		return nil, nil, err
+	}
+	// The descriptor closes on return and the mapping outlives it, which is
+	// what mmap promises: the region stays valid until it is unmapped, and on
+	// POSIX it also survives the file being unlinked. That is what lets Commit
+	// prune a generation an open reader is still holding.
+	if frame {
+		if err := verifyFrame(name, b); err != nil {
+			unmapFile(b) //nolint:errcheck,gosec // the error path already has one
+			return nil, nil, err
+		}
+	}
+	r, err := parseFrame(name, b, kind)
+	if err != nil {
+		unmapFile(b) //nolint:errcheck,gosec // the error path already has one
+		return nil, nil, err
+	}
+	return r, b, nil
 }
 
-// parseSection verifies a file's frame. The order of checks is deliberate:
-// magic first, so a file that was never weft's reads as corrupt rather than
-// as a version problem; CRC second, so a flipped bit in the version byte
-// cannot masquerade as ErrBadVersion; version third, once the bytes are known
-// intact; kind last, catching intact files standing in the wrong place.
+// parseSection verifies a file's frame, checksum included. The order of checks
+// is deliberate: magic first, so a file that was never weft's reads as corrupt
+// rather than as a version problem; CRC second, so a flipped bit in the version
+// byte cannot masquerade as ErrBadVersion; version third, once the bytes are
+// known intact; kind last, catching intact files standing in the wrong place.
+//
+// The manifest is read through here and stays that way — it is a handful of
+// bytes and every Open reads all of them. Segment sections are not: verifying
+// their checksum means reading every byte, so they go through parseFrame and
+// their whole-file check belongs to Scrub. See verifyFrame.
 func parseSection(name string, b []byte, kind byte) (*segReader, error) {
+	if err := verifyFrame(name, b); err != nil {
+		return nil, err
+	}
+	return parseFrame(name, b, kind)
+}
+
+// verifyFrame computes a file's whole-file checksum.
+//
+// Split out of parseSection because it is the one check whose cost is the size
+// of the file. Milestone 2 could afford it on every Open; milestone 3 cannot,
+// and moving it here rather than deleting it is what keeps Scrub able to make
+// the same promise on request.
+//
+// It runs before the version is read, which is why parseFrame's callers can be
+// handed a file whose version byte is damaged and report ErrBadVersion for what
+// is really corruption. That is a real consequence of the split: on the lazy
+// path a flipped version byte is a wrong version until Scrub says otherwise.
+func verifyFrame(name string, b []byte) error {
+	if len(b) < segHeaderLen+crc32.Size {
+		return fmt.Errorf("%s: %d bytes is shorter than the file frame: %w", name, len(b), ErrCorrupt)
+	}
+	if !bytes.Equal(b[:len(segMagic)], segMagic) {
+		return fmt.Errorf("%s: bad magic: %w", name, ErrCorrupt)
+	}
+	body := b[:len(b)-crc32.Size]
+	if crc32.Checksum(body, segCRC) != binary.LittleEndian.Uint32(b[len(b)-crc32.Size:]) {
+		return fmt.Errorf("%s: checksum mismatch: %w", name, ErrCorrupt)
+	}
+	return nil
+}
+
+// parseFrame validates a file's header — magic, version, kind — and returns a
+// reader over its payload, without computing the whole-file checksum.
+func parseFrame(name string, b []byte, kind byte) (*segReader, error) {
 	if len(b) < segHeaderLen+crc32.Size {
 		return nil, fmt.Errorf("%s: %d bytes is shorter than the file frame: %w", name, len(b), ErrCorrupt)
 	}
@@ -616,9 +695,6 @@ func parseSection(name string, b []byte, kind byte) (*segReader, error) {
 		return nil, fmt.Errorf("%s: bad magic: %w", name, ErrCorrupt)
 	}
 	body := b[:len(b)-crc32.Size]
-	if crc32.Checksum(body, segCRC) != binary.LittleEndian.Uint32(b[len(b)-crc32.Size:]) {
-		return nil, fmt.Errorf("%s: checksum mismatch: %w", name, ErrCorrupt)
-	}
 	v, n := binary.Uvarint(body[len(segMagic):])
 	if n <= 0 || len(segMagic)+n+1 > len(body) {
 		return nil, fmt.Errorf("%s: unreadable version: %w", name, ErrCorrupt)

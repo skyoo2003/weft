@@ -1,5 +1,6 @@
 func New() *Index
 func Open(string) (*Index, error)
+func Scrub(string) error
 func Search(context.Context, Query, int, Fuser, ...Scorer) ([]Candidate, error)
 func Tokenize(string) []string
 func TopK([]Candidate, int) []Candidate
