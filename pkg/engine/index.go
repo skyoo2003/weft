@@ -113,7 +113,23 @@ func (ix *Index) lookupAt(term string) []Posting {
 	}
 	var out []Posting
 	for _, s := range ix.segs {
-		out = append(out, s.lookup(term)...)
+		// Each segment that claims the term has to answer, and the terms index
+		// is what says which do. Appending whatever came back let a damaged
+		// posting block in one segment drop its documents out of every ranking
+		// while the segments beside it made the result look whole — a shorter
+		// list is not a shorter answer, it is a wrong one. Merge already refuses
+		// on exactly this ground; this is the same rule where a query reads.
+		if _, claimed := s.terms[term]; !claimed {
+			continue
+		}
+		pl := s.lookup(term)
+		if pl == nil {
+			// Nil for the whole lookup, pending included: a partial answer with
+			// the newest documents grafted on is still a partial answer, and
+			// absence is what D-006 gives corruption on this path.
+			return nil
+		}
+		out = append(out, pl...)
 	}
 	if out == nil {
 		return pending
@@ -248,8 +264,15 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// leaving ix.vecDim set to the width of a document that was never stored
 	// would make Commit write a meta the docs file cannot back — a segment that
 	// commits and then refuses to reopen.
-	if uint64(ix.base)+uint64(len(ix.docs)) >= math.MaxUint32 {
-		return 0, fmt.Errorf("add %q: index is full at %d documents", d.Key, uint64(math.MaxUint32))
+	// Against maxDocCount, which is the narrower of DocID's width and this
+	// platform's int, and the number every decoder ranges a count against. On a
+	// 64-bit build the two are the same. On a 32-bit one they are not, and
+	// comparing against DocID's width alone let an index of maxInt documents
+	// take another: Len and Stats overflowed, and the Commit after it published
+	// a manifest readManifest refuses — a writer call that succeeds and leaves
+	// an index that cannot be reopened.
+	if uint64(ix.base)+uint64(len(ix.docs)) >= uint64(maxDocCount) {
+		return 0, fmt.Errorf("add %q: index is full at %d documents", d.Key, maxDocCount)
 	}
 
 	if len(d.Vector) > 0 {

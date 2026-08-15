@@ -226,7 +226,23 @@ func (k keyTable) at(i int) (string, DocID, error) {
 	if off < segHeaderLen || off-segHeaderLen > uint64(len(k.b)) {
 		return "", 0, fmt.Errorf("%s: key %d sits at offset %d, outside the section: %w", k.name, i, off, ErrCorrupt)
 	}
-	r := &segReader{name: k.name, b: k.b, off: int(off - segHeaderLen)}
+	// The entry bounds its own key length, the way docoff bounds a document
+	// record — and here there is nothing else at all: a keys entry carries no
+	// checksum, and Open does not verify this section's frame either. So the
+	// length below is a number with nothing whatever behind it, and handed the
+	// rest of the section it asks for a string the size of the keys file. The
+	// next entry's offset is where this one stops, and the table is fixed width,
+	// so asking is arithmetic.
+	end := uint64(len(k.b))
+	if i+1 < k.n {
+		next := binary.LittleEndian.Uint64(k.tab[(i+1)*docoffWidth:])
+		if next < off || next-segHeaderLen > uint64(len(k.b)) {
+			return "", 0, fmt.Errorf("%s: key %d runs from %d to %d, which is not an entry: %w",
+				k.name, i, off, next, ErrCorrupt)
+		}
+		end = next - segHeaderLen
+	}
+	r := &segReader{name: k.name, b: k.b[:end], off: int(off - segHeaderLen)}
 	key, err := r.str("key")
 	if err != nil {
 		return "", 0, err
