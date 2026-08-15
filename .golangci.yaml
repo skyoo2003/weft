@@ -133,6 +133,51 @@ linters:
           - goconst
         path: cmd/weft/main\.go$
 
+      # The eval harness's subcommands are branchy for one reason: almost every
+      # branch is a refusal. prepare and build are the two commands docs/EVAL.md
+      # section 4.1 exists because of — a run that completed, reported a
+      # plausible number, and had measured a corpus that was 40% absent — and
+      # the answer to that was a guard per way the inputs can disagree, each one
+      # placed at the step whose result it invalidates. Splitting them to reach
+      # 20 moves the guards away from what they guard, which is the property
+      # that makes them readable as a sequence. Complexity here is the check
+      # count, not tangled control flow. funlen counts the same guards a second
+      # time, so it is paired here exactly as it is on segment.go above.
+      - linters:
+          - gocyclo
+          - funlen
+        path: cmd/weft-eval/(main|run)\.go$
+
+      # Same shape one layer down, and the same argument as pkg/engine/segment.go
+      # above: ReadCORD19IDs is a streaming pass over a 1.6 GB CSV whose column
+      # set differs between CORD-19 releases, so its branches are checks on a
+      # file weft did not write.
+      - linters:
+          - gocyclo
+          - funlen
+        path: internal/eval/dataset\.go$
+
+      # G404 asks for crypto/rand, which would destroy the thing this file is
+      # for. The paired bootstrap resamples from a seed docs/EVAL.md publishes so
+      # that a confidence interval can be re-derived years later; an
+      # unpredictable source makes every published interval unreproducible. The
+      # numbers are resample indices, not secrets.
+      - linters:
+          - gosec
+        text: "G404"
+        path: internal/eval/bootstrap\.go$
+
+      # G304 is about a path an attacker chooses. Every one of these is built from
+      # the operator's own -data flag on a local research command, and names a
+      # file they downloaded or that an earlier subcommand wrote — there is no
+      # other party here to defend against, and the harness ships no server and
+      # no API. pkg/ is where a path weft did not choose arrives, and this rule
+      # does not reach it.
+      - linters:
+          - gosec
+        text: "G304"
+        path: (internal/eval|cmd/weft-eval)/
+
 formatters:
   enable:
     - gci

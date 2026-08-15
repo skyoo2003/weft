@@ -1,0 +1,175 @@
+{
+  "generated_by": "rank_bm25 0.2.2 BM25Okapi with weft's IDF substituted",
+  "k1": 1.2,
+  "b": 0.75,
+  "idf_form": "ln(1 + (N - n + 0.5)/(n + 0.5))",
+  "idf_substituted": true,
+  "tokenizer": "re.findall(r'[a-z0-9]+', s.lower()) \u2014 ASCII-equivalent to engine.Tokenize",
+  "avgdl": 4.25,
+  "note": "Ground truth for pkg/scorer/text. Verifies term frequency saturation, length normalisation, avgdl and the sum over query occurrences. The IDF expression itself is substituted rather than compared \u2014 see the module docstring in gen_bm25_reference.py.",
+  "corpus": [
+    {
+      "key": "d0",
+      "text": "alpha beta gamma"
+    },
+    {
+      "key": "d1",
+      "text": "alpha alpha alpha beta"
+    },
+    {
+      "key": "d2",
+      "text": "beta gamma delta epsilon zeta"
+    },
+    {
+      "key": "d3",
+      "text": "alpha"
+    },
+    {
+      "key": "d4",
+      "text": "beta delta"
+    },
+    {
+      "key": "d5",
+      "text": "gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi beta"
+    },
+    {
+      "key": "d6",
+      "text": "epsilon zeta eta"
+    },
+    {
+      "key": "d7",
+      "text": "omicron pi rho"
+    }
+  ],
+  "queries": [
+    {
+      "id": "q_single_rare",
+      "text": "lambda",
+      "tokens": [
+        "lambda"
+      ],
+      "scores": {
+        "d0": 0.0,
+        "d1": 0.0,
+        "d2": 0.0,
+        "d3": 0.0,
+        "d4": 0.0,
+        "d5": 0.9725951255316294,
+        "d6": 0.0,
+        "d7": 0.0
+      }
+    },
+    {
+      "id": "q_single_common",
+      "text": "beta",
+      "tokens": [
+        "beta"
+      ],
+      "scores": {
+        "d0": 0.5598364906582827,
+        "d1": 0.5046197408947259,
+        "d2": 0.45931722051514967,
+        "d3": 0.0,
+        "d4": 0.6286218615241468,
+        "d5": 0.26732395562637884,
+        "d6": 0.0,
+        "d7": 0.0
+      }
+    },
+    {
+      "id": "q_two_terms",
+      "text": "alpha beta",
+      "tokens": [
+        "alpha",
+        "beta"
+      ],
+      "scores": {
+        "d0": 1.633479778519919,
+        "d1": 2.007720343901017,
+        "d2": 0.45931722051514967,
+        "d3": 1.3744305124765697,
+        "d4": 0.6286218615241468,
+        "d5": 0.26732395562637884,
+        "d6": 0.0,
+        "d7": 0.0
+      }
+    },
+    {
+      "id": "q_repeated_term",
+      "text": "alpha alpha beta",
+      "tokens": [
+        "alpha",
+        "alpha",
+        "beta"
+      ],
+      "scores": {
+        "d0": 2.7071230663815555,
+        "d1": 3.5108209469073084,
+        "d2": 0.45931722051514967,
+        "d3": 2.7488610249531393,
+        "d4": 0.6286218615241468,
+        "d5": 0.26732395562637884,
+        "d6": 0.0,
+        "d7": 0.0
+      }
+    },
+    {
+      "id": "q_unknown_term",
+      "text": "alpha sigma",
+      "tokens": [
+        "alpha",
+        "sigma"
+      ],
+      "scores": {
+        "d0": 1.0736432878616364,
+        "d1": 1.5031006030062912,
+        "d2": 0.0,
+        "d3": 1.3744305124765697,
+        "d4": 0.0,
+        "d5": 0.0,
+        "d6": 0.0,
+        "d7": 0.0
+      }
+    },
+    {
+      "id": "q_long",
+      "text": "gamma delta epsilon zeta eta",
+      "tokens": [
+        "gamma",
+        "delta",
+        "epsilon",
+        "zeta",
+        "eta"
+      ],
+      "scores": {
+        "d0": 1.0736432878616364,
+        "d1": 0.0,
+        "d2": 3.5234777227578897,
+        "d3": 0.0,
+        "d4": 1.2055585041176737,
+        "d5": 2.745985232262302,
+        "d6": 3.6034241386497534,
+        "d7": 0.0
+      }
+    },
+    {
+      "id": "q_punctuated",
+      "text": "Alpha, BETA!  gamma?",
+      "tokens": [
+        "alpha",
+        "beta",
+        "gamma"
+      ],
+      "scores": {
+        "d0": 2.7071230663815555,
+        "d1": 2.007720343901017,
+        "d2": 1.340186651204622,
+        "d3": 1.3744305124765697,
+        "d4": 0.6286218615241468,
+        "d5": 0.7799925212381038,
+        "d6": 0.0,
+        "d7": 0.0
+      }
+    }
+  ]
+}

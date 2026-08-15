@@ -35,9 +35,9 @@ func main() {
 
 	txt := text.New(ix)
 
-	// The whole point is this slice. Search and fusion.Fuse do not know how
-	// many scorers are in it, or what any of them are. Add a fifth here and
-	// nothing else in weft changes.
+	// The whole point is this slice. Search and the fuser do not know how many
+	// scorers are in it, or what any of them are. Add a fifth here and nothing
+	// else in weft changes.
 	scorers := []engine.Scorer{
 		txt,
 		vector.New(ix),
@@ -47,7 +47,14 @@ func main() {
 
 	q := engine.Query{Text: "fusion ranks", Vector: []float32{1, 0, 0}}
 
-	results, err := engine.Search(context.Background(), q, 3, fusion.Fuse, scorers...)
+	// One weight per stream, by position. The third entry discounts the graph
+	// scorer, which milestone 4 measured as contributing nothing — see its package
+	// documentation. Note what this still does not require: the fuser is handed a
+	// number for slot three, not the knowledge that slot three is a graph scorer.
+	// Plain fusion.Fuse is this same call with every weight at 1.
+	fuse := fusion.FuseWeighted(1, 1, 0.1, 1)
+
+	results, err := engine.Search(context.Background(), q, 3, fuse, scorers...)
 	if err != nil {
 		log.Fatal("search: ", err)
 	}

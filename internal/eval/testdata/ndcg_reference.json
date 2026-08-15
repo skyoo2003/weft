@@ -1,0 +1,212 @@
+{
+  "measure": "ndcg_cut_10",
+  "k": 10,
+  "generated_by": "pytrec_eval-terrier 0.5.10 (trec_eval)",
+  "note": "Ground truth for internal/eval.NDCG. Regenerate with gen_ndcg_reference.py; see that file for why each case exists. A case with ndcg == null was skipped by trec_eval entirely.",
+  "cases": [
+    {
+      "name": "perfect",
+      "why": "ideal order scores exactly 1.0 whatever the gain function is",
+      "qrels": {
+        "a": 2,
+        "b": 1,
+        "c": 0
+      },
+      "run": [
+        "a",
+        "b",
+        "c"
+      ],
+      "ndcg": 1.0
+    },
+    {
+      "name": "swapped_grades",
+      "why": "discriminates exponential gain from linear: 0.7967 vs 0.8597",
+      "qrels": {
+        "a": 2,
+        "b": 1
+      },
+      "run": [
+        "b",
+        "a"
+      ],
+      "ndcg": 0.8597186998521972
+    },
+    {
+      "name": "unjudged_at_top",
+      "why": "an unjudged doc at rank 1 must push a and b down a slot, not vanish",
+      "qrels": {
+        "a": 2,
+        "b": 1
+      },
+      "run": [
+        "x",
+        "a",
+        "b"
+      ],
+      "ndcg": 0.66967181649423
+    },
+    {
+      "name": "judged_zero_at_top",
+      "why": "judged-irrelevant must behave identically to unjudged_at_top",
+      "qrels": {
+        "a": 2,
+        "b": 1,
+        "z": 0
+      },
+      "run": [
+        "z",
+        "a",
+        "b"
+      ],
+      "ndcg": 0.66967181649423
+    },
+    {
+      "name": "all_unjudged",
+      "why": "retrieving nothing judged is 0.0, not an error",
+      "qrels": {
+        "a": 1
+      },
+      "run": [
+        "x",
+        "y",
+        "z"
+      ],
+      "ndcg": 0.0
+    },
+    {
+      "name": "no_relevant",
+      "why": "IDCG == 0. trec_eval's answer here is the one we cannot guess",
+      "qrels": {
+        "a": 0,
+        "b": 0
+      },
+      "run": [
+        "a",
+        "b"
+      ],
+      "ndcg": 0.0
+    },
+    {
+      "name": "short_run",
+      "why": "IDCG counts relevant docs we never retrieved: 1/2.1309",
+      "qrels": {
+        "a": 1,
+        "b": 1,
+        "c": 1
+      },
+      "run": [
+        "a"
+      ],
+      "ndcg": 0.46927872602275644
+    },
+    {
+      "name": "relevant_at_11",
+      "why": "rank 11 is past the cut and must contribute nothing",
+      "qrels": {
+        "a": 1
+      },
+      "run": [
+        "x1",
+        "x2",
+        "x3",
+        "x4",
+        "x5",
+        "x6",
+        "x7",
+        "x8",
+        "x9",
+        "x10",
+        "a"
+      ],
+      "ndcg": 0.0
+    },
+    {
+      "name": "relevant_at_10",
+      "why": "the boundary the case above brackets: rank 10 does count",
+      "qrels": {
+        "a": 1
+      },
+      "run": [
+        "x1",
+        "x2",
+        "x3",
+        "x4",
+        "x5",
+        "x6",
+        "x7",
+        "x8",
+        "x9",
+        "a"
+      ],
+      "ndcg": 0.2890648263178879
+    },
+    {
+      "name": "ideal_beyond_k",
+      "why": "IDCG truncated at k, else nDCG can never reach 1.0 on a deep pool",
+      "qrels": {
+        "r0": 2,
+        "r1": 1,
+        "r2": 2,
+        "r3": 1,
+        "r4": 2,
+        "r5": 1,
+        "r6": 2,
+        "r7": 1,
+        "r8": 2,
+        "r9": 1,
+        "r10": 2,
+        "r11": 1
+      },
+      "run": [
+        "r0",
+        "r1",
+        "r2",
+        "r3",
+        "r4",
+        "r5",
+        "r6",
+        "r7",
+        "r8",
+        "r9"
+      ],
+      "ndcg": 0.9001748668698196
+    },
+    {
+      "name": "graded_mixed",
+      "why": "the realistic shape: grades, zeros and unjudged interleaved",
+      "qrels": {
+        "a": 2,
+        "b": 0,
+        "c": 1,
+        "d": 2,
+        "e": 0,
+        "f": 1
+      },
+      "run": [
+        "b",
+        "a",
+        "x",
+        "f",
+        "e",
+        "d"
+      ],
+      "ndcg": 0.5736266550895543
+    },
+    {
+      "name": "negative_grade",
+      "why": "a -1 grade must behave as 0, matching unjudged_at_top exactly",
+      "qrels": {
+        "a": 2,
+        "n": -1,
+        "b": 1
+      },
+      "run": [
+        "n",
+        "a",
+        "b"
+      ],
+      "ndcg": 0.66967181649423
+    }
+  ]
+}

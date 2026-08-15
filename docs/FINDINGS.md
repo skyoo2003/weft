@@ -176,8 +176,8 @@ The general fix is for `DocID` to carry its namespace, which milestone 2 needs a
 
 ---
 
-<!-- Two top-level headings on purpose. This file is an append-only log of
-     milestone reports, each its own document with its own verdict; demoting
+<!-- More than one top-level heading on purpose. This file is an append-only log
+     of milestone reports, each its own document with its own verdict; demoting
      them under a single title would imply one report with sections, and a
      later milestone would then be filed under a conclusion it did not reach. -->
 <!-- markdownlint-disable-next-line MD025 -->
@@ -269,3 +269,295 @@ version 128 would be a format change anyway.
    torn-write test harness, not a stronger sentence.
 4. Successive commits churn the whole directory (write new generation, delete
    old). Fine at in-memory scale; incremental segments make it moot.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 4 — Quality
+
+**Verdict: the graph signal does not improve ranking quality.** The PRD's second
+falsification condition is met and answered *no*. Under equal-weight fusion it costs
+0.1227 nDCG@10, and no fusion weight in the tested grid makes it worth anything: the best delta available
+is exactly +0.0000. Measurement design and full numbers: [EVAL.md](EVAL.md).
+
+**The larger finding is about fusion, not about graphs.** That −0.1227 was RRF's equal
+vote, not the graph's information — halving the graph stream's weight erases all but
+0.0019 of the regression (§7). Unweighted rank fusion makes a substantive ranking
+decision silently on every query, and its cost here was two orders of magnitude larger
+than anything the graph signal was ever worth.
+
+| Arm | nDCG@10 |
+| --- | --- |
+| `text` | 0.5826 |
+| `text+vector` | **0.6233** ← best |
+| `text+graph` | 0.3985 |
+| `text+vector+graph` | 0.5005 |
+| `text+vector+graph-including-seeds` | 0.5451 |
+
+| Comparison | Delta | 95% CI |
+| --- | --- | --- |
+| `text+vector+graph` − `text+vector` | **−0.1227** | [−0.1550, −0.0909] |
+| `text+vector` − `text` | +0.0407 | [+0.0010, +0.0798] |
+
+TREC-COVID, 50 queries, 171,332 documents, 579,719 in-corpus citation edges, 148,232
+SPECTER2 vectors. Paired bootstrap, 10,000 resamples, seed 20260814. 28-configuration
+sweep over `RRFk` and over-fetch: **0 sign flips, negative throughout.**
+
+---
+
+## 1. Result
+
+**Assertion 1 — the metric agreed with the outside world before any arm was run.**
+nDCG matches `pytrec_eval`'s `ndcg_cut_10` on 12 fixtures built to discriminate; BM25
+matches `rank_bm25` to 4.44e-16 once the IDF form is explicitly aligned. The second
+closes the PRD Success Metrics row "correctness floor", which no milestone had claimed
+until now.
+
+That check paid for itself immediately: **the plan's nDCG definition was wrong.** It
+specified exponential gain `2^rel − 1` on the stated grounds that this matched what
+BEIR reports. `trec_eval` uses linear gain. On qrels `{a:2, b:1}` ranked `[b, a]` the
+two give 0.8597 and 0.7967, and every ranking that is already ideal scores 1.0 under
+both — which is why it needed a fixture designed to separate them rather than a happy
+path. Publishing on a scale nobody else uses would have made every number here
+incomparable to the literature it was meant to be read against.
+
+**Assertion 2 — the harness does not know what a graph scorer is.** An `eval.Arm` is a
+name, a `[]engine.Scorer`, an `engine.Fuser` and a depth. `Evaluate` branches on none
+of them; five arms differ only in the contents of a slice. The milestone 1 claim holds
+one level up from the engine, which is where it would have been cheapest to quietly
+break.
+
+**Assertion 3 — the graph signal regresses, robustly.** −0.1227 against the
+pre-registered baseline, CI far from zero, sign stable across 28 configurations of that
+same pair — over-fetch to depth 100, rank constants from 1 to 200 — with the interval
+excluding zero in every one of them.
+
+## 2. What the architecture bought, in numbers
+
+**Two sweeps needed no library change.** Varying the RRF rank constant is a local
+`engine.Fuser` passed to `Search`; `pkg/fusion` is untouched. Over-fetching turned out
+to need nothing at all — `Fuse` scores a document from its ranks alone and passes `k`
+only to `TopK`, so `Fuse(streams, k*m)[:k]` equals `Fuse(streams, k)`, asserted across
+k ∈ [1,5] and m ∈ {2,3,10}. The `ponytail:` marker at `search.go:112` that named
+milestone 4 as its repayment trigger is **withdrawn rather than repaid**: the ceiling
+it described was reachable from outside all along ([D-004](DECISIONS.md)).
+
+**Half of one check the engine cannot make became free.** `Search` documents an
+unchecked precondition — every scorer must read the same index, because `DocID` is
+index-relative (milestone 1 §3.4) — and checking it there would need a method asking a
+scorer which index it holds, the one change that breaks every implementation. The
+harness resolves every fused `DocID` to a key anyway, so it gets a bound check for
+nothing and returns `ErrForeignDocID`. A bound check only: IDs are dense from zero, so a
+foreign index of similar size returns IDs that resolve here to unrelated documents and
+produce a plausible nDCG over the wrong keys. §3.4 stays open; this narrows it.
+
+**Milestone 2 was exercised on a real corpus for the first time.** 171,332 documents
+committed in 2.2 s, reopened in 979 ms, document count and average length matching.
+Until now restore equivalence had only run on fixtures.
+
+**And the honest counterweight: none of that made the fourth signal *good*.** Adding a
+signal is cheap to wire — milestone 1 proved it and this harness re-proved it at the
+evaluation layer. Wiring is not quality. The PRD's hypothesis is about the cost of
+*adding* a signal and remains true as stated; this milestone is the reminder that a
+cheap-to-add signal can still be worth less than nothing.
+
+## 3. Why the graph signal failed, mechanically
+
+`1/(1+hops)` with `MaxDepth = 3` gives a non-seed candidate three possible values. On
+this corpus the hop-1 frontier averages 41 documents per query, so the whole top ten
+sat at 0.5 and `engine.TopK`'s tiebreak — `DocID`, i.e. corpus insertion order — chose
+which ten. **Every one of the 45 queries the graph could answer at all was ranking by
+an accident of indexing**, 2,082 slots of it.
+
+The plan predicted this as a High risk and named the minimal fix in advance: sum
+per-seed distances instead of taking the nearest, so documents several seeds agree on
+rise. Implemented, tested, and measured before and after as the plan required.
+
+**It did not work.** Only 28.1% of documents have an in-corpus out-edge, so two seeds
+almost never cite the same paper and the sum almost always has one non-zero term. 3
+distinct scores per query is still the modal case, 41 of 45 answering queries still
+have their stream's membership decided by `DocID`, and the arm moved +0.037 — an order
+of magnitude short of the 0.12 it needed.
+
+So the stream carries almost no ordering, and unweighted RRF gives its arbitrary top
+ten the same vote as BM25's. Query 40 falls from a perfect 1.0000 to 0.6321 and query
+24 from 0.9149 to 0.4819. This is not dilution, it is displacement.
+
+**The double-counting control earned its place twice.** At 5% graph coverage, with a
+traversal returning literally nothing, `including-seeds` showed +0.1021 with a CI
+excluding zero — an "improvement" that was purely text getting a second vote. Without
+that arm in the table it would have read as graph proximity working. Milestone 1 §2.3
+predicted the inflation; this is what it looks like. Post-fix it regresses too, at
+−0.0769, which rules out the harness being rigged against the traversal.
+
+## 4. The methodological failures worth recording
+
+Two, both caught after publication, both the same shape: a statistic answering the
+question it was asked while the thing that actually moved the number sat outside its
+scope.
+
+### 4.1 A confident interval on an incomplete corpus
+
+[EVAL.md](EVAL.md) section 4.1 documents a finding this milestone published to itself
+and then withdrew. At 27% vector coverage, `text+vector` measured 0.3200 against `text`
+at 0.5826, and that was written up as a substantive result about unweighted rank
+fusion — with a 95% interval of [−0.3058, −0.2178]. Narrow, nowhere near zero, and
+completely wrong. At 86.5% coverage the same comparison is **+0.0407**.
+
+The bootstrap was not broken. It quantifies sampling noise across queries, which is all
+it claims to do, and it has nothing to say about whether the corpus is complete. Two
+reference implementations were wired in specifically to stop us trusting an unverified
+metric, and the same class of error landed one level out anyway — in the data rather
+than the instrument. Every arm number now carries the coverage it was measured at.
+
+### 4.2 A reproducible measurement on a non-reproducible build
+
+Found by review of the milestone's own pull request, after the numbers were published.
+
+`weft-eval build` inverted the Semantic Scholar cache into `CorpusId → cord_uid` by
+ranging over a Go map. The mapping is not injective — CORD-19 ships the same paper
+under several `cord_uid`s, and **20,556 of 162,837 records with a CorpusId collide** —
+so randomised map iteration chose a different winner on every build. Two builds from
+the identical cache disagreed on **2,571 to 9,377 of 142,281 CorpusIds**, up to 6.6% of
+the citation graph. The edge *count* was identical every time, 579,720, which is why
+the build log looked stable and nothing downstream noticed.
+
+Everything guarding this measurement was pointed elsewhere. The bootstrap resamples
+queries against one index. The seed is pinned so the *resampling* reproduces. The
+28-configuration sweep varies fusion, not the corpus. `make eval` reprints the numbers
+faithfully — from whichever graph the last build happened to produce. A pipeline that
+is nondeterministic upstream is invisible to all four.
+
+The verdict survived: −0.1156 became −0.1202, same sign, interval still far from zero,
+still 0 sign flips. What did not survive was §7's headline. The graph's best case under
+any fusion weight was published as +0.0018 and is **+0.0000** — a figure smaller than
+the run-to-run spread of the graph it was measured on, and the one number in this
+document a reader might have taken as a reason to keep the scorer.
+
+**A later round of the same review moved it again, by one edge.** A reference naming
+the same `CorpusId` twice, or resolving back to the citing document, was written as two
+links and counted as two edges; the traversal walked neither. Deduplicating them
+removes exactly **one** edge from this snapshot — 579,720 becomes 579,719 — and the
+binding delta moves from −0.1202 to **−0.1227**. That a single adjacency is worth
+0.0025 nDCG is §5's degeneracy seen from the other side: 241 of the reported slots are
+held at a cut score 960 further candidates are excluded from by `DocID` alone, so one
+changed edge re-decides a whole tie group. The verdict is robust and
+the third decimal of a graph arm is not; [EVAL.md](EVAL.md) section 5.13 carries the
+full re-measurement.
+
+The fix is four lines: iterate in sorted key order, keep the first, print the collision
+count. The check that would have caught it is cheaper still — build twice, compare the
+bytes — and is now in the repository as a unit test on `corpusIDIndex` and as a command
+in [EVAL.md](EVAL.md) section 7. **A harness whose purpose is reproducibility had never
+been asked to reproduce anything.**
+
+## 5. Known costs
+
+### 5.1 The verdict is about one construction, not about graphs
+
+Falsified: BFS hop distance, seeded from the text top 5, fused by unweighted RRF, over
+a citation graph where 74.5% of references dangle. Not falsified: that graph structure
+carries ranking signal. A continuous score (personalised PageRank, random-walk
+probability — milestone 1 §5) or a fusion operator with per-stream weights would each
+attack a different part of the mechanism in §3, and neither was in scope.
+
+This distinction is load-bearing for what happens next, and it is also the most
+convenient thing this document could say — which is why the evidence for it is stated
+as mechanism rather than as hope: on most queries the stream demonstrably carries 3
+distinct scores across thousands of candidates.
+
+### 5.2 Unweighted fusion has no way to discount a weak stream — measured, see §7
+
+RRF reads ranks and nothing else, deliberately: knowing a stream's reliability means
+knowing which scorer produced it, which is the coupling milestone 1 exists to prevent.
+The cost is now measured, and it turned out to be the largest effect in this
+milestone. §7 has the numbers.
+
+### 5.3 Judgment bias points toward this verdict
+
+Unjudged documents count as grade 0 *and* consume rank slots, so a signal whose purpose
+is surfacing documents assessors never saw is structurally penalised. TREC-COVID's
+493.5 judgments per query was chosen to mitigate this and does not eliminate it. The
+direction is unfavourable to the graph and the verdict is negative, so this cannot be
+used to defend the number — but a future positive result on a shallower dataset would
+have to account for it.
+
+### 5.4 `MaxDepth` and `SeedN` were never swept
+
+The sweep covered `RRFk` and over-fetch. `SeedN=5` and `MaxDepth=3` stayed frozen, and
+turning them into `New` parameters was deferred rather than done. Given the frontier is
+already too wide at depth 1, widening it further is not the obvious remedy — but it is
+unmeasured, and this is where that is recorded.
+
+## 6. Carried forward
+
+1. **`fusion.FuseWeighted` shipped** — per-stream weights indexed by position, with
+   `Fuse` unchanged and bit-identical on its unweighted path. This milestone's largest
+   measured effect, repaid into the library rather than left as a note (§7).
+2. **`pkg/scorer/graph` is kept, marked, and not deleted.** The verdict says the signal
+   is worthless and the PRD says worthless signals go; §7 then showed the scorer is
+   inert rather than harmful, and that the harm belonged to fusion. Deleting it would
+   also cut the milestone 1 assertions from four signals to three, which the PRD did
+   not price. Its package doc now opens with the measurement and the instruction to
+   weight it down. The full argument, including the case against this choice, is
+   [D-005](DECISIONS.md).
+3. **`internal/eval` outlives the graph.** Any future signal inherits a harness, a
+   verified metric, a judgment rule fixed in advance and committed reference goldens.
+   That is the durable output.
+4. **`search.go:112`'s over-fetch marker is withdrawn**, not repaid (§2).
+
+## 7. Weighted fusion — the thing this milestone actually found
+
+Sections 3 and 5.10 of [EVAL.md](EVAL.md) rule out the rank constant and fusion depth
+as explanations for the graph arm's regression — 28 configurations of each, on the
+binding pair, no sign flip and no interval reaching zero. Both change how ranks are
+damped, not how much each stream counts; depth narrows the gap to 0.0218 at its closest
+and does it by lifting the baseline as much as the graph arm. So the equal vote itself was tested: a `Fuser` variant
+multiplying each stream by a weight, text and vector held at 1.0, only the graph
+stream moving.
+
+| Graph stream weight | nDCG@10 | Delta vs `text+vector` | 95% CI |
+| --- | --- | --- | --- |
+| 1.0 | 0.5005 | **−0.1227** | [−0.1550, −0.0909] |
+| 0.5 | 0.6214 | −0.0019 | [−0.0057, +0.0000] |
+| 0.25 | 0.6214 | −0.0019 | [−0.0057, +0.0000] |
+| ≤ 0.1 | 0.6233 | +0.0000 | [+0.0000, +0.0000] — converged to baseline |
+
+**Halving one weight erased 0.118 of a 0.120 regression.** The graph stream was never
+destroying rankings; RRF was giving it ten slots it had not earned. Equal weighting is
+not a neutral default — it is a ranking decision made silently on every query, and on
+this corpus it was worth two orders of magnitude more than the signal being evaluated.
+
+**Weights do not compromise scorer-agnosticism.** They index by *position in the
+stream list*, and the caller already fixed that order when it passed scorers to
+`Search`. The fuser still never learns what produced a stream. The first pass was run
+without touching `pkg/fusion` at all — a weighted variant local to `cmd/weft-eval`,
+injected as an `engine.Fuser`, the same mechanism the RRF-constant sweep uses — which
+is what established that the library needed no change to answer the question. The
+table above is not from that copy. Once the result was worth publishing, the variant
+moved into `pkg/fusion` as `FuseWeighted` and `weft-eval weights` now calls it, so the
+reproducible command and the shipped API are the same code.
+
+**It does not rescue the graph.** No weight beats the baseline. From 0.1 downward the
+arm *is* the baseline — delta exactly zero, interval a point at zero — meaning the
+graph stream is being fused and changes no ranking any query is scored on.
+Down-weighting a near-noise stream stops it doing harm; it does not make it
+informative. The verdict in §1 stands, with its reason corrected: not "graph proximity
+is harmful" but "graph proximity, as constructed here, is not information."
+
+An earlier revision of this table reported +0.0018 at weight 0.1 and called it the
+graph's best case. That number came from a build whose citation graph varied between
+runs (§4.2) and was smaller than that variation. It is now +0.0000.
+
+**Shipped as `fusion.FuseWeighted`.** Weights are variadic and positional, `Fuse` is
+unchanged, and the unweighted path is bit-identical — multiplying by 1.0 is exact, so
+no ranking pinned by the milestone 1 or 2 tests moved. Weight 0 removes a stream
+entirely rather than leaving its documents at score 0 holding ranks they did not
+earn; that was a real bug, caught by the test written for it.
+
+**The open question it leaves.** Where should weights come from? Hand-tuning per
+corpus reintroduces exactly the per-deployment burden a scorer-agnostic design exists
+to avoid, and that is the strongest objection to this API existing at all. Learning
+them from relevance judgments is a different project. `FuseWeighted`'s documentation
+says plainly that a caller with no measurement of its own should use `Fuse`, which is
+the honest position until one of those is settled.
