@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -114,20 +115,42 @@ var segSections = []segSection{
 // writing
 // ---------------------------------------------------------------------------
 
-// segWriter accumulates one framed section file and writes it out, fsynced,
-// on close. Buffering the whole section in memory is fine by construction —
-// the section describes an index that is itself entirely in memory — and it
-// is what makes the running offset exact for the terms index.
+// segWriter streams one framed section file to disk, fsynced on close.
+//
+// An earlier version accumulated the whole section in memory and wrote it at
+// the end, on the grounds that the section describes an index which is itself
+// entirely in memory. Merge is what retires that argument: it reads segments
+// from disk and writes a segment to disk, and the corpus it moves is precisely
+// the one that does not fit. Nothing about a merge needs the result in RAM, so
+// the writer must not insist on it.
+//
+// Two things the buffer used to provide for free are kept explicitly. n is the
+// running byte count, which is what off() returns and what the terms index and
+// both v2 offset tables record; and crc is the running frame checksum, folded
+// forward as bytes leave rather than computed over a finished buffer.
+//
+// err holds the first write failure and every method after it is a no-op, so
+// the encoders stay free of error plumbing and close reports once — the same
+// contract the buffered version had.
 type segWriter struct {
 	f   *os.File
-	buf []byte
+	w   *bufio.Writer
+	n   int    // bytes emitted, frame header included
+	crc uint32 // running frame checksum
+	err error  // first write error; close reports it
 
 	// unit is the running checksum of the unit currently open — see beginUnit.
-	// The frame checksum below covers the whole file, which means verifying it
+	// The frame checksum above covers the whole file, which means verifying it
 	// costs a full read; these cover one record, block or entry each, so a
 	// reader that touches one can check one.
 	unit   uint32
 	inUnit bool
+
+	// scratch backs varint encoding and the chunked string checksum. A fixed
+	// array on the struct, so neither allocates: crc32.Update needs a []byte
+	// and converting a document's text to one would copy every byte of the
+	// corpus, which is the cost this type was just rewritten to stop paying.
+	scratch [512]byte
 }
 
 // newSegWriter creates name under root, exclusively. Two guards, because the
@@ -148,39 +171,72 @@ func newSegWriter(root *os.Root, name string, kind byte) (*segWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &segWriter{f: f}
-	w.buf = append(w.buf, segMagic...)
-	w.buf = binary.AppendUvarint(w.buf, formatVersion)
-	w.buf = append(w.buf, kind)
+	// 32 KiB rather than bufio's 4 KiB default: a segment writes six of these
+	// at once, so the buffers together stay under 200 KiB while cutting the
+	// write syscalls per section by eight.
+	w := &segWriter{f: f, w: bufio.NewWriterSize(f, 1<<15)}
+	w.write(segMagic)
+	w.uvarint(formatVersion)
+	w.scratch[0] = kind
+	w.write(w.scratch[:1])
 	return w, nil
 }
 
-func (w *segWriter) write(b []byte) { n := len(w.buf); w.buf = append(w.buf, b...); w.emitted(n) }
-func (w *segWriter) uvarint(v uint64) {
-	n := len(w.buf)
-	w.buf = binary.AppendUvarint(w.buf, v)
-	w.emitted(n)
+// write emits b, folding it into the frame checksum and into the open unit's.
+// Every other encoder funnels through here or through writeString, so a unit
+// cannot be left half covered by someone adding a fifth encoder beside them.
+func (w *segWriter) write(b []byte) {
+	if w.err != nil {
+		return
+	}
+	w.crc = crc32.Update(w.crc, segCRC, b)
+	if w.inUnit {
+		w.unit = crc32.Update(w.unit, segCRC, b)
+	}
+	n, err := w.w.Write(b)
+	w.n += n
+	w.err = err
 }
+
+// writeString emits s without turning it into a byte slice.
+//
+// crc32.Update takes []byte and bufio can take the string directly, so the
+// checksum is run over a fixed scratch buffer in chunks. []byte(s) would be
+// correct and would allocate a second copy of every document's text — the
+// whole corpus, once, per commit.
+func (w *segWriter) writeString(s string) {
+	if w.err != nil {
+		return
+	}
+	for i := 0; i < len(s); i += len(w.scratch) {
+		n := copy(w.scratch[:], s[i:])
+		w.crc = crc32.Update(w.crc, segCRC, w.scratch[:n])
+		if w.inUnit {
+			w.unit = crc32.Update(w.unit, segCRC, w.scratch[:n])
+		}
+	}
+	n, err := w.w.WriteString(s)
+	w.n += n
+	w.err = err
+}
+
+// The varint encoders share the scratch array rather than declaring a local
+// one. A local escapes — write hands the slice to bufio, and escape analysis
+// cannot see that bufio copies it — so a ten-byte allocation lands on every
+// call. That is per posting, twice, which on a corpus of any size is the
+// dominant allocation in a commit: measured at 35 MB writing an 8.8 MB segment.
+// Reuse is safe because nothing here retains the bytes past the Write.
+func (w *segWriter) uvarint(v uint64) {
+	w.write(w.scratch[:binary.PutUvarint(w.scratch[:], v)])
+}
+
 func (w *segWriter) varint(v int64) {
-	n := len(w.buf)
-	w.buf = binary.AppendVarint(w.buf, v)
-	w.emitted(n)
+	w.write(w.scratch[:binary.PutVarint(w.scratch[:], v)])
 }
 
 func (w *segWriter) str(s string) {
-	n := len(w.buf)
-	w.buf = binary.AppendUvarint(w.buf, uint64(len(s)))
-	w.buf = append(w.buf, s...)
-	w.emitted(n)
-}
-
-// emitted folds the bytes appended since offset n into the open unit's
-// checksum. Every write funnels through it so a unit cannot be left half
-// covered by someone adding a fourth encoder next to the three above.
-func (w *segWriter) emitted(n int) {
-	if w.inUnit {
-		w.unit = crc32.Update(w.unit, segCRC, w.buf[n:])
-	}
+	w.uvarint(uint64(len(s)))
+	w.writeString(s)
 }
 
 // beginUnit opens a checksummed unit, binding seed into it before any content.
@@ -199,31 +255,43 @@ func (w *segWriter) beginUnit(seed uint64) {
 }
 
 // endUnit seals the unit with its checksum. The checksum bytes are outside the
-// unit they seal, so inUnit is cleared before they are written.
+// unit they seal, so inUnit is cleared before they are written — but they are
+// inside the frame, so they still go through write.
 func (w *segWriter) endUnit() {
 	c := w.unit
 	w.inUnit = false
-	w.buf = binary.LittleEndian.AppendUint32(w.buf, c)
+	binary.LittleEndian.PutUint32(w.scratch[:4], c)
+	w.write(w.scratch[:4])
 }
 
 // off is the absolute file offset of the next byte written, header included.
-func (w *segWriter) off() int { return len(w.buf) }
+func (w *segWriter) off() int { return w.n }
 
 // close seals the frame with its checksum and flushes to disk. The Sync is
 // not optional: the manifest rename publishes this file, and a rename can
 // survive a crash that unsynced contents did not — a manifest pointing at
 // hollow files is exactly the mixed state Commit promises cannot exist.
+//
+// The frame checksum is written straight to the buffered writer rather than
+// through write, because it cannot cover itself.
 func (w *segWriter) close() error {
-	w.buf = binary.LittleEndian.AppendUint32(w.buf, crc32.Checksum(w.buf, segCRC))
-	if _, err := w.f.Write(w.buf); err != nil {
-		w.f.Close()
-		return err
+	if w.err == nil {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], w.crc)
+		_, w.err = w.w.Write(b[:])
 	}
-	if err := w.f.Sync(); err != nil {
-		w.f.Close()
-		return err
+	if w.err == nil {
+		w.err = w.w.Flush()
 	}
-	return w.f.Close()
+	if w.err == nil {
+		w.err = w.f.Sync()
+	}
+	// Close runs either way: a failed write still leaves a descriptor open.
+	cerr := w.f.Close()
+	if w.err != nil {
+		return w.err
+	}
+	return cerr
 }
 
 // writeSegment lays the index down as one segment: meta, docs, postings and
@@ -232,8 +300,15 @@ func (w *segWriter) close() error {
 // Everything is encoded under a single read lock, so the statistics in meta
 // and the documents they describe cannot come from different moments — the
 // atomicity FINDINGS section 4.4 asked for, statistics snapshot included.
-// Only the in-memory encoding happens under the lock; the disk writes in
-// close run after it is released.
+//
+// ponytail: the writer streams, so the disk writes now happen inside that read
+// lock rather than after it — Add waits for the commit, where before it waited
+// only for the encode. Queries are unaffected; they take the same read lock.
+// The ceiling is one writer blocked for the length of a full-corpus write, and
+// the trigger that removes it is milestone 3's incremental commit, after which
+// a commit writes only what was added since the last one. Buying it back
+// earlier would mean handing the encoders a snapshot to write from, which is
+// the whole-section buffer this writer was rewritten to stop keeping.
 func (ix *Index) writeSegment(segRoot *os.Root) error {
 	ws := make([]*segWriter, len(segSections))
 	for i, s := range segSections {

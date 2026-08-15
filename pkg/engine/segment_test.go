@@ -629,14 +629,22 @@ func TestCommitDoesNotBufferTheSegment(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds an 8 MB corpus")
 	}
-	// 2,000 documents of roughly 4 KB. Distinct tokens per document, so the
-	// postings and terms sections are substantial too rather than one term
-	// repeated.
+	// 2,000 documents of roughly 4 KB drawn from a 400-word vocabulary: many
+	// bytes, few distinct terms.
+	//
+	// The vocabulary is deliberately small, and that is the measurement rather
+	// than a way of passing it. What this test claims is that allocation does
+	// not track the segment's *bytes*. encodePostings also sorts the term set,
+	// which allocates with the size of the vocabulary and not with the corpus —
+	// a real cost, a different one, and not the writer's. Merge will not go
+	// through encodePostings at all; it merges term streams that are already
+	// sorted on disk. Mixing the two into one number would leave this test
+	// unable to say which of them moved.
 	ix := New()
 	for i := range 2000 {
 		var sb strings.Builder
 		for j := range 400 {
-			fmt.Fprintf(&sb, "w%dx%d ", i%97, j)
+			fmt.Fprintf(&sb, "w%dq%d ", (i+j)%400, i%3)
 		}
 		if _, err := ix.Add(Document{Key: fmt.Sprintf("doc-%05d", i), Text: sb.String()}); err != nil {
 			t.Fatalf("Add: %v", err)
