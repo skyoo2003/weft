@@ -844,3 +844,48 @@ func FuzzParseSection(f *testing.F) {
 		_, _ = parseSection("fuzz", b, kind)
 	})
 }
+
+// TestASectionTooLargeToReadIsNeverWritten pins the writer's ceiling to the
+// reader's.
+//
+// openSection refuses a file longer than an int on this platform, because that
+// is the largest slice it can map. The writer had no such limit: its byte
+// counter is an int too, so on a 32-bit build a section past two gigabytes wraps
+// it and every offset recorded after that is nonsense — while the write itself
+// keeps succeeding. Commit then flips the manifest, and only the adopt that
+// follows discovers that the segment it just published cannot be opened. The
+// error it returns is true and useless: the previous generation is gone.
+//
+// It is reachable without holding two gigabytes of text, because a document's
+// Text is a string and a thousand documents can share one.
+//
+// The counter is set rather than reached. Writing to it is two gigabytes on the
+// platform where the limit bites and nine exabytes on this one, and what is
+// being tested is the arithmetic either way.
+func TestASectionTooLargeToReadIsNeverWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(w *segWriter)
+	}{
+		{"bytes", func(w *segWriter) { w.write([]byte("abcd")) }},
+		{"string", func(w *segWriter) { w.writeString("abcd") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := makeSegDir(t, t.TempDir(), segDirName(1))
+			w, err := newSegWriter(root, docsFile, kindDocs)
+			if err != nil {
+				t.Fatalf("newSegWriter: %v", err)
+			}
+			w.n = maxSection - 3
+			tc.write(w)
+			if err := w.close(); err == nil {
+				t.Fatal("close accepted a section longer than openSection can read back")
+			}
+			// And the counter did not wrap on the way to saying so: an offset
+			// recorded from it would name a position no reader could reach.
+			if w.off() < 0 {
+				t.Errorf("the byte counter wrapped to %d", w.off())
+			}
+		})
+	}
+}

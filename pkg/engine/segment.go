@@ -205,6 +205,9 @@ func (w *segWriter) write(b []byte) {
 	if w.err != nil {
 		return
 	}
+	if !w.room(len(b)) {
+		return
+	}
 	w.crc = crc32.Update(w.crc, segCRC, b)
 	if w.inUnit {
 		w.unit = crc32.Update(w.unit, segCRC, b)
@@ -224,6 +227,9 @@ func (w *segWriter) writeString(s string) {
 	if w.err != nil {
 		return
 	}
+	if !w.room(len(s)) {
+		return
+	}
 	for i := 0; i < len(s); i += len(w.scratch) {
 		n := copy(w.scratch[:], s[i:])
 		w.crc = crc32.Update(w.crc, segCRC, w.scratch[:n])
@@ -234,6 +240,33 @@ func (w *segWriter) writeString(s string) {
 	n, err := w.w.WriteString(s)
 	w.n += n
 	w.err = err
+}
+
+// maxSection is the largest section this build may write: an int's worth of
+// bytes, less the four the frame checksum takes at close.
+//
+// It is the reader's limit, moved to where it can still be acted on.
+// openSection refuses a file longer than an int, that being the largest slice
+// this platform can map — and the writer's byte counter is an int too, so
+// without this the counter wraps and the write goes on succeeding. Every offset
+// recorded after that names a position no reader can reach.
+const maxSection = maxInt - 4
+
+// room reports whether n more bytes fit, and records the refusal if they do not.
+//
+// Refusing here rather than at close is the point. Commit flips the manifest as
+// soon as writeSegment returns, so a section that only turns out to be
+// unreadable when adopt maps it has already replaced the generation before it —
+// the error adopt returns is true and useless, because what it reports is
+// durable. On a 64-bit build this is unreachable and costs one comparison per
+// write; on a 32-bit one it is two gigabytes, and a thousand documents sharing
+// one Text string reach it without holding two gigabytes of anything.
+func (w *segWriter) room(n int) bool {
+	if n > maxSection-w.n {
+		w.err = fmt.Errorf("%s: section would pass %d bytes, the most this platform can read back", w.f.Name(), maxSection)
+		return false
+	}
+	return true
 }
 
 // The varint encoders share the scratch array rather than declaring a local
