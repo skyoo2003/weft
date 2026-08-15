@@ -875,9 +875,9 @@ func build(ctx context.Context, args []string) error {
 		log.Printf("  repeated   %d references collapsed into an edge that already existed (or into a self-edge)", repeated)
 	}
 
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
+	// No MkdirAll here: the next two steps clear this directory and Commit
+	// creates it, owner-only, on its way in.
+	//
 	// The old account of this index goes before the new index does.
 	//
 	// A rebuild replaces the segments and then records what they came from, and the
