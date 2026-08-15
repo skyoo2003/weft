@@ -504,7 +504,8 @@ strictly an extension.
 |---|---|---|
 | Queries producing a graph stream at all | 45 of 50 | 45 of 50 |
 | Queries whose stream's membership is settled by DocID | 45 of 45 | 41 of 45 |
-| Slots decided by DocID across all queries | 2,082 | 960 |
+| Candidates excluded from the top k by DocID alone | 2,082 | 960 |
+| Reported slots held at the cut score | not measured | 241 |
 | Distinct scores per query | 3 | 3–24, and 3 is still the mode |
 
 The reason is the graph, not the formula. Only 28.1% of documents have an in-corpus
@@ -763,8 +764,9 @@ dangling references that point outside the corpus.
 −0.1202 to **−0.1227**, interval [−0.1550, −0.0909]. That is not noise in the
 measurement and it is not a flaw in the fix — it is section 5.9's degeneracy restated
 as a sensitivity. The modal graph score is 0.5, the tie group crosses the cut on 41 of
-the 45 queries that answer at all, and 960 slots in the reported rankings are settled
-by `DocID`. A single changed adjacency re-decides a whole tie group, and the tie group
+the 45 queries that answer at all, and 241 of the reported slots are held at the cut
+score with a further 960 candidates excluded from it by `DocID` alone. A single
+changed adjacency re-decides a whole tie group, and the tie group
 is most of what the graph stream contributes. **Read section 6 with that in mind: the
 verdict is robust — 28 configurations, 0 sign flips, no interval near zero — and the
 third decimal of any individual graph arm is not.**

@@ -439,8 +439,9 @@ the same `CorpusId` twice, or resolving back to the citing document, was written
 links and counted as two edges; the traversal walked neither. Deduplicating them
 removes exactly **one** edge from this snapshot — 579,720 becomes 579,719 — and the
 binding delta moves from −0.1202 to **−0.1227**. That a single adjacency is worth
-0.0025 nDCG is §5's degeneracy seen from the other side: 960 slots are settled by
-`DocID`, so one changed edge re-decides a whole tie group. The verdict is robust and
+0.0025 nDCG is §5's degeneracy seen from the other side: 241 of the reported slots are
+held at a cut score 960 further candidates are excluded from by `DocID` alone, so one
+changed edge re-decides a whole tie group. The verdict is robust and
 the third decimal of a graph arm is not; [EVAL.md](EVAL.md) section 5.13 carries the
 full re-measurement.
 

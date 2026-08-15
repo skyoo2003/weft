@@ -586,3 +586,44 @@ func TestScaleDownCannotMoveTheFusedOrder(t *testing.T) {
 			"significand alone", got[ia].Score, want)
 	}
 }
+
+// TestScaleDownDropsAStreamItCannotRepresent pins what happens at the end of the
+// weight range, which is the one thing scaling cannot preserve.
+//
+// The scaling exists to stop a large weight overflowing the accumulated score to
+// +Inf, where every document the streams agree on compares equal and TopK settles
+// them on DocID. Paying for that costs the other end: a weight more than 2^1024 below
+// the largest lands on zero however the scaling is done — dividing by maxW and
+// shifting by its exponent underflow together — and `fuse` documents weight 0 as *not
+// creating the entry*, so that stream's documents are absent from the result rather
+// than last in it.
+//
+// Recorded as a property rather than left to be discovered, because the two failures
+// are not equally bad and the choice between them is deliberate. Overflow takes the
+// ranking apart for every stream at once; underflow costs the one stream that asked
+// to be 1e308 times quieter than another, and a caller cannot have asked for that and
+// also for its documents back.
+func TestScaleDownDropsAStreamItCannotRepresent(t *testing.T) {
+	const (
+		loud engine.DocID = 1
+		soft engine.DocID = 2
+	)
+	streams := [][]engine.Candidate{
+		{{Doc: loud, Score: 1}},
+		{{Doc: soft, Score: 1}},
+	}
+	got := docs(FuseWeighted(math.MaxFloat64, 1e-300)(streams, 10))
+	if !slices.Equal(got, []engine.DocID{loud}) {
+		t.Errorf("fused %v, want only %d: 1e-300 against math.MaxFloat64 is past what float64 "+
+			"can hold as a ratio, so the quiet stream's weight is zero and fuse does not create "+
+			"the entry", got, loud)
+	}
+
+	// The boundary is the ratio, not the size. The same two streams at weights that
+	// stay inside float64's range keep both documents, loud one first.
+	got = docs(FuseWeighted(math.MaxFloat64, math.MaxFloat64/4)(streams, 10))
+	if !slices.Equal(got, []engine.DocID{loud, soft}) {
+		t.Errorf("fused %v, want %d then %d: a representable ratio must rank the quiet stream, "+
+			"not drop it", got, loud, soft)
+	}
+}

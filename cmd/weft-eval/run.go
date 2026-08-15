@@ -839,9 +839,10 @@ func diagnose(ctx context.Context, args []string) error {
 
 	fmt.Printf("\ngraph stream tie analysis at k=%d, seeds from the text scorer (SeedN=%d, MaxDepth=%d)\n\n",
 		k, graph.SeedN, graph.MaxDepth)
-	fmt.Printf("  %-6s %10s %10s %12s %12s\n", "query", "cands", "distinct", "tied-at-cut", "arbitrary")
+	fmt.Printf("  %-6s %10s %10s %12s %12s %12s\n",
+		"query", "cands", "distinct", "tied-at-cut", "slots", "excluded")
 
-	var degenerate, noOpinion, arbitraryTotal int
+	var degenerate, noOpinion, slotTotal, excludedTotal int
 	for _, q := range qs {
 		cands, err := gs.Candidates(ctx, q.Query, deep)
 		if err != nil {
@@ -867,21 +868,32 @@ func diagnose(ctx context.Context, args []string) error {
 				tied++
 			}
 		}
-		// Candidates at the cut score that did not make the top k. Every one of them
-		// lost its slot to a lower DocID rather than to a lower score.
-		arbitrary := 0
-		if len(cands) > k {
-			for _, c := range cands[k:] {
-				if c.Score == cut {
-					arbitrary++
-				}
+		// Two different counts, kept apart because one of them used to be reported as
+		// the other. `excluded` is the candidates at the cut score that did not make
+		// the top k; `slots` is the positions *in the reported ranking* they lost to,
+		// which is what "decided by DocID" can mean. They differ badly at the extreme:
+		// 100 candidates tied for 10 positions is 90 excluded and 10 arbitrary slots,
+		// and reporting 90 makes a claim about a top-10 that a top-10 cannot hold.
+		// Both are printed, because excluded is what says how large the tie group was
+		// and slots is what says how much of the answer it decided.
+		excluded, slots := 0, 0
+		for _, c := range cands[min(k, len(cands)):] {
+			if c.Score == cut {
+				excluded++
 			}
 		}
-		if arbitrary > 0 {
+		if excluded > 0 {
+			for _, c := range cands[:min(k, len(cands))] {
+				if c.Score == cut {
+					slots++
+				}
+			}
 			degenerate++
-			arbitraryTotal += arbitrary
+			slotTotal += slots
+			excludedTotal += excluded
 		}
-		fmt.Printf("  %-6s %10d %10d %12d %12d\n", q.ID, len(cands), len(distinct), tied, arbitrary)
+		fmt.Printf("  %-6s %10d %10d %12d %12d %12d\n",
+			q.ID, len(cands), len(distinct), tied, slots, excluded)
 	}
 
 	answered := len(qs) - noOpinion
@@ -889,8 +901,9 @@ func diagnose(ctx context.Context, args []string) error {
 	if noOpinion > 0 {
 		fmt.Printf(" (%d had no reachable neighbour)", noOpinion)
 	}
-	fmt.Printf(".\n%d of those %d have a tie group crossing the cut, %d slots decided by DocID in total.\n",
-		degenerate, answered, arbitraryTotal)
+	fmt.Printf(".\n%d of those %d have a tie group crossing the cut: %d of the reported slots are held\n",
+		degenerate, answered, slotTotal)
+	fmt.Printf("at the cut score, with %d further candidates excluded from it by DocID alone.\n", excludedTotal)
 	if degenerate > 0 {
 		fmt.Println("For those queries part of the stream's membership is insertion order, not proximity.")
 		fmt.Println("See docs/EVAL.md sections 5.7 and 5.9.")

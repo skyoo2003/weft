@@ -147,9 +147,15 @@ func FuseWeighted(weights ...float64) engine.Fuser {
 // the slice, because dividing them changes nothing about what they are and fuse
 // still has to fold them to 0.
 //
-// A weight can underflow to 0 here, and that is honest rather than lossy: it takes
-// a ratio past 1e308 to the largest weight, at which point the stream's every
-// contribution was already further below the leader than float64 can represent.
+// A weight can underflow to 0 here, and what that costs is worth stating exactly: a
+// weight more than 2^1024 below the largest lands on zero — dividing by the largest
+// and shifting by its exponent underflow alike — and fuse documents weight 0 as *not
+// creating the entry*, so that stream's documents are absent from the result rather
+// than last in it. It is the price of the bound above and it is the cheaper of the
+// two failures: overflow takes the ranking apart for every stream at once, underflow
+// costs the one stream that asked to be 1e308 times quieter than another, and a
+// caller cannot have asked for that and also for its documents back.
+// TestScaleDownDropsAStreamItCannotRepresent pins both sides of it.
 //
 // The return value is what a stream past the end of w now weighs. Streams without a
 // weight are documented to count 1.0, and 1.0 is a weight in the same ratio set as
