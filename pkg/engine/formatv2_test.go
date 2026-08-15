@@ -213,9 +213,8 @@ func flipAndRepairFrame(t *testing.T, path string, i int) {
 // re-derives their contents. decodePostings says outright that it never
 // re-tokenizes a document to check its postings, so a flipped byte of document
 // text is invisible; a term string is whatever the file says it is. keys and
-// docoff are left out only because verifySeekSections still rebuilds both from
-// docs on every Open — the very check task 2 has to move into Scrub, at which
-// point they join this sweep.
+// docoff are left out because they are re-derived from docs — by the scrub's own
+// walk now rather than by every Open, which is where that check went.
 func TestEveryByteFlipIsCaughtWithoutTheFrameCRC(t *testing.T) {
 	for _, name := range []string{docsFile, postingsFile, termsFile} {
 		t.Run(name, func(t *testing.T) {

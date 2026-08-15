@@ -1026,9 +1026,9 @@ func TestCommitRefusesADirectoryItDidNotOpen(t *testing.T) {
 // checksum over the table is 16 bytes a document — the same order as the terms
 // index Open already decodes in full, and a scan rather than a map build.
 //
-// What stays lazy is verifySeekSections, which re-derives every offset by
-// decoding the document it points at. That one is the size of the corpus, and it
-// is Scrub's.
+// What stays lazy is re-deriving every offset from the record it points at,
+// which the scrub's own walk does. That one is the size of the corpus, and it is
+// Scrub's.
 func TestOpenRefusesADamagedDocOffsetTable(t *testing.T) {
 	dir := t.TempDir()
 	ix := New()

@@ -106,9 +106,9 @@ type segSection struct {
 	// by: meta's corpus token total and docoff's per-document one. Damage there
 	// is not an absence a caller can see, it is a plausible score.
 	//
-	// What stays lazy is verifySeekSections, which re-derives each offset by
-	// decoding the document it points at. That one is the size of the corpus,
-	// and it is Scrub's. Scrub verifies all six frames besides.
+	// What stays lazy is re-deriving each offset from the document it points at,
+	// which scrubDocs does as it walks. That one is the size of the corpus, and
+	// it is Scrub's. Scrub verifies all six frames besides.
 	eager bool
 }
 
@@ -893,8 +893,9 @@ func decodeTermIndex(terms *segReader) (map[string]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Same capacity discipline as decodeDocs: a hostile count cannot make this
-	// allocate more than the payload could back. An entry is at least 3 bytes.
+	// Same capacity discipline as the document decoders: a hostile count cannot
+	// make this allocate more than the payload could back. An entry is at least
+	// 3 bytes.
 	out := make(map[string]int, min(n, len(terms.b)/3, 1<<16))
 	prev := ""
 	for i := range n {

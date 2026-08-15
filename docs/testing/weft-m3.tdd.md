@@ -204,7 +204,7 @@ sibling that had been answering with a panic.
 | 5 | The offset table is fixed width, so entry *i* is reachable by arithmetic — a uvarint table would pass #2 and #4 while leaving `Doc(id)` O(id) | `formatv2_test.go:TestDocOffsetTableIsFixedWidth` | unit | PASS | same |
 | 6 | An overlong encoding of the current version is `ErrCorrupt` — two byte strings may not mean one index | `segment_test.go:TestOverlongVersionEncodingIsRefused` | unit | PASS | same |
 | 7 | A future version is `ErrBadVersion`, not misread | `segment_test.go:TestOtherVersionsAreRefusedNotMisread` | unit | PASS | same |
-| 8 | A `docoff` or `keys` section disagreeing with `docs` is refused rather than answering wrongly later | `seek.go:verifySeekSections`, run by every `Scrub` | unit | PASS | `go test ./...` |
+| 8 | A `docoff` or `keys` section disagreeing with `docs` is refused rather than answering wrongly later | `persist.go:scrubDocs` and `seek.go:verifyKeyTable`, run by every `Scrub` | unit | PASS | `go test ./...` |
 | 9 | Neither the frame parser nor the decoders panic on arbitrary bytes, the new section kinds included | `segment_test.go:FuzzParseSection`, `FuzzSegmentDecoding` | fuzz | PASS | 6.1M execs |
 | 10 | The storage change costs the scorers and the fuser nothing | `git diff --stat main -- pkg/scorer pkg/fusion` | architecture | PASS | empty output |
 | 11 | Any byte flip in `docs`, `postings` or `terms` is caught **with the frame checksum repaired** — the state every lazy read is in | `formatv2_test.go:TestEveryByteFlipIsCaughtWithoutTheFrameCRC` | unit | PASS | same |
