@@ -95,10 +95,12 @@ type segSection struct {
 	kind byte
 }
 
-// segSections are the four files a segment directory holds, in write order, and
-// the only entries weft's writer ever creates inside one. The writer, the
-// reader and Commit's ownership check all read this one list, so milestone 3
-// adding a section is a single edit rather than four that can drift apart.
+// segSections are the files a segment directory holds, in write order, and the
+// only entries weft's writer ever creates inside one. The writer, the reader
+// and Commit's ownership check all read this one list, so adding a section is a
+// single edit rather than four that can drift apart. Milestone 3 added docoff
+// and keys through exactly that one edit, which is the claim this list was
+// written to make good on.
 var segSections = []segSection{
 	{metaFile, kindMeta},
 	{docsFile, kindDocs},
@@ -119,6 +121,13 @@ var segSections = []segSection{
 type segWriter struct {
 	f   *os.File
 	buf []byte
+
+	// unit is the running checksum of the unit currently open — see beginUnit.
+	// The frame checksum below covers the whole file, which means verifying it
+	// costs a full read; these cover one record, block or entry each, so a
+	// reader that touches one can check one.
+	unit   uint32
+	inUnit bool
 }
 
 // newSegWriter creates name under root, exclusively. Two guards, because the
@@ -146,10 +155,56 @@ func newSegWriter(root *os.Root, name string, kind byte) (*segWriter, error) {
 	return w, nil
 }
 
-func (w *segWriter) write(b []byte)   { w.buf = append(w.buf, b...) }
-func (w *segWriter) uvarint(v uint64) { w.buf = binary.AppendUvarint(w.buf, v) }
-func (w *segWriter) varint(v int64)   { w.buf = binary.AppendVarint(w.buf, v) }
-func (w *segWriter) str(s string)     { w.uvarint(uint64(len(s))); w.buf = append(w.buf, s...) }
+func (w *segWriter) write(b []byte) { n := len(w.buf); w.buf = append(w.buf, b...); w.emitted(n) }
+func (w *segWriter) uvarint(v uint64) {
+	n := len(w.buf)
+	w.buf = binary.AppendUvarint(w.buf, v)
+	w.emitted(n)
+}
+func (w *segWriter) varint(v int64) {
+	n := len(w.buf)
+	w.buf = binary.AppendVarint(w.buf, v)
+	w.emitted(n)
+}
+
+func (w *segWriter) str(s string) {
+	n := len(w.buf)
+	w.buf = binary.AppendUvarint(w.buf, uint64(len(s)))
+	w.buf = append(w.buf, s...)
+	w.emitted(n)
+}
+
+// emitted folds the bytes appended since offset n into the open unit's
+// checksum. Every write funnels through it so a unit cannot be left half
+// covered by someone adding a fourth encoder next to the three above.
+func (w *segWriter) emitted(n int) {
+	if w.inUnit {
+		w.unit = crc32.Update(w.unit, segCRC, w.buf[n:])
+	}
+}
+
+// beginUnit opens a checksummed unit, binding seed into it before any content.
+//
+// The seed is what makes the checksum say more than "these bytes are intact".
+// A document record does not carry its own DocID — its position in the file is
+// what named it — so a lazy reader following a damaged offset table would
+// decode a perfectly healthy record under someone else's id and return a
+// plausible wrong answer. Binding the id in means the record proves which
+// document it is, and position stops being the only witness. Postings blocks
+// take their own file offset for the same reason, terms entries their index.
+func (w *segWriter) beginUnit(seed uint64) {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], seed)
+	w.unit, w.inUnit = crc32.Update(0, segCRC, b[:]), true
+}
+
+// endUnit seals the unit with its checksum. The checksum bytes are outside the
+// unit they seal, so inUnit is cleared before they are written.
+func (w *segWriter) endUnit() {
+	c := w.unit
+	w.inUnit = false
+	w.buf = binary.LittleEndian.AppendUint32(w.buf, c)
+}
 
 // off is the absolute file offset of the next byte written, header included.
 func (w *segWriter) off() int { return len(w.buf) }
@@ -246,6 +301,7 @@ func encodeDocs(w *segWriter, ix *Index) []int {
 	offs := make([]int, len(ix.docs))
 	for i, d := range ix.docs {
 		offs[i] = w.off()
+		w.beginUnit(uint64(i))
 		w.str(d.Key)
 		w.str(d.Text)
 		w.uvarint(uint64(ix.docLen[i]))
@@ -261,6 +317,7 @@ func encodeDocs(w *segWriter, ix *Index) []int {
 		}
 		w.varint(d.Time.Unix())
 		w.uvarint(uint64(d.Time.Nanosecond()))
+		w.endUnit()
 	}
 	return offs
 }
@@ -294,9 +351,13 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 	post.uvarint(uint64(len(keys)))
 	terms.uvarint(uint64(len(keys)))
 
-	for _, t := range keys {
+	for i, t := range keys {
+		// The entry's index seeds its checksum, so an entry cannot be moved to
+		// another position and still verify.
+		terms.beginUnit(uint64(i))
 		terms.str(t)
 		terms.uvarint(uint64(post.off()))
+		terms.endUnit()
 
 		pl := ix.postings[t]
 		post.uvarint(uint64((len(pl) + blockSize - 1) / blockSize))
@@ -308,6 +369,10 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 				maxTF = max(maxTF, p.Freq)
 				minDL = min(minDL, ix.docLen[p.Doc])
 			}
+			// A block's own file offset seeds its checksum: blocks are
+			// independently decodable by design (D-001), so nothing else stops
+			// one being served in place of another term's.
+			post.beginUnit(uint64(post.off()))
 			post.uvarint(uint64(len(blk)))
 			post.uvarint(uint64(blk[len(blk)-1].Doc)) // maxDocID
 			post.uvarint(uint64(maxTF))
@@ -323,6 +388,7 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 				post.uvarint(uint64(p.Freq))
 				prev = id
 			}
+			post.endUnit()
 		}
 	}
 }
@@ -395,6 +461,31 @@ func (r *segReader) u32(what string) (uint32, error) {
 	v := binary.LittleEndian.Uint32(r.b[r.off:])
 	r.off += 4
 	return v, nil
+}
+
+// unit verifies the checksum standing at the reader's position against the
+// bytes from start up to it, bound to seed. It advances past the checksum.
+//
+// This is the check that survives lazy loading. parseSection's frame checksum
+// covers the whole file, so computing it means reading every byte — the cost
+// this milestone exists to remove — and a reader that maps a segment and
+// touches one record never computes it at all. Without a per-unit checksum the
+// remaining defences are the decoder's semantic invariants, and those cannot
+// see everything: decodePostings states outright that it never re-tokenizes a
+// document to check its postings, so a flipped byte of document text is
+// invisible to every rule in this file.
+func (r *segReader) unit(what string, start int, seed uint64) error {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], seed)
+	want := crc32.Update(crc32.Update(0, segCRC, b[:]), segCRC, r.b[start:r.off])
+	got, err := r.u32(what + " checksum")
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("%s: %s at byte %d fails its checksum: %w", r.name, what, start, ErrCorrupt)
+	}
+	return nil
 }
 
 // done rejects trailing bytes. A payload that decodes cleanly but has
@@ -555,6 +646,7 @@ func decodeDocs(r *segReader) (*Index, error) {
 // record alone is checked here; everything that needs the corpus stays in
 // decodeDocs, which is the only reason this returns rather than stores.
 func decodeDocRecord(r *segReader, i int) (Document, int, error) {
+	start := r.off
 	var d Document
 	var err error
 	if d.Key, err = r.str("document key"); err != nil {
@@ -616,6 +708,14 @@ func decodeDocRecord(r *segReader, i int) (Document, int, error) {
 		return Document{}, 0, err
 	}
 	d.Time = time.Unix(sec, int64(nsec)).UTC()
+
+	// Seeded with i, so this both proves the bytes are intact and proves the
+	// record is the one asked for. Reading document 2's record as document 1 —
+	// which is all a damaged docoff entry amounts to — fails here rather than
+	// returning a healthy-looking wrong document.
+	if err := r.unit(fmt.Sprintf("document %d", i), start, uint64(i)); err != nil {
+		return Document{}, 0, err
+	}
 	return d, dl, nil
 }
 
@@ -666,6 +766,7 @@ func decodePostings(post, terms *segReader, host *Index) error {
 
 	prevTerm := ""
 	for i := 0; i < pn; i++ {
+		entryStart := terms.off
 		term, err := terms.str("term")
 		if err != nil {
 			return err
@@ -684,6 +785,12 @@ func decodePostings(post, terms *segReader, host *Index) error {
 		if err != nil {
 			return err
 		}
+		// A term string is whatever the file says it is — nothing here
+		// re-derives one — so the checksum is the only thing standing between a
+		// flipped byte and a corpus that answers a query nobody indexed.
+		if err := terms.unit(fmt.Sprintf("term entry %d", i), entryStart, uint64(i)); err != nil {
+			return err
+		}
 		if off != uint64(segHeaderLen+post.off) {
 			return fmt.Errorf("%s: term %q recorded at offset %d, entry sits at %d: %w",
 				terms.name, term, off, segHeaderLen+post.off, ErrCorrupt)
@@ -700,6 +807,7 @@ func decodePostings(post, terms *segReader, host *Index) error {
 		var pl []Posting
 		prev := uint64(0)
 		for b := 0; b < nblocks; b++ {
+			blockStart := post.off
 			cnt, err := post.intn("block posting count", blockSize)
 			if err != nil {
 				return err
@@ -791,6 +899,14 @@ func decodePostings(post, terms *segReader, host *Index) error {
 			}
 			if gotMinDL != minDL {
 				return fmt.Errorf("%s: term %q block %d records minDocLen %d, contents say %d: %w", post.name, term, b, minDL, gotMinDL, ErrCorrupt)
+			}
+			// Every rule above re-derives a block's metadata from its own
+			// contents, which is why the byte-flip sweep finds no gap here
+			// today. It finds none because Open decodes every block; a reader
+			// that skips one re-derives nothing about it, and this is what
+			// stands in that reader's place.
+			if err := post.unit(fmt.Sprintf("term %q block %d", term, b), blockStart, uint64(segHeaderLen+blockStart)); err != nil {
+				return err
 			}
 		}
 		host.postings[term] = pl

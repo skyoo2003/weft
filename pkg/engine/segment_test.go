@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -170,13 +171,21 @@ func TestReopenedIndexAcceptsAdds(t *testing.T) {
 // For reference, the honest payloads are
 //
 //	meta:     2 3 0                    (docCount totalLen vecDim)
-//	docs:     2 | "a" "x x" 2 0 0 t | "b" "x" 1 0 0 t
-//	postings: 1 | 1  2 1 2 1  0 2 1 1
+//	docs:     2 | "a" "x x" 2 0 0 t ⨯ | "b" "x" 1 0 0 t ⨯
+//	postings: 1 | 1 | 2 1 2 1  0 2 1 1 ⨯
 //	          (terms) (blocks) (cnt maxDoc maxTF minDL) (docID freq delta freq)
-//	terms:    1 | "x" 7
+//	terms:    1 | "x" 7 ⨯
+//	docoff:   2 | off(a) off(b)        (fixed width, 8 bytes each)
+//	keys:     2 | off off | "a" 0 | "b" 1
 //
 // — the postings entry starts at payload byte 1, and terms records absolute
 // file offsets, so 1 + the 6-byte header = 7.
+//
+// ⨯ marks a unit checksum: four bytes sealing one record, block or entry,
+// seeded with what names it — a DocID, a file offset, an entry index. The
+// frame checksum at the end of every file covers all of this and is what the
+// byte-flip sweep leans on; these exist because computing that one means
+// reading the whole file, which a lazy reader will not do.
 func commitTiny(t *testing.T) (dir, segDir string) {
 	t.Helper()
 	ix := New()
@@ -239,8 +248,15 @@ func uvs(w *segWriter, vs ...uint64) {
 }
 
 // docRecord writes one docs-file record with no vector, no links, and the
-// epoch timestamp.
-func docRecord(w *segWriter, key, text string, docLen uint64) {
+// epoch timestamp, sealed with the unit checksum the decoder demands.
+//
+// The checksum is computed rather than corrupted on purpose. Every payload
+// below is a lie about one specific thing, and a lie that also fails its
+// checksum tests the checksum instead of the rule the case is named for —
+// Open would still report ErrCorrupt and the case would still pass, proving
+// nothing. Same reason blockPayload and termsPayload exist.
+func docRecord(w *segWriter, id uint64, key, text string, docLen uint64) {
+	w.beginUnit(id)
 	w.str(key)
 	w.str(text)
 	w.uvarint(docLen)
@@ -248,6 +264,42 @@ func docRecord(w *segWriter, key, text string, docLen uint64) {
 	w.uvarint(0) // link count
 	w.varint(0)  // seconds
 	w.uvarint(0) // nanoseconds
+	w.endUnit()
+}
+
+// postingsPayload writes a one-term postings file: the term count, an explicit
+// block count, then each block's uvarints under its own checksum.
+//
+// The block count is a parameter rather than len(blocks) because two cases
+// below deliberately disagree with the number of blocks that follow, and that
+// disagreement is the thing being tested.
+func postingsPayload(w *segWriter, nblocks uint64, blocks ...[]uint64) {
+	uvs(w, 1, nblocks)
+	for _, blk := range blocks {
+		// off() is already absolute — it counts from the start of the file,
+		// header included — which is the seed the decoder recomputes.
+		w.beginUnit(uint64(w.off()))
+		uvs(w, blk...)
+		w.endUnit()
+	}
+}
+
+// termEntry is one terms-index entry: a term and the postings offset it claims.
+type termEntry struct {
+	term string
+	off  uint64
+}
+
+// termsPayload writes a terms index with an explicit count, for the same reason
+// postingsPayload takes one.
+func termsPayload(w *segWriter, count uint64, entries ...termEntry) {
+	w.uvarint(count)
+	for i, e := range entries {
+		w.beginUnit(uint64(i))
+		w.str(e.term)
+		w.uvarint(e.off)
+		w.endUnit()
+	}
 }
 
 func TestLyingFilesAreRefused(t *testing.T) {
@@ -260,62 +312,54 @@ func TestLyingFilesAreRefused(t *testing.T) {
 		body func(w *segWriter)
 	}{
 		{"maxTF lies", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 1, 2, 1, 3 /* contents say 2 */, 1, 0, 2, 1, 1)
+			postingsPayload(w, 1, []uint64{2, 1, 3 /* contents say 2 */, 1, 0, 2, 1, 1})
 		}},
 		{"minDocLen lies", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 1, 2, 1, 2, 2 /* contents say 1 */, 0, 2, 1, 1)
+			postingsPayload(w, 1, []uint64{2, 1, 2, 2 /* contents say 1 */, 0, 2, 1, 1})
 		}},
 		{"maxDocID lies", postingsFile, kindPostings, func(w *segWriter) {
 			// One posting for doc 0, recorded maxDocID 1.
-			uvs(w, 1, 1, 1, 1, 2, 2, 0, 2)
+			postingsPayload(w, 1, []uint64{1, 1, 2, 2, 0, 2})
 		}},
 		{"postings repeat a docID", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 1, 2, 0, 2, 1, 0, 2, 0 /* delta 0 */, 1)
+			postingsPayload(w, 1, []uint64{2, 0, 2, 1, 0, 2, 0 /* delta 0 */, 1})
 		}},
 		{"posting names a document past the corpus", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 1, 1, 5, 2, 1, 5 /* corpus holds 2 */, 2)
+			postingsPayload(w, 1, []uint64{1, 5, 2, 1, 5 /* corpus holds 2 */, 2})
 		}},
 		{"zero frequency", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 1, 1, 0, 0, 2, 0, 0)
+			postingsPayload(w, 1, []uint64{1, 0, 0, 2, 0, 0})
 		}},
 		{"frequency exceeds the document's tokens", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 1, 2, 1, 9, 1, 0, 9 /* doc 0 holds 2 tokens */, 1, 1)
+			postingsPayload(w, 1, []uint64{2, 1, 9, 1, 0, 9 /* doc 0 holds 2 tokens */, 1, 1})
 		}},
 		// prev is 1 and the delta is MaxUint64, so the sum wraps to 0 — a
 		// document that exists, with a frequency it can hold, in a block whose
 		// recorded metadata matches. Every check but the overflow guard passes,
 		// and the postings come out [1, 0], descending.
 		{"docID delta overflows into the corpus", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 1, 2, 0, 2, 1, 1, 1, math.MaxUint64, 2)
+			postingsPayload(w, 1, []uint64{2, 0, 2, 1, 1, 1, math.MaxUint64, 2})
 		}},
 		// Doc 0 holds two tokens and is given one. Legal per posting — the only
 		// per-posting rule is freq <= docLen — and impossible in aggregate,
 		// because every token Add saw became an increment somewhere.
 		{"frequencies do not add up to the document's length", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 1, 2, 1, 1, 1, 0, 1, 1, 1)
+			postingsPayload(w, 1, []uint64{2, 1, 1, 1, 0, 1, 1, 1})
 		}},
 		{"non-final block not full", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 2, 1 /* first of two blocks holds 1 */)
+			postingsPayload(w, 2, []uint64{1} /* first of two blocks holds 1 */)
 		}},
 		{"term with no blocks", postingsFile, kindPostings, func(w *segWriter) {
-			uvs(w, 1, 0)
+			postingsPayload(w, 0)
 		}},
 		{"terms index offset lies", termsFile, kindTerms, func(w *segWriter) {
-			w.uvarint(1)
-			w.str("x")
-			w.uvarint(99) // the entry sits at 7
+			termsPayload(w, 1, termEntry{"x", 99}) // the entry sits at 7
 		}},
 		{"empty term", termsFile, kindTerms, func(w *segWriter) {
-			w.uvarint(1)
-			w.str("")
-			w.uvarint(7)
+			termsPayload(w, 1, termEntry{"", 7})
 		}},
 		{"terms index count disagrees", termsFile, kindTerms, func(w *segWriter) {
-			w.uvarint(2)
-			w.str("x")
-			w.uvarint(7)
-			w.str("y")
-			w.uvarint(9)
+			termsPayload(w, 2, termEntry{"x", 7}, termEntry{"y", 9})
 		}},
 		{"meta overstates the doc count", metaFile, kindMeta, func(w *segWriter) {
 			uvs(w, 3 /* docs file holds 2 */, 3, 0)
@@ -328,25 +372,28 @@ func TestLyingFilesAreRefused(t *testing.T) {
 		}},
 		{"duplicate key", docsFile, kindDocs, func(w *segWriter) {
 			w.uvarint(2)
-			docRecord(w, "a", "x x", 2)
-			docRecord(w, "a", "x", 1)
+			docRecord(w, 0, "a", "x x", 2)
+			docRecord(w, 1, "a", "x", 1)
 		}},
 		{"empty key", docsFile, kindDocs, func(w *segWriter) {
 			w.uvarint(2)
-			docRecord(w, "", "x x", 2)
-			docRecord(w, "b", "x", 1)
+			docRecord(w, 0, "", "x x", 2)
+			docRecord(w, 1, "b", "x", 1)
 		}},
 		{"a billion nanoseconds", docsFile, kindDocs, func(w *segWriter) {
 			w.uvarint(2)
+			w.beginUnit(0)
 			w.str("a")
 			w.str("x x")
 			uvs(w, 2, 0, 0)
 			w.varint(0)
 			w.uvarint(1_000_000_000)
-			docRecord(w, "b", "x", 1)
+			w.endUnit()
+			docRecord(w, 1, "b", "x", 1)
 		}},
 		{"NaN vector component", docsFile, kindDocs, func(w *segWriter) {
 			w.uvarint(2)
+			w.beginUnit(0)
 			w.str("a")
 			w.str("x x")
 			w.uvarint(2)
@@ -355,10 +402,12 @@ func TestLyingFilesAreRefused(t *testing.T) {
 			w.uvarint(0)
 			w.varint(0)
 			w.uvarint(0)
-			docRecord(w, "b", "x", 1)
+			w.endUnit()
+			docRecord(w, 1, "b", "x", 1)
 		}},
 		{"vector widths disagree", docsFile, kindDocs, func(w *segWriter) {
 			w.uvarint(2)
+			w.beginUnit(0)
 			w.str("a")
 			w.str("x x")
 			w.uvarint(2)
@@ -367,6 +416,8 @@ func TestLyingFilesAreRefused(t *testing.T) {
 			w.uvarint(0)
 			w.varint(0)
 			w.uvarint(0)
+			w.endUnit()
+			w.beginUnit(1)
 			w.str("b")
 			w.str("x")
 			w.uvarint(1)
@@ -375,6 +426,7 @@ func TestLyingFilesAreRefused(t *testing.T) {
 			w.uvarint(0)
 			w.varint(0)
 			w.uvarint(0)
+			w.endUnit()
 		}},
 	}
 	for _, tt := range tests {
@@ -412,14 +464,21 @@ func TestBlocksStartAtAbsoluteDocIDs(t *testing.T) {
 	// would have emitted.
 	payload := func(lastField uint64) func(*segWriter) {
 		return func(w *segWriter) {
-			uvs(w, 1, 2)                         // one term, two blocks
+			uvs(w, 1, 2) // one term, two blocks
+			// Each block is sealed with a checksum seeded by its own file
+			// offset, which is also what makes a block independently
+			// verifiable — the same property in the same place.
+			w.beginUnit(uint64(w.off()))
 			uvs(w, blockSize, blockSize-1, 1, 1) // cnt, maxDocID, maxTF, minDocLen
 			uvs(w, 0, 1)                         // document 0, frequency 1
 			for range blockSize - 1 {
 				uvs(w, 1, 1) // delta 1, frequency 1
 			}
+			w.endUnit()
+			w.beginUnit(uint64(w.off()))
 			uvs(w, 1, blockSize, 1, 1)
 			uvs(w, lastField, 1)
+			w.endUnit()
 		}
 	}
 
@@ -489,28 +548,32 @@ func TestFrequencySumCannotWrap(t *testing.T) {
 	})
 	rewriteSection(t, filepath.Join(segDir, docsFile), kindDocs, func(w *segWriter) {
 		w.uvarint(1)
-		docRecord(w, "a", "x", mi)
+		docRecord(w, 0, "a", "x", mi)
 	})
 
 	// Four terms, each with one posting in document 0. No frequency exceeds
 	// docLen on its own, so only the running budget catches them.
 	freqs := []uint64{mi, mi, mi, 2}
+	terms := []string{"a", "b", "c", "d"}
 	var offs []uint64
 	rewriteSection(t, filepath.Join(segDir, postingsFile), kindPostings, func(w *segWriter) {
 		w.uvarint(uint64(len(freqs)))
 		for _, f := range freqs {
 			// off() is the absolute file offset the terms index must record.
 			offs = append(offs, uint64(w.off()))
-			// blocks, count, maxDocID, maxTF, minDocLen, then delta and freq.
-			uvs(w, 1, 1, 0, f, mi, 0, f)
+			w.uvarint(1) // one block
+			w.beginUnit(uint64(w.off()))
+			// count, maxDocID, maxTF, minDocLen, then delta and freq.
+			uvs(w, 1, 0, f, mi, 0, f)
+			w.endUnit()
 		}
 	})
 	rewriteSection(t, filepath.Join(segDir, termsFile), kindTerms, func(w *segWriter) {
-		w.uvarint(uint64(len(freqs)))
-		for i, term := range []string{"a", "b", "c", "d"} {
-			w.str(term)
-			w.uvarint(offs[i])
+		entries := make([]termEntry, len(terms))
+		for i, term := range terms {
+			entries[i] = termEntry{term, offs[i]}
 		}
+		termsPayload(w, uint64(len(freqs)), entries...)
 	})
 
 	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
@@ -519,8 +582,11 @@ func TestFrequencySumCannotWrap(t *testing.T) {
 }
 
 func TestUnsortedTermsAreRefused(t *testing.T) {
-	// Two terms so order can be wrong: corpus {a: "x y"}. Each postings entry
-	// is 7 one-byte varints, so "x" sits at absolute offset 7 and "y" at 14.
+	// Two terms so order can be wrong: corpus {a: "x y"}. A postings entry is
+	// one block-count byte, six one-byte varints of block, and a four-byte
+	// block checksum — eleven bytes — so "x" sits at absolute offset 7 and "y"
+	// at 18. Both offsets have to be right, or the decoder rejects the file for
+	// a lying offset and this test stops being about ordering at all.
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "x y"}})
 	dir := t.TempDir()
@@ -528,14 +594,19 @@ func TestUnsortedTermsAreRefused(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 	rewriteSection(t, filepath.Join(dir, segDirName(1), termsFile), kindTerms, func(w *segWriter) {
-		w.uvarint(2)
-		w.str("y")
-		w.uvarint(7)
-		w.str("x")
-		w.uvarint(14)
+		termsPayload(w, 2, termEntry{"y", 7}, termEntry{"x", 18})
 	})
-	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+	_, err := Open(dir)
+	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Open: got %v, want ErrCorrupt", err)
+	}
+	// The reason is asserted, not just the sentinel. Every rule in this decoder
+	// reports ErrCorrupt, so a payload that trips a different one passes this
+	// test while proving nothing about ordering — which is exactly what
+	// happened when per-unit checksums arrived and this file's handcrafted
+	// entries stopped carrying one.
+	if !strings.Contains(err.Error(), "out of order") {
+		t.Fatalf("Open failed for the wrong reason: %v", err)
 	}
 }
 
