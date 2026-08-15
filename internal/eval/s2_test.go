@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -269,6 +270,50 @@ func TestS2ClientDoesNotRetryClientError(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Errorf("server saw %d calls, want 1", calls.Load())
+	}
+}
+
+// TestS2ClientDoesNotRetryAClientErrorWithAnUnreadableBody is the rule above arriving
+// by the route that used to defeat it.
+//
+// do reads the body even on an error status, because that is where the endpoint puts
+// its reason — and on a connection the server is already closing, that read fails. The
+// status is still 400 and the request is still wrong, but classifying the read error
+// ahead of the status sent it down the retry path and spent every attempt, each behind
+// a backoff of up to two minutes, on an answer that cannot change.
+func TestS2ClientDoesNotRetryAClientErrorWithAnUnreadableBody(t *testing.T) {
+	var calls atomic.Int32
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		// A Content-Length the handler does not honour: the client parses a clean
+		// 400 and then hits an unexpected EOF partway through the body.
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		buf.WriteString("HTTP/1.1 400 Bad Request\r\nContent-Length: 4096\r\n\r\ntruncated")
+		buf.Flush()
+	}))
+	c.MaxRetries = 2
+
+	_, err := c.Batch(context.Background(), []string{"Nonsense:7"})
+	if !errors.Is(err, ErrS2Status) {
+		t.Errorf("error = %v, want ErrS2Status: a 400 is a 400 whether or not its body arrived", err)
+	}
+	// Asserted so the test cannot quietly stop testing anything. If the body ever
+	// arrives whole — a change in how the handler is torn down, or in what the client
+	// tolerates — this is an ordinary 400 that the case above already covered, and the
+	// path with a read error beside a 4xx status would go unexercised while the test
+	// still passed.
+	if err != nil && !strings.Contains(err.Error(), "body read failed") {
+		t.Errorf("error = %v, want it to name the failed body read: the truncated response "+
+			"was read cleanly, so this test is no longer exercising the case it was written for", err)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("server saw %d calls, want 1: the body going missing is not a reason to "+
+			"reconsider the status that came with it", calls.Load())
 	}
 }
 

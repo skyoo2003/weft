@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -207,6 +208,12 @@ func parseS2Batch(raw []byte, n int) ([]*S2Paper, error) {
 
 // S2Client fetches from the Semantic Scholar graph API. Use NewS2Client; the zero
 // value has no HTTP client.
+//
+// Batch is safe to call from several goroutines, and the point of saying so is Pace:
+// the pacing gap is enforced across all of them, so parallelising a fetch changes how
+// many requests are in flight but not how fast they leave. The exported fields are
+// read-only once the client is in use — set them before the first Batch, not between
+// two of them.
 type S2Client struct {
 	HTTP    *http.Client
 	BaseURL string
@@ -227,6 +234,14 @@ type S2Client struct {
 	// exactly like a hung process on a job measured in hours.
 	Log func(format string, args ...any)
 
+	// last is when the previous request went out, guarded by mu. The lock is held
+	// across the pacing sleep rather than only around the assignment, because that
+	// is what makes Pace a property of the client instead of of one goroutine:
+	// callers queue behind it and go out one per Pace. Guarding the assignment
+	// alone would leave every waiter measuring its gap from the same stale
+	// timestamp, all deciding at once that they had waited long enough, and the
+	// burst would land on the shared anonymous budget Pace exists to stay under.
+	mu   sync.Mutex
 	last time.Time
 }
 
@@ -270,6 +285,23 @@ func (c *S2Client) Batch(ctx context.Context, refs []string) ([]*S2Paper, error)
 		}
 		raw, status, retryAfter, err := c.do(ctx, body)
 		switch {
+		case status != 0 && status != http.StatusOK && status != http.StatusTooManyRequests && status < 500:
+			// 400-class other than 429: the request itself is wrong, so waiting
+			// changes nothing.
+			//
+			// Classified ahead of err on purpose. do reads the body even on an error
+			// status, and that read can fail on a connection the server is already
+			// tearing down — a diagnostic that went missing, not a reason to reconsider
+			// the status. Matching err first sent such a 400 down the retry path and
+			// spent every one of MaxRetries+1 attempts, backing off up to two minutes
+			// each, on an answer that cannot change and on a rate limit shared with
+			// every other anonymous caller. Status 0 (no response at all) and 200 (a
+			// body worth re-reading) still fall through to the err case below.
+			detail := truncate(raw, 200)
+			if err != nil {
+				detail = fmt.Sprintf("%s [body read failed: %v]", detail, err)
+			}
+			return nil, fmt.Errorf("status %d: %s: %w", status, detail, ErrS2Status)
 		case err != nil:
 			lastErr = err
 		case status == http.StatusOK:
@@ -281,12 +313,11 @@ func (c *S2Client) Batch(ctx context.Context, refs []string) ([]*S2Paper, error)
 				return nil, parseErr
 			}
 			return papers, nil
-		case status == http.StatusTooManyRequests || status >= 500:
-			lastErr = fmt.Errorf("status %d: %w", status, ErrS2Status)
 		default:
-			// 400-class other than 429: the request itself is wrong, so waiting
-			// changes nothing.
-			return nil, fmt.Errorf("status %d: %s: %w", status, truncate(raw, 200), ErrS2Status)
+			// 429 and 5xx: the two classes worth waiting on. Nothing else reaches
+			// here — every other status returned above, and a status of 0 is only
+			// ever reported alongside an error, which the case above matched.
+			lastErr = fmt.Errorf("status %d: %w", status, ErrS2Status)
 		}
 
 		// The wait spaces out the *next* attempt, so after the last one there is
@@ -358,6 +389,8 @@ func readAllLimited(resp *http.Response) ([]byte, error) {
 // wait enforces Pace between requests, and is where cancellation is observed on
 // the happy path.
 func (c *S2Client) wait(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.last.IsZero() {
 		if gap := c.Pace - time.Since(c.last); gap > 0 {
 			select {

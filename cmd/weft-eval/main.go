@@ -631,7 +631,7 @@ func build(ctx context.Context, args []string) error {
 	}
 
 	ix := engine.New()
-	var added, withVec, withLinks, links, dangling, dimSkipped int
+	var added, withVec, withLinks, links, dangling, repeated, dimSkipped int
 
 	// The width every vector is checked against, decided over the whole cache before
 	// a document is indexed rather than by whichever vector the corpus order happens
@@ -668,16 +668,37 @@ func build(ctx context.Context, args []string) error {
 				}
 			}
 			for _, ref := range r.Refs {
-				if key, ok := byCorpusID[ref]; ok {
-					doc.Links = append(doc.Links, key)
-					links++
-				} else {
+				key, ok := byCorpusID[ref]
+				if !ok {
 					dangling++
+					continue
 				}
+				// An edge appears once. A references list can name the same CorpusId
+				// twice, and duplicate-paper merging on the Semantic Scholar side can
+				// resolve a reference back to this very document — either would be
+				// counted below as an edge the graph does not have, because the
+				// traversal dedupes on visit and a self-edge leads nowhere. The count
+				// is what makes it matter: docs/EVAL.md publishes an in-corpus edge
+				// total as a description of the graph the arms traverse, so an inflated
+				// one is a claim about density that no ranking can corroborate or
+				// contradict. Linear scan because a references list is short and this
+				// runs once per document, not once per query.
+				if key == d.ID || slices.Contains(doc.Links, key) {
+					repeated++
+					continue
+				}
+				doc.Links = append(doc.Links, key)
+				links++
 			}
 			if len(doc.Links) > 0 {
 				withLinks++
 			}
+			// Released as it is consumed. Nothing reads recs after this pass —
+			// corpusIDIndex and dominantDim both ran above — and Add clones the vector
+			// into the index, so holding the cache entry as well keeps two copies of
+			// every SPECTER vector alive: about 525 MB of the 171K-document build,
+			// doubled, for a map nobody will look at again.
+			delete(recs, d.ID)
 		}
 		if _, err := ix.Add(doc); err != nil {
 			return err
@@ -704,6 +725,14 @@ func build(ctx context.Context, args []string) error {
 	}
 	log.Printf("  linked     %d documents, %d in-corpus edges", withLinks, links)
 	log.Printf("  dangling   %d references outside the corpus (skipped at traversal by design)", dangling)
+	if repeated > 0 {
+		// Reported rather than silently dropped, because the number says something
+		// about the source data: it is how many references resolved to an edge this
+		// document already had, or to the document itself. Counted separately from
+		// dangling — those point outside the corpus, these point at a place the
+		// traversal reaches anyway.
+		log.Printf("  repeated   %d references collapsed into an edge that already existed (or into a self-edge)", repeated)
+	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)

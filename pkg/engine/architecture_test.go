@@ -389,10 +389,14 @@ func exportedAPI(t *testing.T, dir string) []string {
 		}
 	}
 
-	// Two declarations cannot share a first line — that would be a redeclaration
-	// — so ordering by it is total, and every member keeps its declared position
-	// underneath.
-	sort.Slice(blocks, func(i, j int) bool { return blocks[i][0] < blocks[j][0] })
+	// Ordered by first line, every member keeping its declared position underneath.
+	// Two declarations sharing a first line would normally be a redeclaration, but
+	// buildTag makes one more case reachable: two files each excluded from every
+	// apiContexts entry both carry the tag " []" and may legally declare the same
+	// symbol. Stable, so those land in ReadDir order rather than in whichever order
+	// pdqsort happened to leave them — a golden that rewrites itself between runs is
+	// worse than one that records a platform nobody builds.
+	sort.SliceStable(blocks, func(i, j int) bool { return blocks[i][0] < blocks[j][0] })
 	var api []string
 	for _, b := range blocks {
 		api = append(api, b...)

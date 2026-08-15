@@ -70,10 +70,15 @@ var comparisons = []comparison{
 // paying a measurable dividend.
 //
 // The cost, recorded because the sweep's numbers depend on it: this is a copy, and a
-// copy can drift from the library it mirrors. It is the reason to prefer a parameter
-// on pkg/fusion the moment a second caller wants a rank constant of its own — the
-// milestone was already willing to touch that package for FuseWeighted, so the
-// argument for the copy is only that no caller outside this sweep has asked.
+// copy can drift from the library it mirrors. That risk is pinned rather than argued
+// away — TestRRFAtTheLibraryConstantIsFuse asserts rrf(fusion.RRFk) is bit-identical to
+// fusion.Fuse, so a change to the library's accumulation that this copy does not follow
+// fails the build instead of quietly re-measuring the sweep against a function the
+// library no longer has. Prefer a parameter on pkg/fusion the moment a second caller
+// wants a rank constant of its own — the milestone was already willing to touch that
+// package for FuseWeighted, so the argument for the copy is that no caller outside this
+// sweep has asked, and that docs/EVAL.md section 2.1 cites this sweep as what the
+// injected Fuser bought.
 //
 // It mirrors Fuse exactly, including the rank-major accumulation order. Sweeping
 // streams first would make a document's float64 total depend on scorer order, so a

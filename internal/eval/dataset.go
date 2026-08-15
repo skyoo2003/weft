@@ -427,6 +427,16 @@ func ReadCORD19IDs(path string, want map[string]bool) (map[string]ExternalIDs, m
 			// One unparseable row in a corpus this size is not worth aborting for,
 			// but it is worth counting: a large tally here is the signal that
 			// LazyQuotes is papering over a real format change.
+			//
+			// A parse error only. csv.Reader has consumed the line it failed on, so
+			// skipping it makes progress; a read error consumed nothing and comes back
+			// identically on the next call, so counting that as a skippable row spins
+			// this loop forever over a 1.6 GB file — silently, in a command already
+			// measured in hours, with nothing but CPU to show for it.
+			var parse *csv.ParseError
+			if !errors.As(err, &parse) {
+				return nil, nil, fmt.Errorf("read %s: %w", path, err)
+			}
 			tally["unreadable-row"]++
 			continue
 		}
@@ -438,8 +448,10 @@ func ReadCORD19IDs(path string, want map[string]bool) (map[string]ExternalIDs, m
 		if uid == "" || !want[uid] {
 			continue
 		}
-		// First row wins. metadata.csv repeats a cord_uid across releases of the
-		// same paper and later rows are not reliably better.
+		// The first row that yielded an identifier wins. metadata.csv repeats a
+		// cord_uid across releases of the same paper and later rows are not reliably
+		// better. A row whose join columns were all empty left nothing to keep, so it
+		// holds no position and a later row for the same uid still gets to fill it.
 		if _, dup := out[uid]; dup {
 			continue
 		}

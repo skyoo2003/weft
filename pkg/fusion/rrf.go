@@ -71,10 +71,12 @@ func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
 // Only the ratios between weights matter. Weights larger than 1 are scaled down so
 // the largest is 1, which leaves the fused order unchanged and keeps a large weight
 // over many streams from overflowing the accumulated score to +Inf — see scaleDown.
-// FuseWeighted(2, 1) and FuseWeighted(1, 0.5) are therefore the same Fuser, and a
-// caller reading Candidate.Score off the result is reading a number whose scale it
-// did not choose. Score has never been comparable across fusions anyway; the ranking
-// is the output.
+// FuseWeighted(2, 1) and FuseWeighted(1, 0.5) are therefore the same Fuser over two
+// streams — but only over two: the implicit 1.0 a third stream gets is scaled with the
+// explicit weights, so the same two calls mean 1:0.5:0.5 and 1:0.5:1 there, which is
+// the paragraph below and not an exception to it. A caller reading Candidate.Score off
+// the result is reading a number whose scale it did not choose. Score has never been
+// comparable across fusions anyway; the ranking is the output.
 //
 // The implicit 1.0 is scaled with them, and has to be. It is a weight like any other,
 // so dividing only the explicit ones changes the ratio between a stream that was given

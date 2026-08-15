@@ -30,6 +30,7 @@ go.work.sum
 # Local tooling, editor, and OS noise
 .claude/
 .ruff_cache/
+__pycache__/
 .DS_Store
 *.swp
 .idea/

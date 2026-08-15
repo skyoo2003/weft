@@ -7,12 +7,80 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/skyoo2003/weft/internal/eval"
 	"github.com/skyoo2003/weft/pkg/engine"
+	"github.com/skyoo2003/weft/pkg/fusion"
 )
+
+// candStream builds a candidate list in the given rank order. The scores descend so
+// the list is well-formed, and they are otherwise meaningless: neither fusion.Fuse nor
+// rrf reads Candidate.Score, which is the property TestScoresAreNeverRead pins one
+// package over.
+func candStream(ids ...engine.DocID) []engine.Candidate {
+	out := make([]engine.Candidate, len(ids))
+	for i, id := range ids {
+		out[i] = engine.Candidate{Doc: id, Score: float64(len(ids) - i)}
+	}
+	return out
+}
+
+// TestRRFAtTheLibraryConstantIsFuse pins the copy in run.go to the library it mirrors.
+//
+// rrf exists because the sweep has to vary a constant fusion.RRFk fixes, and
+// docs/EVAL.md section 2.1 cites that as what injecting the Fuser bought. What the
+// argument does not buy is protection from drift: rrf reimplements the accumulation, so
+// a change to fusion's — a new guard, a different summation order — would leave the
+// sweep measuring a function the library no longer has, and every cell of the section
+// 5.10 table would come from code nobody compared.
+//
+// Bit equality, not approximate. At RRFk the two are meant to be the same arithmetic in
+// the same order, so a tolerance here would hide exactly the reordering the rank-major
+// loop exists to prevent.
+func TestRRFAtTheLibraryConstantIsFuse(t *testing.T) {
+	cases := []struct {
+		name    string
+		streams [][]engine.Candidate
+	}{
+		{"streams of different depths", [][]engine.Candidate{
+			candStream(1, 3, 7, 2),
+			candStream(3, 9, 1),
+			candStream(7, 4),
+		}},
+		// Doc 1 holds ranks 1, 2, 7 and doc 2 holds 7, 1, 2 — the same multiset in a
+		// different order. Rank-major accumulation sums them to identical bits;
+		// stream-major would not, so a copy that swept streams first passes every case
+		// above and fails this one.
+		{"equal rank multisets", [][]engine.Candidate{
+			candStream(1, 90, 91, 92, 93, 94, 2),
+			candStream(2, 1),
+			candStream(95, 2, 96, 97, 98, 99, 1),
+		}},
+		{"one stream is empty", [][]engine.Candidate{candStream(1, 2), {}}},
+		{"no streams at all", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []int{1, 3, 10} {
+				got, want := rrf(fusion.RRFk)(tc.streams, k), fusion.Fuse(tc.streams, k)
+				if !slices.Equal(got, want) {
+					t.Errorf("k=%d: rrf(fusion.RRFk) gave %+v, fusion.Fuse gave %+v", k, got, want)
+				}
+			}
+		})
+	}
+
+	// And the rank constant is live. Without this the cases above are satisfied by an
+	// rrf that ignores its parameter — which would print 28 identical cells and let
+	// sweep report "no sign flip" from one configuration measured 28 times.
+	streams := [][]engine.Candidate{candStream(1, 2, 3), candStream(3, 2, 1)}
+	if slices.Equal(rrf(1)(streams, 3), fusion.Fuse(streams, 3)) {
+		t.Error("rrf(1) fused identically to fusion.Fuse at RRFk=60; the rank constant is not reaching the sum")
+	}
+}
 
 // writeCache writes s to a temporary s2.jsonl and returns its path.
 func writeCache(t *testing.T, s string) string {
@@ -564,6 +632,44 @@ func TestBuildIndexesTheDominantVectorWidth(t *testing.T) {
 			t.Errorf("%s has a %d-dim vector, want %d: the majority width is what gets "+
 				"indexed, not the first one seen", key, len(doc.Vector), want)
 		}
+	}
+}
+
+// TestBuildCountsAnEdgeOnce pins what "579,720 in-corpus edges" is allowed to mean.
+//
+// A references list can name the same CorpusId twice, and duplicate-paper merging on
+// the Semantic Scholar side can resolve one back to the citing document itself.
+// Appended blindly, both become entries in Document.Links and both increment the edge
+// total build prints and docs/EVAL.md publishes — while the traversal, which dedupes on
+// visit and gets nowhere from a self-edge, sees neither. That is a density claim no
+// ranking can corroborate or contradict, which is the one kind this harness exists to
+// keep out.
+func TestBuildCountsAnEdgeOnce(t *testing.T) {
+	dir := evalDir(t, map[string]string{
+		corpusFile: `{"_id":"a","title":"one","text":"alpha"}` + "\n" +
+			`{"_id":"b","title":"two","text":"beta"}` + "\n",
+		s2File: `{"key":"a","corpus_id":"1","refs":["2","2","1"]}` + "\n" +
+			`{"key":"b","corpus_id":"2"}` + "\n",
+	})
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	ix, err := engine.Open(filepath.Join(dir, indexDir))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	id, ok := ix.Resolve("a")
+	if !ok {
+		t.Fatal("a is not in the index")
+	}
+	doc, ok := ix.Doc(id)
+	if !ok {
+		t.Fatal("Doc(a): not found")
+	}
+	if !slices.Equal(doc.Links, []string{"b"}) {
+		t.Errorf("a links to %v, want [b]: three references — b twice and a itself — are "+
+			"one edge, and counting them as three inflates a published graph density", doc.Links)
 	}
 }
 
