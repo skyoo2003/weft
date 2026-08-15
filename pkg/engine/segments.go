@@ -178,9 +178,18 @@ func (s *segment) resolve(key string) (DocID, bool) {
 
 // lookup decodes the postings for term, ascending by index-wide DocID, or nil
 // if this segment does not hold it.
+//
+// The offset is bounds-checked here rather than where the terms index was
+// decoded, and that placement is forced. decodePostings can check it at decode
+// time because it walks the postings file in step with the terms file and knows
+// where each entry belongs; decodeTermIndex performs no such walk, since not
+// walking is what makes Open lazy. So the check moves to the point of use, the
+// same place and the same shape as doc's check on the offset it takes from
+// docoff — and nil is the same answer doc's false is, for the reason D-006
+// gives.
 func (s *segment) lookup(term string) []Posting {
 	off, ok := s.terms[term]
-	if !ok {
+	if !ok || off < segHeaderLen || off-segHeaderLen > len(s.postings) {
 		return nil
 	}
 	r := &segReader{name: postingsFile, b: s.postings, off: off - segHeaderLen}
