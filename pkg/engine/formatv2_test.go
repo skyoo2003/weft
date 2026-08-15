@@ -304,3 +304,115 @@ func TestDocOffsetTableIsFixedWidth(t *testing.T) {
 		t.Fatalf("docoff is %d bytes, which is more than a %d-entry fixed-width table needs (%d)", len(b), ix.Len(), limit)
 	}
 }
+
+// keyIDEntry is one keys-section entry: a key and the DocID it claims.
+type keyIDEntry struct {
+	key string
+	id  uint64
+}
+
+// keysPayload writes a keys section — count, fixed-width offset table, then the
+// entries — with the ids as parameters, because the case below hands one an id
+// its segment does not own and that disagreement is the thing being tested.
+func keysPayload(w *segWriter, entries ...keyIDEntry) {
+	w.uvarint(uint64(len(entries)))
+	off := w.off() + len(entries)*docoffWidth
+	for _, e := range entries {
+		var b [docoffWidth]byte
+		binary.LittleEndian.PutUint64(b[:], uint64(off))
+		w.write(b[:])
+		off += uvarintLen(uint64(len(e.key))) + len(e.key) + uvarintLen(e.id)
+	}
+	for _, e := range entries {
+		w.str(e.key)
+		w.uvarint(e.id)
+	}
+}
+
+// TestAKeysEntryCannotPointOutsideItsSegment is the sibling of
+// TestALyingTermOffsetIsNeverFollowed, on the other value the lazy path takes
+// on trust.
+//
+// A keys entry carries no seeded checksum, so unlike a document record it
+// cannot prove which document it names — and the id it hands back is added to
+// the segment's base before anyone sees it. Unranged, a damaged entry resolves a
+// key straight into a neighbouring segment's ids, and Doc then answers with a
+// real document that is not the one asked for: a plausible wrong answer, which
+// is the failure every seed in this format exists to rule out.
+func TestAKeysEntryCannotPointOutsideItsSegment(t *testing.T) {
+	dir, segDir, _ := commitSeeded(t)
+	// Still four entries, still ascending, still framed and checksummed exactly
+	// as the writer frames them — so the count agrees with meta and the file is
+	// reachable through Open rather than refused by it. Only "alpha"'s id lies.
+	rewriteSection(t, filepath.Join(segDir, keysFile), kindKeys, func(w *segWriter) {
+		keysPayload(w,
+			keyIDEntry{"alpha", 9}, // a four-document segment has no document 9
+			keyIDEntry{"bravo", 3},
+			keyIDEntry{"charlie", 2},
+			keyIDEntry{"delta", 0},
+		)
+	})
+
+	ix, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ix.Close() //nolint:errcheck // teardown
+
+	if id, ok := ix.Resolve("alpha"); ok {
+		t.Errorf("Resolve(alpha) = %d from an entry naming document 9 of a 4-document segment", id)
+	}
+	// One entry refused, not the table: the guard is on the id, at the point it
+	// is used, and its neighbours are untouched.
+	if id, ok := ix.Resolve("bravo"); !ok || id != 3 {
+		t.Errorf("Resolve(bravo) = %d, %v; want 3, true", id, ok)
+	}
+
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with a keys entry naming a document outside the segment: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestAKeysEntryCannotNameTheWrongDocumentInside is what ranging the id against
+// the segment cannot reach.
+//
+// An id that stays inside the segment passes every bound there is, and Resolve
+// hands back a document that exists, decodes and checksums clean — it is simply
+// not the one the key belongs to. That is the plausible wrong answer of the
+// sibling test above, moved one segment closer in, and the range check is blind
+// to it. The record is the witness a keys entry does not carry, so resolve asks
+// it: the record's own first field is its key.
+func TestAKeysEntryCannotNameTheWrongDocumentInside(t *testing.T) {
+	dir, segDir, _ := commitSeeded(t)
+	// commitSeeded lays down delta=0, alpha=1, charlie=2, bravo=3. Only "alpha"
+	// lies, and unlike the test above it lies about a document this segment
+	// really holds — so nothing but the record can contradict it.
+	rewriteSection(t, filepath.Join(segDir, keysFile), kindKeys, func(w *segWriter) {
+		keysPayload(w,
+			keyIDEntry{"alpha", 2}, // charlie's id: in range, in this segment
+			keyIDEntry{"bravo", 3},
+			keyIDEntry{"charlie", 2},
+			keyIDEntry{"delta", 0},
+		)
+	})
+
+	ix, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ix.Close() //nolint:errcheck // teardown
+
+	if id, ok := ix.Resolve("alpha"); ok {
+		d, _ := ix.Doc(id)
+		t.Errorf("Resolve(alpha) = %d, which is document %q", id, d.Key)
+	}
+	// One entry refused, not the table, and not the document the liar named:
+	// charlie's own entry is truthful and still answers.
+	if id, ok := ix.Resolve("charlie"); !ok || id != 2 {
+		t.Errorf("Resolve(charlie) = %d, %v; want 2, true", id, ok)
+	}
+
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with a keys entry naming the wrong document: got %v, want ErrCorrupt", err)
+	}
+}

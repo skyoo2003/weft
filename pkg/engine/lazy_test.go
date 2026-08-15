@@ -67,10 +67,37 @@ func assertReadAPIsAgree(t *testing.T, want, got *Index) {
 		}
 	}
 
-	// Postings are compared over the terms the committed index holds, which is
-	// the only side that can enumerate them — a mapped segment answers point
-	// queries and does not hand out its vocabulary.
+	// Postings are compared over the terms the corpus contains, derived from the
+	// documents rather than read out of want.postings.
+	//
+	// want.postings is the *pending* map, and every caller here commits before
+	// comparing — Commit's adopt clears it. Ranging over it therefore compared
+	// nothing and passed, which is the one failure mode an assertion helper must
+	// not have. A mapped segment does not hand out its vocabulary, but the
+	// documents are readable through the API and Tokenize is what built the
+	// postings in the first place.
+	terms := map[string]struct{}{}
+	tokens := 0
+	for i := range want.Len() {
+		d, ok := want.Doc(DocID(i))
+		if !ok {
+			continue
+		}
+		tokens += want.DocLen(DocID(i))
+		for _, tok := range Tokenize(d.Text) {
+			terms[tok] = struct{}{}
+		}
+	}
 	for term := range want.postings {
+		terms[term] = struct{}{}
+	}
+	// A corpus of textless documents has no terms and that is a real case; a
+	// corpus with tokens in it and no terms to compare means this derivation
+	// stopped working.
+	if tokens > 0 && len(terms) == 0 {
+		t.Fatalf("%d tokens indexed and no terms to compare postings over", tokens)
+	}
+	for term := range terms {
 		if !slices.Equal(got.Lookup(term), want.Lookup(term)) {
 			t.Errorf("Lookup(%q) = %v, want %v", term, got.Lookup(term), want.Lookup(term))
 		}
@@ -246,17 +273,30 @@ func TestOpenDoesNotDecodeTheCorpus(t *testing.T) {
 // restore_test.go already asserts that the two rank identically. This asserts
 // the layer underneath, so a disagreement reports which method disagreed rather
 // than that some ranking moved.
+//
+// The eager side is a second index that is never committed, and that is the
+// point of the test rather than a detail of it: Commit adopts the segment it
+// wrote, so the index that did the committing answers through a mapping
+// afterwards. Comparing it against a reopen would compare two lazy readers and
+// pass without touching the question in the name.
 func TestLazyAndEagerAgreeOnEveryReadAPI(t *testing.T) {
-	want := New()
-	addAll(t, want, []Document{
+	docs := []Document{
 		{Key: "delta", Text: "fusion ranking", Vector: []float32{1, 0}, Links: []string{"alpha"}},
 		{Key: "alpha", Text: "fusion scorer architecture", Vector: []float32{0, 1}},
 		{Key: "charlie", Text: "scorer", Links: []string{"nowhere"}},
 		{Key: "bravo", Text: "ranking ranking ranking"},
-	})
+	}
+	want := New()
+	addAll(t, want, docs)
+
+	writer := New()
+	addAll(t, writer, docs)
 	dir := t.TempDir()
-	if err := want.Commit(dir); err != nil {
+	if err := writer.Commit(dir); err != nil {
 		t.Fatalf("Commit: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 	got, err := Open(dir)
 	if err != nil {
@@ -739,4 +779,79 @@ func TestALyingTermOffsetIsNeverFollowed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMergeRefusesToPublishWhatItCouldNotRead is the other side of D-006's
+// trade, and the one place that answer must not be taken at face value.
+//
+// A mapped segment reports a damaged record as absent, because Doc's signature
+// is (Document, bool). A merge reading through that same API would copy the
+// absence into the segment it writes — an empty-key document, or a term with no
+// postings — publish it, and prune the originals. Contained damage that Scrub
+// can name and a rebuild can repair would become a segment no reader accepts,
+// and nothing would have reported a failure. So the merge refuses instead, and
+// refuses before anything on disk is named.
+func TestMergeRefusesToPublishWhatItCouldNotRead(t *testing.T) {
+	dir := t.TempDir()
+	ix := commitEach(t, dir, 9) // nine is the fewest that merges anything: k = 9 - maxSegments + 1
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	before, manifest := dirNames(t, dir), manifestBytes(t, dir)
+
+	// A byte inside the first generation's only document record, where nothing
+	// but the record's own checksum can see it.
+	path := filepath.Join(dir, segDirName(1), docsFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b[segHeaderLen+3] ^= 0xff
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	if _, ok := got.Doc(0); ok {
+		t.Fatal("the damaged record still reads; this test is flipping the wrong byte")
+	}
+
+	if err := got.Merge(); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Merge over a segment holding a damaged record: got %v, want ErrCorrupt", err)
+	}
+	// Nothing was swapped in memory and nothing was published on disk, so the
+	// damage is still exactly where Scrub can find it and a rebuild can replace
+	// it. The half-written segment is left behind unnamed, which is what a failed
+	// Commit leaves too: no manifest points at it, and the next write's RemoveAll
+	// clears it.
+	if n := len(got.segs); n != 9 {
+		t.Errorf("Merge left %d segments after refusing, want 9", n)
+	}
+	for _, name := range before {
+		if !slices.Contains(dirNames(t, dir), name) {
+			t.Errorf("a refused merge removed %s", name)
+		}
+	}
+	if after := manifestBytes(t, dir); !slices.Equal(after, manifest) {
+		t.Error("a refused merge published a new manifest")
+	}
+	if _, ok := got.Doc(8); !ok {
+		t.Error("a document outside the damage went missing")
+	}
+}
+
+// manifestBytes is the published manifest, verbatim. The commit point of both
+// Commit and Merge is the rename that puts these bytes in place, so "nothing was
+// published" is exactly "these bytes did not change".
+func manifestBytes(t *testing.T, dir string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, manifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

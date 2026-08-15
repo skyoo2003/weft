@@ -54,6 +54,43 @@ func TestCommitEmptyIndex(t *testing.T) {
 	}
 }
 
+// TestCommitWithNothingPendingPublishesNothing is the other half of the empty
+// commit above: the first one writes an index Open can read, and every one after
+// it has nothing left to write.
+//
+// An empty generation is not free. It joins the manifest and the segment list,
+// and every point query walks that list — so a caller polling Commit would slow
+// its own reads down without adding a document, without bound.
+func TestCommitWithNothingPendingPublishesNothing(t *testing.T) {
+	dir := t.TempDir()
+	ix := New()
+	addAll(t, ix, []Document{{Key: "only", Text: "the one document there is"}})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("first Commit: %v", err)
+	}
+	want := dirNames(t, dir)
+
+	for i := range 3 {
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit %d with nothing pending: %v", i+2, err)
+		}
+	}
+	if got := dirNames(t, dir); !slices.Equal(got, want) {
+		t.Errorf("three commits with nothing pending changed the directory:\n got %v\nwant %v", got, want)
+	}
+
+	// And the index still reads, so returning early did not leave it half-way
+	// through a commit it decided not to make.
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	if _, ok := got.Resolve("only"); !ok {
+		t.Error("the committed document did not survive the commits that wrote nothing")
+	}
+}
+
 // TestUnmanifestedSegmentIsInvisible is the atomicity pass line: a segment
 // written but never named by a MANIFEST — a commit that died before its
 // rename — must be indistinguishable from a segment that never existed. Open
