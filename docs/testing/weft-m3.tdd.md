@@ -2,7 +2,8 @@
 
 **Source plan**: `.claude/plans/weft-m3.plan.md` (M3 — 규모)
 **Branch**: `m3-scale`
-**Status**: in progress. Task 1 is partly landed; tasks 1d, 1e and 2–8 are open.
+**Status**: tasks 1–6 and 8 complete. Task 7 (the approximate vector index) is
+not started, and section "Coverage and known gaps" says what that leaves undone.
 
 This file is an index, not a substitute for the tests. It records what each
 test proves and preserves that across session restarts and squash merges —
@@ -125,51 +126,60 @@ instead of the rule it is named for. `TestUnsortedTermsAreRefused` did exactly
 that — passed green, never reached the ordering check. It now asserts the
 reason in the error message, not just the sentinel.
 
+### Tasks 1e, 2, 3, 4, 5, 6, 8
+
+Each ran the same cycle: a failing test naming the missing behaviour, the
+minimum that made it pass, gates re-run. The table below is what the passing
+tests now guarantee; the commit list at the end is the RED/GREEN evidence.
+
+Three of the REDs measured rather than merely failed, and the measurement is the
+part worth keeping:
+
+| Task | RED | GREEN |
+| --- | --- | --- |
+| 1e streaming writer | `Commit` allocated 51,453,656 B for an 8,799,768 B segment (585%) | 695,536 B for 7,223,605 B (9.6%) |
+| 3 router | `Open` rebuilt every document, posting list and key | 154,696 B for a 7,223,605 B segment (2.1%); heap flat at 74,504 B across an 8× corpus |
+| 4 incremental commit | the second commit deleted the first generation | one document onto a 7.2 MB corpus writes 245 B, previous generation byte-identical |
+
+**The real corpus, at the end.** The evaluation index was rebuilt at format v2 and
+`make eval` re-run. All five milestone 4 arms reproduce to four decimals, both
+binding deltas keep their confidence intervals, and the largest per-query moves
+are unchanged. `Open` went from 979 ms to 54 ms. Recorded in
+[EVAL.md](../EVAL.md) section 8.
+
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
 |---|---|---|---|---|---|
-| 1 | A version 1 segment is refused with `ErrBadVersion`, never migrated or misread | `pkg/engine/formatv2_test.go:TestVersionOneIsRefused` | unit | PASS | `go test ./pkg/engine/` |
-| 2 | Every `docoff` entry is the absolute file offset where that DocID's record begins, and decoding from there — with nothing before it read — yields that document | `formatv2_test.go:TestDocOffsetsLandOnRecordStarts` | unit | PASS | `go test ./pkg/engine/` |
+| 1 | A version 1 segment is refused with `ErrBadVersion`, never migrated or misread | `formatv2_test.go:TestVersionOneIsRefused` | unit | PASS | `go test ./pkg/engine/` |
+| 2 | Every `docoff` entry is the absolute file offset where that DocID's record begins, and decoding from there — with nothing before it read — yields that document | `formatv2_test.go:TestDocOffsetsLandOnRecordStarts` | unit | PASS | same |
 | 3 | An out-of-range DocID reports false rather than indexing past the table | `formatv2_test.go:TestDocOffsetsLandOnRecordStarts` | unit | PASS | same |
-| 4 | The `keys` section is strictly ascending and every entry agrees with the DocID `docs` assigned; `lookup` finds present keys and reports absent ones without error | `formatv2_test.go:TestKeysSectionIsSortedAndAgreesWithDocs` | unit | PASS | same |
+| 4 | The `keys` section is strictly ascending and agrees with the DocIDs `docs` assigned; `lookup` finds present keys and reports absent ones without error | `formatv2_test.go:TestKeysSectionIsSortedAndAgreesWithDocs` | unit | PASS | same |
 | 5 | The offset table is fixed width, so entry *i* is reachable by arithmetic — a uvarint table would pass #2 and #4 while leaving `Doc(id)` O(id) | `formatv2_test.go:TestDocOffsetTableIsFixedWidth` | unit | PASS | same |
 | 6 | An overlong encoding of the current version is `ErrCorrupt` — two byte strings may not mean one index | `segment_test.go:TestOverlongVersionEncodingIsRefused` | unit | PASS | same |
 | 7 | A future version is `ErrBadVersion`, not misread | `segment_test.go:TestOtherVersionsAreRefusedNotMisread` | unit | PASS | same |
-| 8 | A `docoff` or `keys` section disagreeing with `docs` is refused at `Open` rather than answering wrongly later | `seek.go:verifySeekSections`, exercised by every `Open` in the suite | unit | PASS | `go test ./...` |
-| 9 | Neither the frame parser nor the decoders panic on arbitrary bytes, including the two new section kinds | `segment_test.go:FuzzParseSection` | fuzz | PASS | 5,466,890 execs |
+| 8 | A `docoff` or `keys` section disagreeing with `docs` is refused rather than answering wrongly later | `seek.go:verifySeekSections`, run by every `Scrub` | unit | PASS | `go test ./...` |
+| 9 | Neither the frame parser nor the decoders panic on arbitrary bytes, the new section kinds included | `segment_test.go:FuzzParseSection`, `FuzzSegmentDecoding` | fuzz | PASS | 6.1M execs |
 | 10 | The storage change costs the scorers and the fuser nothing | `git diff --stat main -- pkg/scorer pkg/fusion` | architecture | PASS | empty output |
-| 11 | Any byte flip in `docs`, `postings` or `terms` is caught **with the frame checksum repaired** — the state every lazy read is in | `formatv2_test.go:TestEveryByteFlipIsCaughtWithoutTheFrameCRC` | unit | PASS | `go test ./pkg/engine/` |
+| 11 | Any byte flip in `docs`, `postings` or `terms` is caught **with the frame checksum repaired** — the state every lazy read is in | `formatv2_test.go:TestEveryByteFlipIsCaughtWithoutTheFrameCRC` | unit | PASS | same |
 | 12 | A healthy record decoded under another document's id is refused, so a damaged offset table cannot produce a plausible wrong answer | `formatv2_test.go:TestARecordDecodedUnderTheWrongIDIsRefused` | unit | PASS | same |
 | 13 | Unsorted terms are refused **for being unsorted**, asserted on the reason rather than the sentinel | `segment_test.go:TestUnsortedTermsAreRefused` | unit | PASS | same |
 | 14 | The 20-case lying-file matrix still trips the rule each case names, not the new checksum | `segment_test.go:TestLyingFilesAreRefused` | unit | PASS | same |
-
-## Coverage and known gaps
-
-Coverage is not the instrument this repository uses — `make arch` and the
-corruption matrices are — so no percentage is claimed here. What *is* claimed:
-
-- **Verification is still eager.** `verifySeekSections` reads every entry on
-  every `Open`, which is O(index) and precisely what task 2 has to move into
-  `Scrub`. It is written as one function so that move is a call site changing,
-  not a rule being dropped.
-- **Per-unit checksums cover `docs`, `postings` and `terms` only.** `docoff`
-  and `keys` have none, because `verifySeekSections` still re-derives both from
-  `docs` on every `Open` — the check task 2 has to move. When it moves, those
-  two join the sweep, and a damaged `docoff` entry is already caught by the
-  id-seeded record checksum rather than by trusting the table.
-- **`meta` has no per-unit checksum and needs none**: it is 19 bytes, always
-  read in full, and `Open` cross-checks every field against the documents.
-- **`segWriter` still buffers whole sections** (task 1e). Its own comment calls
-  that fine "by construction — the section describes an index that is itself
-  entirely in memory"; task 5's merge is what breaks that premise.
-- **Nothing measured on the real corpus yet.** Pass line 1 requires `make eval`
-  to reproduce milestone 4's five arm numbers after a v2 rebuild. Not run —
-  `.eval-data/index` is still a v1 directory and rebuilding it is task 6's work.
-- **The vector arithmetic in plan §1 is unaddressed and expected to stay that
-  way until task 7.** Roughly 69% of the 656 MB `docs` file is vectors, and
-  `scorer/vector` scans all of them per query, so lazy loading moves those
-  bytes from the Go heap to the page cache without shrinking the working set.
+| 15 | A commit allocates a fraction of the segment it writes, not a multiple of it | `segment_test.go:TestCommitDoesNotBufferTheSegment` | unit | PASS | 695,536 B for 7,223,605 B |
+| 16 | `Open` does not compute a section's whole-file checksum — the read lazy loading exists to remove | `lazy_test.go:TestOpenSkipsTheFrameChecksum` | unit | PASS | `go test ./pkg/engine/` |
+| 17 | `Scrub` catches everything `Open` stopped catching, including every byte flip and every truncation of every file | `lazy_test.go:TestScrubCatchesWhatOpenNoLongerDoes`, `segment_test.go:TestEveryByteFlipIsCaught`, `TestEveryTruncationIsCaught` | unit | PASS | same |
+| 18 | `Open` costs the vocabulary, not the corpus | `lazy_test.go:TestOpenDoesNotDecodeTheCorpus` | unit | PASS | 154,696 B for 7,223,605 B |
+| 19 | A lazily opened index answers every read method exactly as the index that was committed | `lazy_test.go:TestLazyAndEagerAgreeOnEveryReadAPI`, `segment_test.go:TestSegmentRoundTrip`, `restore_test.go` | unit | PASS | same |
+| 20 | Eight times the corpus does not mean more Go heap | `lazy_test.go:TestHeapDoesNotScaleWithTheCorpus` | unit | PASS | 74,504 B at 250 docs, 74,504 B at 2,000 |
+| 21 | A damaged record is never served: not a wrong document, not a panic, neighbours intact, and `Scrub` names it | `lazy_test.go:TestADamagedRecordIsNeverServed` | unit | PASS | same |
+| 22 | `Close` releases the mappings and leaves the index answering as empty rather than dangling; twice is a no-op | `lazy_test.go:TestCloseReleasesTheSegments` | unit | PASS | same |
+| 23 | A commit writes what was added, not the corpus, and leaves earlier generations byte-identical | `lazy_test.go:TestCommitAfterOneAddWritesOneDocument` | unit | PASS | 245 B onto 7.2 MB |
+| 24 | Generations accumulate, and a segment the manifest does not name is swept | `persist_test.go:TestSuccessiveCommitsAccumulateGenerations`, `TestUnmanifestedSegmentIsInvisible` | unit | PASS | same |
+| 25 | `Merge` bounds the segment count | `lazy_test.go:TestMergeBoundsTheSegmentCount` | unit | PASS | same |
+| 26 | A merge moves no document id, no posting list and no statistic | `lazy_test.go:TestMergeDoesNotMoveRankings` | unit | PASS | same |
+| 27 | The same corpus produces the same bytes, committed or merged | `lazy_test.go:TestCommitIsByteDeterministic`, `TestMergeIsByteDeterministic` | unit | PASS | same |
+| 28 | The milestone 4 evaluation reproduces on the new format | `weft-eval build` then `make eval` | integration | PASS | five arms to four decimals, both deltas with intervals |
+| 29 | Commit atomicity, symlink refusal, generation bounds and foreign-entry refusal all survive the rewrite | `persist_test.go` (20 tests) | unit | PASS | `go test ./pkg/engine/` |
 
 ## Merge evidence
 
@@ -182,6 +192,19 @@ Checkpoint commits on `m3-scale`, oldest first:
 | `6108a01` | docs | This file |
 | `eab4750` | RED | Five payload positions survive a flip once the frame checksum is repaired; a record decodes under the wrong id with no error |
 | `b431d1e` | GREEN | Those positions all caught, wrong-id read refused; `make all`/`arch`/`deps` green; 6.1M fuzz execs no panic; scorer/fusion diff still 0 |
+| `2924844` | docs | Task 1d written up |
+| `28e201c` | RED | `Commit` allocates 585% of the segment it writes |
+| `d5f6c79` | GREEN | 9.6%; the two allocations that dominated were an escaping varint scratch and a string conversion, neither of them the buffer being removed |
+| `652b4c5` | RED | `Scrub` undefined; `Open` demonstrably computes every section's whole-file checksum |
+| `0c18df8` | GREEN | Verification split three ways; `GOOS=windows` builds; the two exhaustive sweeps moved to `Scrub` |
+| `824c954` | RED | `Index.Close` undefined; `Open` rebuilds the corpus |
+| `3ef53a1` | GREEN | `Open` allocates 2.1% of the segment; six read methods unchanged; API grew by two names |
+| `d599fd8` | RED | The second commit deletes the first generation |
+| `4f9b6b1` | GREEN | 245 bytes for one document; earlier generations byte-identical; two callers fixed |
+| `a6246c9` | RED | `Index.Merge` and `maxSegments` undefined |
+| `20915a6` | GREEN | Count bounded, rankings unmoved, bytes deterministic |
+| `d02869a` | GREEN | Heap flat at 74,504 B across an 8× corpus; commit determinism |
+| `4de2e8f` | docs | FINDINGS verdict, FORMAT v2, D-006/D-007, EVAL section 8 |
 
 If these are squashed, this table and the two blocks above are the surviving
 record.
