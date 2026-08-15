@@ -5,10 +5,10 @@
 // # Measured contribution: none. Read this before enabling it.
 //
 // Milestone 4 evaluated this scorer on TREC-COVID joined to the Semantic Scholar
-// citation graph — 171,332 documents, 579,720 in-corpus edges, 50 queries — and it
+// citation graph — 171,332 documents, 579,719 in-corpus edges, 50 queries — and it
 // did not improve ranking quality at any setting tried. No fusion weight beat the
 // baseline: from 0.1 downward the arm it produces *is* the baseline, delta exactly
-// +0.0000. Under equal-weight RRF (fusion.Fuse) it is far worse than neutral: −0.1202.
+// +0.0000. Under equal-weight RRF (fusion.Fuse) it is far worse than neutral: −0.1227.
 //
 // Two things follow for a caller.
 //

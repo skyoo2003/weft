@@ -42,7 +42,7 @@ const RRFk = 60.0
 //
 // Every stream gets one equal vote. That is a ranking decision rather than a
 // neutral default, and milestone 4 measured what it costs when one stream is much
-// weaker than the others: 0.1202 nDCG@10, two orders of magnitude more than the
+// weaker than the others: 0.1227 nDCG@10, two orders of magnitude more than the
 // signal under evaluation was worth (docs/FINDINGS.md milestone 4 section 7).
 // FuseWeighted is the escape hatch.
 func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
@@ -101,7 +101,7 @@ func Fuse(streams [][]engine.Candidate, k int) []engine.Candidate {
 // therefore identity; weighting *votes* does not.
 //
 // Milestone 4's evidence for adding it: at weight 1.0 a near-noise stream cost
-// 0.1202 nDCG@10, and halving that one weight erased all but 0.0019 of it. What
+// 0.1227 nDCG@10, and halving that one weight erased all but 0.0019 of it. What
 // that milestone did not answer is where weights should come from. Hand-tuning
 // per corpus reintroduces the per-deployment tuning burden a scorer-agnostic design
 // exists to avoid, and learning them from relevance judgments is a different

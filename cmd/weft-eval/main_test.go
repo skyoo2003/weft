@@ -635,7 +635,7 @@ func TestBuildIndexesTheDominantVectorWidth(t *testing.T) {
 	}
 }
 
-// TestBuildCountsAnEdgeOnce pins what "579,720 in-corpus edges" is allowed to mean.
+// TestBuildCountsAnEdgeOnce pins what "579,719 in-corpus edges" is allowed to mean.
 //
 // A references list can name the same CorpusId twice, and duplicate-paper merging on
 // the Semantic Scholar side can resolve one back to the citing document itself.
@@ -1034,5 +1034,41 @@ func TestBuildLeavesNoProvenanceForAnIndexItDidNotFinish(t *testing.T) {
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("provenance survived a rebuild that did not finish (stat err %v); a later run "+
 			"would verify it and publish whatever the index now holds", err)
+	}
+}
+
+// TestLoadQueriesRejectsJudgmentsForAMissingQuery is the pairing check in the
+// direction the loop cannot see.
+//
+// Judgments are looked up per query, so a qrels row for a query missing from
+// queries.jsonl is never reached — not skipped, not counted, not reported. A truncated
+// or mismatched query file then produces a mean and a bootstrap over whatever queries
+// survived, printed under the usual heading with a query count nobody compares to 50.
+// Dropping a judgment-less query is the deliberate case and is counted; this is its
+// mirror image, and there is no reading of it that is not a broken pairing.
+func TestLoadQueriesRejectsJudgmentsForAMissingQuery(t *testing.T) {
+	files := map[string]string{
+		queriesFile: `{"_id":"1","text":"what is the origin of COVID-19"}` + "\n",
+		qrelsFile:   "query-id\tcorpus-id\tscore\n1\ta\t2\n2\tb\t1\n",
+	}
+	_, err := loadQueries(evalDir(t, files))
+	if err == nil {
+		t.Fatal("loadQueries accepted judgments for a query the query file does not hold; " +
+			"every arm would be averaged over the queries that happen to remain")
+	}
+	if !strings.Contains(err.Error(), `"2"`) {
+		t.Errorf("error = %v, want it to name the query whose judgments are unreachable", err)
+	}
+
+	// The reverse is the deliberate case and stays allowed: a query with no judgments
+	// scores 0 by definition, so it is dropped and counted rather than refused.
+	files[queriesFile] += `{"_id":"2","text":"a question nobody judged"}` + "\n"
+	files[qrelsFile] = "query-id\tcorpus-id\tscore\n1\ta\t2\n"
+	qs, err := loadQueries(evalDir(t, files))
+	if err != nil {
+		t.Fatalf("loadQueries with an unjudged query: %v", err)
+	}
+	if len(qs) != 1 || qs[0].ID != "1" {
+		t.Errorf("loaded %d queries, want only the judged one", len(qs))
 	}
 }

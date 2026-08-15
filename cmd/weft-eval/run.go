@@ -149,6 +149,36 @@ func loadQueries(dir string) ([]eval.Query, error) {
 		log.Printf("WARNING: it is an upper bound. Run testdata/gen_query_vectors.py first.")
 	}
 
+	// Judgments for a query the query file does not hold. The loop below walks the
+	// queries and looks each one's judgments up, so a qrels row for a query that is
+	// missing from queries.jsonl is not skipped, reported or counted — it is never
+	// reached. A truncated or mismatched query file therefore produces a mean and a
+	// bootstrap over however many queries survived, printed under the usual heading
+	// with a query count nobody compares to 50. Dropping a *judgment-less query* is
+	// the deliberate case and is counted below; this is its mirror image, and there is
+	// no reading of it that is not a broken pairing.
+	//
+	// Checked even under -any-snapshot, because that flag says "a different corpus",
+	// not "a query set and its judgments that disagree".
+	byID := make(map[string]bool, len(qs))
+	for _, q := range qs {
+		byID[q.ID] = true
+	}
+	var orphans []string
+	for id := range qrels {
+		if !byID[id] {
+			orphans = append(orphans, id)
+		}
+	}
+	if len(orphans) > 0 {
+		// Sorted: map iteration is randomised, and an error naming a different query
+		// on every run is an error nobody can act on.
+		sort.Strings(orphans)
+		return nil, fmt.Errorf("%s holds judgments for %d queries %s does not contain (%q is one), "+
+			"so those judgments are unreachable and every arm would be averaged over the queries that "+
+			"happen to remain", qrelsFile, len(orphans), queriesFile, orphans[0])
+	}
+
 	var out []eval.Query
 	var unjudged, withVec int
 	for _, q := range qs {
@@ -632,7 +662,7 @@ func sweep(ctx context.Context, args []string) error {
 
 // weights answers the question milestone 4 created rather than settled: unweighted
 // RRF gives a near-noise stream the same vote as BM25's, and the measured cost of
-// that was −0.1202 nDCG@10. Does discounting the graph stream recover it?
+// that was −0.1227 nDCG@10. Does discounting the graph stream recover it?
 //
 // Only the graph stream's weight moves. text and vector stay at 1.0, so the sweep
 // isolates one variable, and w=0 is not tested because it is the baseline arm by
