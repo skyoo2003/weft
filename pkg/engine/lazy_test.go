@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -305,6 +306,107 @@ func TestCloseReleasesTheSegments(t *testing.T) {
 	if _, ok := got.Resolve("a"); ok {
 		t.Error("Resolve answered after Close")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Incremental commit: D-003's repayment.
+// ---------------------------------------------------------------------------
+
+// dirBytes hashes every file under dir, so "these bytes did not change" is one
+// comparison rather than a walk in the test.
+func dirBytes(t *testing.T, dir string) map[string]uint32 {
+	t.Helper()
+	out := map[string]uint32{}
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		out[rel] = crc32.Checksum(b, segCRC)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestCommitAfterOneAddWritesOneDocument is D-003 coming due.
+//
+// "One segment per commit, the whole corpus rewritten" was the milestone 2
+// decision, marked with a ponytail comment naming this milestone as its
+// repayment trigger: at in-memory scale O(corpus) per commit is irrelevant, and
+// at the scale this milestone is about it means reading and writing the entire
+// corpus to record one new document. The 666 MB evaluation index carries
+// generation 9 — nine commits, nine full rewrites, roughly 6 GB moved to store
+// 666 MB.
+//
+// Two things are asserted, and the second is the stronger one. The new
+// generation must be small, and the previous generation's bytes must be
+// untouched — a commit that rewrote the old segment identically would pass a
+// size check while doing exactly the work being removed.
+func TestCommitAfterOneAddWritesOneDocument(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds an 8 MB corpus")
+	}
+	ix := bulkCorpus(t, 2000)
+	dir := t.TempDir()
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("first Commit: %v", err)
+	}
+	first := dirBytes(t, filepath.Join(dir, segDirName(1)))
+	bulk := segmentBytes(t, dir)
+
+	if _, err := ix.Add(Document{Key: "one-more", Text: "a single extra document"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("second Commit: %v", err)
+	}
+
+	// The first generation is still there, byte for byte.
+	if got := dirBytes(t, filepath.Join(dir, segDirName(1))); !maps.Equal(got, first) {
+		t.Errorf("the first generation was rewritten by the second commit:\n got %v\nwant %v", got, first)
+	}
+
+	// And the second holds one document's worth of bytes, not the corpus's.
+	var second int64
+	for _, s := range segSections {
+		fi, err := os.Stat(filepath.Join(dir, segDirName(2), s.name))
+		if err != nil {
+			t.Fatalf("second generation is missing %s: %v", s.name, err)
+		}
+		second += fi.Size()
+	}
+	if limit := int64(64 << 10); second > limit {
+		t.Errorf("committing one document wrote %d bytes on top of a %d-byte corpus, over the %d-byte limit",
+			second, bulk, limit)
+	}
+	t.Logf("corpus %d bytes, one more document cost %d", bulk, second)
+
+	// The whole corpus is still readable, and the new document with it.
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	if n := got.Len(); n != 2001 {
+		t.Fatalf("reopened index holds %d documents, want 2001", n)
+	}
+	if _, ok := got.Resolve("one-more"); !ok {
+		t.Error("the document the second commit was for is not in the reopened index")
+	}
+	if _, ok := got.Resolve("doc-00000"); !ok {
+		t.Error("a document from the first generation is missing after the second commit")
+	}
+	assertReadAPIsAgree(t, ix, got)
 }
 
 // TestADamagedRecordIsNeverServed guards the boundary against moving too far,
