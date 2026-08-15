@@ -855,3 +855,144 @@ func manifestBytes(t *testing.T, dir string) []byte {
 	}
 	return b
 }
+
+// ---------------------------------------------------------------------------
+// Neither Merge nor Scrub may hold the corpus it walks.
+// ---------------------------------------------------------------------------
+
+// ubiquitousCorpus adds n documents that all carry the same vocabulary in full,
+// so every term's posting list is as long as the corpus.
+//
+// The shape is the measurement rather than a convenience. Walking a segment
+// costs two things that scale with different quantities — the documents decoded
+// one at a time, and the posting lists held whole — and a corpus where every
+// term names every document is what makes the second dominate. The terms are
+// two characters each, which is the smallest a token can be and still leave 676
+// of them: the fewer text bytes a posting costs, the more plainly a number taken
+// here is about posting lists.
+func ubiquitousCorpus(t *testing.T, ix *Index, from, n, terms int) {
+	t.Helper()
+	if terms > 26*26 {
+		t.Fatalf("%d two-character terms do not exist", terms)
+	}
+	var sb strings.Builder
+	for j := range terms {
+		fmt.Fprintf(&sb, "%c%c ", 'a'+j/26, 'a'+j%26)
+	}
+	text := sb.String()
+	for i := range n {
+		if _, err := ix.Add(Document{Key: fmt.Sprintf("doc-%06d", from+i), Text: text}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+}
+
+// TestMergeDoesNotBufferPostingLists is the merge half of the milestone's memory
+// claim, and the half nothing measured.
+//
+// Open and Commit were both pinned against the corpus. Merge was not, and it is
+// the one operation that reads segments already on disk — the corpus that does
+// not fit is exactly what it moves. Asking each segment for a term's complete
+// posting list and concatenating those into another retained slice makes a term
+// present in most documents cost the corpus, twice, on a path whose entire
+// purpose is corpora too large for that.
+//
+// TotalAlloc rather than HeapAlloc, for the reason the writer's test gives: it
+// never goes down, so a buffer allocated and then collected still shows up. It
+// also bounds what was retained, since nothing can be live that was never
+// allocated.
+func TestMergeDoesNotBufferPostingLists(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a corpus of 800,000 postings")
+	}
+	dir := t.TempDir()
+	ix := New()
+	defer ix.Close() //nolint:errcheck // teardown
+
+	// One commit holding the whole corpus, then eight holding a document each.
+	// The policy collapses len(segs) - maxSegments + 1 = 2 segments and the
+	// oldest run is what it takes, so the segment being merged is the one that
+	// holds everything. "The first committed segment can contain the entire
+	// corpus" is the case this is about, and the one that reusing a buffer
+	// across segments would not touch.
+	ubiquitousCorpus(t, ix, 0, 4000, 200)
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	onDisk := segmentBytes(t, dir)
+	for i := range 8 {
+		ubiquitousCorpus(t, ix, 4000+i, 1, 200)
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit %d: %v", i, err)
+		}
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if err := ix.Merge(); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+
+	// The segment itself, once. Not a fraction of it, and the difference is
+	// stated rather than left to be inferred: a merge decodes every document in
+	// order to write it again, so the records it copies are a floor no amount of
+	// streaming removes. What must not be there is a *multiple* of the corpus,
+	// which is what holding posting lists adds — sixteen bytes for every two on
+	// disk, doubled again by the concatenation.
+	if int64(allocated) > onDisk {
+		t.Fatalf("Merge allocated %d bytes over a %d-byte segment — it is still holding posting lists rather than streaming them",
+			allocated, onDisk)
+	}
+	t.Logf("segment %d bytes on disk, Merge allocated %d", onDisk, allocated)
+}
+
+// TestScrubDoesNotMaterializeTheSegment is the same claim for the other whole-
+// corpus walk.
+//
+// Scrub exists because Open stopped verifying everything, and the index a caller
+// runs it on is the one that is mapped rather than loaded — larger than the heap
+// is the premise. Decoding that segment into a heap-resident Index to check it,
+// which is what it did, means the answer to "is this index intact" can be the
+// process dying. Each document, each key and each posting is checkable on its
+// own, so each is checked and dropped.
+//
+// What it keeps is the document count's worth and not the corpus's: one key per
+// document, because uniqueness is an index-wide rule Scrub carries across
+// segments, and one token count per document, because the postings are checked
+// against lengths read before them.
+func TestScrubDoesNotMaterializeTheSegment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a corpus of 800,000 postings")
+	}
+	dir := t.TempDir()
+	ix := New()
+	ubiquitousCorpus(t, ix, 0, 4000, 200)
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	onDisk := segmentBytes(t, dir)
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if err := Scrub(dir); err != nil {
+		t.Fatalf("Scrub: %v", err)
+	}
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+
+	// Same bound and same reason as the merge above: verifying a record means
+	// decoding it, so the records are a floor. A second decode of every one of
+	// them, or a posting list kept until the segment is finished, is not.
+	if int64(allocated) > onDisk {
+		t.Fatalf("Scrub allocated %d bytes verifying a %d-byte segment — it is still materializing the segment rather than walking it",
+			allocated, onDisk)
+	}
+	t.Logf("segment %d bytes on disk, Scrub allocated %d", onDisk, allocated)
+}
