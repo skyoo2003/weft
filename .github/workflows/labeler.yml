@@ -1,0 +1,23 @@
+name: Labeler
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  labeler:
+    runs-on: ubuntu-latest
+    steps:
+      # pull_request_target so a pull request from a fork gets labelled too —
+      # the read-only `pull_request` token cannot write labels on one. This is
+      # only safe because the job checks out nothing and runs no repository
+      # code: it reads the changed-file list through the API and applies labels.
+      # Adding a checkout step here would run a fork's code with a write token.
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13  # labeler v7.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/labeler.yml

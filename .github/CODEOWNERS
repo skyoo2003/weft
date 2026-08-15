@@ -1,0 +1,16 @@
+# One maintainer, so this assigns every review to the person it would have gone
+# to anyway. It is here for the case that outlives that: the day a second
+# maintainer appears, the interesting question is which paths they own, and this
+# is the file that answers it. Until then it is a written record of who is
+# accountable, which is the honest version of what a solo project can claim.
+
+* @skyoo2003
+
+# Called out separately because these are the paths where a mistake is
+# expensive to reverse: the on-disk format outlives the process, and the release
+# machinery can publish something a tag cannot withdraw.
+/pkg/engine/segment.go @skyoo2003
+/pkg/engine/persist.go @skyoo2003
+/docs/FORMAT.md        @skyoo2003
+/.github/workflows/    @skyoo2003
+/.goreleaser.yaml      @skyoo2003

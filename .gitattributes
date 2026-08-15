@@ -1,0 +1,32 @@
+# LF everywhere in the repository, whatever the checkout platform does. This
+# matters more than it looks: the golden API files under pkg/engine/testdata/
+# are compared byte for byte, so a CRLF checkout on Windows would fail
+# TestEngineAPISurfaceIsUnchanged with a diff nobody can see.
+* text=auto eol=lf
+
+*.go text diff=golang
+go.mod text diff=golang
+*.sh text eol=lf
+*.md text
+*.yaml text
+*.yml text
+
+# The golden files are generated text. Marking them keeps a reviewer from being
+# asked to read a regenerated snapshot line by line.
+pkg/engine/testdata/*.txt text linguist-generated=true
+
+*.png binary
+*.jpg binary
+*.gz binary
+*.zip binary
+
+# Keep the governance scaffolding out of `git archive` tarballs. What a
+# consumer of the source archive needs is the code and its licence, not the
+# repository's CI.
+.github export-ignore
+.golangci.yaml export-ignore
+.goreleaser.yaml export-ignore
+.changie.yaml export-ignore
+.editorconfig export-ignore
+.pre-commit-config.yaml export-ignore
+.markdownlint.yaml export-ignore

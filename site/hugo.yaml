@@ -1,0 +1,40 @@
+baseURL: https://skyoo2003.github.io/weft/
+locale: en-us
+title: weft
+
+# The docs are NOT moved into this directory. They stay at /docs, where README,
+# CONTRIBUTING and SECURITY link to them by relative path and where they render
+# on GitHub without a build step. This site mounts that directory instead, so
+# there is one copy of every document and the links in the repository keep
+# working. Moving them here would have broken about a dozen of those links and
+# made GitHub's rendering the second-class view of the project's own docs.
+module:
+  mounts:
+    - source: content
+      target: content
+    - source: ../docs
+      target: content/docs
+
+markup:
+  goldmark:
+    renderHooks:
+      link:
+        # The mounted files link to each other as `FORMAT.md`, because that is
+        # what works on GitHub. Hugo serves them at `format/`, so without a
+        # render hook every cross-reference would 404 on the site only.
+        useEmbedded: fallback
+    parser:
+      attribute:
+        block: true
+  highlight:
+    noClasses: false
+    style: github
+
+params:
+  repo: https://github.com/skyoo2003/weft
+
+# This is not the front door for anyone who already has the repository open. It
+# exists for the person who found weft through a search and wants to read
+# FINDINGS before cloning anything.
+enableGitInfo: false
+disableKinds: [taxonomy, term, RSS, sitemap]

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package graph ranks documents by link proximity to a seed set.
 //
 // The seed set is the interesting part. It comes either from Query.Seeds, or

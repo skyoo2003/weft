@@ -1,0 +1,70 @@
+name: Pages
+
+# Publishes /docs, which is not moved or copied to do it — site/hugo.yaml
+# mounts that directory. So this workflow adds a second rendering of the same
+# files rather than a second set of files, and a docs edit cannot land in one
+# place and not the other.
+#
+# Pull requests build but do not deploy: the build is the check that a docs
+# edit did not break the site, and a fork should not be able to publish.
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', 'site/**', '.github/workflows/pages.yml']
+  pull_request:
+    branches: [main]
+    paths: ['docs/**', 'site/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # checkout v7.0.1
+
+      - name: Configure GitHub Pages
+        id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # configure-pages v6.0.0
+
+      - name: Install Hugo
+        env:
+          HUGO_VERSION: 0.152.0
+        run: |
+          curl -sSLJO "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_${HUGO_VERSION}_linux-amd64.tar.gz"
+          mkdir -p "${HOME}/.local/hugo"
+          tar -C "${HOME}/.local/hugo" -xf "hugo_${HUGO_VERSION}_linux-amd64.tar.gz"
+          echo "${HOME}/.local/hugo" >> "${GITHUB_PATH}"
+
+      - name: Build the site
+        run: |
+          hugo \
+            --source site \
+            --destination "${{ github.workspace }}/site/public" \
+            --gc --minify \
+            --baseURL "${{ steps.pages.outputs.base_url }}/" \
+            --cacheDir "${{ runner.temp }}/hugo_cache"
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # upload-pages-artifact v5.0.0
+        with:
+          path: site/public
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # deploy-pages v5.0.0

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command weft is an interactive demo of scorer-agnostic fusion.
 //
 // It indexes a small built-in corpus and answers queries with four scorers at
@@ -177,8 +179,9 @@ func place(rank int) string {
 // parseQuery splits "some text @ 1,0,0" into text and an optional vector. The
 // vector is typed by hand because weft does not generate embeddings.
 func parseQuery(line string) (engine.Query, error) {
-	text, vec, hasVec := strings.Cut(line, "@")
-	q := engine.Query{Text: strings.TrimSpace(text)}
+	// Not named `text`: that is the scorer package this file imports.
+	qtext, vec, hasVec := strings.Cut(line, "@")
+	q := engine.Query{Text: strings.TrimSpace(qtext)}
 	if !hasVec {
 		return q, nil
 	}

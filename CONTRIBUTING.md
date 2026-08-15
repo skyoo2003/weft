@@ -10,7 +10,18 @@ Behavior in this repository is covered by the [Code of Conduct](CODE_OF_CONDUCT.
 make all      # fmt + build + vet + test -race
 ```
 
-That is the whole local check, and it is exactly what [CI](.github/workflows/ci.yml) runs — CI calls this target rather than copying its commands, so neither can drift from the other. The target is shared; the environment is not. CI runs one platform, `ubuntu-latest`, at go.mod's Go version, and `test -race` needs a C toolchain, so a local failure CI would never have seen is possible in the other direction.
+That needs nothing installed but the Go toolchain, which is deliberate: you can run the whole of it before you have read anything or installed anything. [CI](.github/workflows/ci.yml) calls this same target rather than copying its commands, so neither can drift from the other. The target is shared; the environment is not. CI runs one platform, `ubuntu-latest`, at go.mod's Go version, and `test -race` needs a C toolchain, so a local failure CI would never have seen is possible in the other direction.
+
+Four more checks run in CI and are Makefile targets too, kept out of `make all` because each costs a tool to install or a minute of wall clock:
+
+```bash
+make spdx         # every .go file carries its licence line; make spdx-fix adds them
+make lint         # golangci-lint, pinned to the version CI uses
+make lint-docs    # markdownlint over every .md
+make fuzz         # 30s each against the two segment-decoder fuzz targets
+```
+
+`make lint` and `make lint-docs` need `golangci-lint` and `markdownlint-cli2`; each target says so and names the install command rather than failing obscurely. `make fuzz` needs nothing but time, and it is the one most likely to find something no test covers — [SECURITY.md](SECURITY.md) names the segment decoder as the first place a hostile file lands. There is an optional [pre-commit config](.pre-commit-config.yaml) that runs the first three; nothing requires it, and CI does not use it.
 
 ## What not to break
 
@@ -25,7 +36,7 @@ The first does not generalize by itself. `TestAddingAFourthScorerDoesNotChangeTh
 
 They are ordinary tests in `pkg/engine`, so `make all` — and therefore CI — already runs them. `make arch` runs them by name and verbosely, along with two you will meet only by tripping: `TestNoExternalDependencies`, and two golden-file tests. `TestEngineAPISurfaceIsUnchanged` fails when `engine`'s exported surface changes and asks you to record that cost in `docs/FINDINGS.md`; `TestPublicAPISurfaceIsUnchanged` does the same for `fusion` and every scorer package, which a caller builds directly. Both refresh with `WEFT_UPDATE_GOLDEN=1`. The second discovers packages instead of listing them, so adding a scorer trips it — that is not a hurdle, it is the addition becoming visible. Both read the source rather than a build, so they answer for the platforms named in `apiContexts` — `linux/amd64`, `darwin/arm64`, `windows/amd64` — and a declaration some of those cannot see is recorded with the ones that can. A fifth platform is a line in that list. `make arch` drops `-race`, so it is a different question from `make all`, not a louder version of it.
 
-The line-count figure is a measurement, not a budget you have to fit under — with one exception worth knowing before it bites you. `TestFourthScorerIsUnderOneHundredLines` measures `scorer/recency` and nothing else, so a fifth scorer twice that size still passes, and milestone 3's ANN scorer will not fit under 100 lines either. For `scorer/recency` itself it is a hard failure at 100, `recency.go` sits at 99, and the count includes comments and blank lines: one added line there turns `make all` red. That is deliberate — 99 is a published claim about this project, so changing the file means changing the claim, and the pull request is where you say so. If your own scorer is much larger, the pull request is also where you say why.
+The line-count figure is a measurement, not a budget you have to fit under — with one exception worth knowing before it bites you. `TestFourthScorerIsUnderOneHundredLines` measures `scorer/recency` and nothing else, so a fifth scorer twice that size still passes, and milestone 3's ANN scorer will not fit under 100 lines either. For `scorer/recency` itself it is a hard failure at 100, `recency.go` counts 99, and the count includes comments and blank lines: one added line there turns `make all` red. That is deliberate — the figure is a published claim about this project, so changing the file means changing the claim, and the pull request is where you say so. The one thing the count does *not* include is the SPDX header and the blank line under it, because `make spdx` puts those on every file in the repository and charging a scorer for a repository-wide licensing decision would measure the wrong thing. If your own scorer is much larger, the pull request is also where you say why.
 
 ## Adding a scorer
 
@@ -57,14 +68,6 @@ Supported Go is the version in `go.mod` and newer. Newer is untested rather than
 
 ## Cutting a release
 
-Four steps, in this order. Everything before the push is reversible; the push is not.
+[RELEASE.md](RELEASE.md). It is four steps, only one of them irreversible, and it lives in its own file so that there is one copy of it rather than two that drift.
 
-1. **Merge the documentation the tag will freeze.** A tag points at a tree, so a correction written afterwards is not in it — the whole reason `docs/FINDINGS.md`'s line count was fixed before the first tag rather than after. That means: a [CHANGELOG](CHANGELOG.md) entry **only if the release moved one of three things** — either golden file under `pkg/engine/testdata/`, `formatVersion` in `pkg/engine/segment.go`, or go.mod's Go version, each a file a test or the toolchain already watches. If none moved, write nothing; the silence is the claim that there is nothing for a caller to do. Either way the heading stops saying `unreleased`, and whatever else the tag makes false goes in the same commit — [README](README.md#status)'s "no tag yet", [SECURITY.md](SECURITY.md)'s "no releases yet".
-2. **Confirm that exact commit is green** — name the SHA and let the command fail, rather than reading a list:
-   ```bash
-   sha=$(git fetch origin main && git rev-parse FETCH_HEAD)
-   gh run watch "$(gh run list --workflow=ci.yml --commit "$sha" --json databaseId --jq '.[0].databaseId')" --exit-status
-   ```
-   Every part of that first line is load-bearing. `origin/main` on its own is a local ref that is only as fresh as your last fetch, and step 1 merged through GitHub — so without the fetch you can watch a green run and then permanently tag the commit from before your own release documentation landed. `--branch=main` answers a different question again: it returns whatever ran most recently on the branch, which need not be the commit you are about to tag, and it exits 0 no matter how that run concluded. `--commit` binds the answer to the tag, `--exit-status` turns a green run from something you read into something you cannot skip past. An empty id means no run exists for that SHA yet — wait for it rather than tagging.
-3. `git tag -a <tag> "$sha"`, then `git push origin <tag>`. Push the tag yourself instead of letting step 4 invent one: `gh release create` on a tag that does not exist yet creates it at the default branch's HEAD, which need not be the commit you just checked. Once the Go module proxy has served a version, deleting the tag does not withdraw it — the version stays resolvable, pointing at whatever it pointed at. `v[0-9]*` tags do trigger [CI](.github/workflows/ci.yml), but that run starts after the push: it reports a bad tag, it cannot stop one, and the remedy is the next tag rather than a deletion.
-4. `gh release create <tag> --verify-tag --generate-notes` — the notes come from the merged pull requests, so nothing is retyped. `--verify-tag` aborts when the tag is not already on the remote, which makes the trap in step 3 a check rather than something to remember.
+Two things there are worth knowing before you need them: `changie batch` is what turns `changes/unreleased/` into a version, and the tag push is the point of no return — the Go module proxy does not forget a version it has served.

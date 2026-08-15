@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package vector ranks documents by cosine similarity to Query.Vector.
 //
 // Embeddings are supplied by the caller: generating them is out of scope for

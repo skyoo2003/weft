@@ -1,0 +1,52 @@
+# Changie configuration — https://changie.dev/config/
+# The release procedure that uses it is in CONTRIBUTING.md, "Cutting a release".
+#
+# What this changes about how weft records releases: entries are written when
+# the change is made, into changes/unreleased/, instead of being reconstructed
+# from git at tag time. The reason is the one changie exists for — the person
+# who knows why a change matters to a caller is the person making it, and by
+# release day that knowledge has to be re-derived from a diff.
+#
+# What it does not change: the header still says that only three things can
+# force work on a caller, and that a release moving none of them is allowed to
+# say so. A kind list is not a licence to restate `git log`.
+
+changesDir: changes
+unreleasedDir: unreleased
+headerPath: header.tpl.md
+changelogPath: CHANGELOG.md
+versionExt: md
+
+versionFormat: '## [{{ .Version }}](https://github.com/skyoo2003/weft/releases/tag/{{ .Version }}) - {{ .Time.Format "2006-01-02" }}'
+kindFormat: '### {{ .Kind }}'
+changeFormat: '- {{ .Body }} ([#{{ .Custom.Issue }}](https://github.com/skyoo2003/weft/issues/{{ .Custom.Issue }}))'
+
+newlines:
+  beforeChangelogVersion: 1
+  beforeKind: 1
+  afterKind: 1
+
+body:
+  block: true
+  minLength: 5
+
+# The first three are the ones the header calls out: they are what a caller can
+# be forced to act on. The rest exist so that a change genuinely worth
+# announcing has somewhere to go without being disguised as one of the three.
+kinds:
+  - label: Exported API
+  - label: On-disk format
+  - label: Minimum Go
+  - label: Added
+  - label: Changed
+  - label: Deprecated
+  - label: Removed
+  - label: Fixed
+  - label: Security
+  - label: Documentation
+
+custom:
+  - key: Issue
+    label: Issue or pull request number
+    type: int
+    minInt: 1

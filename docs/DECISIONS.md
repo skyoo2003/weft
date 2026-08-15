@@ -18,7 +18,7 @@ Milestone 2 was blocked on a circular dependency: skip lists only pay off if a c
 The real question is not whether to add skip lists now but whether to keep them addable later, and that is independent of the consuming interface. Writing postings in blocks with three values per block is sufficient:
 
 | Field | Purpose |
-|---|---|
+| --- | --- |
 | `maxDocID` | last document id in the block — decides whether the block can be skipped |
 | `maxTF` | highest term frequency in the block |
 | `minDocLen` | shortest document length in the block |
@@ -29,7 +29,7 @@ That is everything block-max WAND (Ding & Suel, 2011) requires. Nothing reads th
 
 The easiest part of this decision to get wrong. A BM25 term contribution is
 
-```
+```text
 IDF(q) × f·(k1+1) / (f + k1·(1 - b + b·|D|/avgdl))
 ```
 
@@ -45,7 +45,7 @@ IDF(q) × f·(k1+1) / (f + k1·(1 - b + b·|D|/avgdl))
 ### Rationale — the costs are asymmetric
 
 | Deferred | Cost of deferring |
-|---|---|
+| --- | --- |
 | Cursor interface | **Low.** An extension interface, so existing `Scorer` implementations are untouched ([FINDINGS §3.1](FINDINGS.md)). |
 | Block structure and metadata | **High.** Format rewrite plus migration of existing indexes. |
 
@@ -77,7 +77,7 @@ Six shortcuts are marked in the code, each naming a ceiling and an upgrade trigg
 Group the debt by the instrument that authorizes payment, not by milestone number. Paying before the instrument exists means optimizing against a guess — the same error each shortcut was taken to avoid.
 
 | Instrument | Arrives with | Authorizes |
-|---|---|---|
+| --- | --- | --- |
 | Corpus larger than memory | Milestone 3 | `scorer/vector` full scan, `engine.TopK` sort |
 | nDCG@10 harness ([DATASETS](DATASETS.md)) | Milestone 4 | over-fetch factor, BM25 `K1`/`B` |
 | Load test with GC traces | Milestone 5 | index `RWMutex`, sequential scorer execution |

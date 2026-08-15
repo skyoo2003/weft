@@ -1,0 +1,51 @@
+name: Release
+
+# Runs on a tag that has already been pushed, so like the CI run on the same
+# tag it reports rather than prevents. CONTRIBUTING's "Cutting a release" is
+# where the prevention lives: confirm the commit is green, then tag it.
+#
+# The one thing this does refuse outright is a tag with no batched changie file.
+# That check belongs here rather than in CI because it is a release-time fact —
+# a commit is not wrong for lacking changes/v0.1.0.md until someone tags it.
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the GitHub release and upload archives
+      id-token: write     # keyless signing material for the attestation
+      attestations: write # provenance for the archives
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # checkout v7.0.1
+        with:
+          # GoReleaser needs the tag history to resolve the version.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # setup-go v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify the changie release notes exist
+        run: |
+          if [ ! -f "changes/${GITHUB_REF_NAME}.md" ]; then
+            echo "::error::changes/${GITHUB_REF_NAME}.md not found."
+            echo "::error::Run 'changie batch ${GITHUB_REF_NAME}' and 'make changelog', commit, then tag that commit. See CONTRIBUTING.md#cutting-a-release."
+            exit 1
+          fi
+
+      - name: Execute GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # goreleaser-action v7.2.3
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --release-notes changes/${{ github.ref_name }}.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

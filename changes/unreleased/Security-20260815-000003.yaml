@@ -1,0 +1,7 @@
+kind: Security
+body: Commit now creates its index directory and segment directories with mode 0o750
+  rather than 0o755. The corpus is the caller's data and nothing weft does needs
+  another user on the machine to read it.
+time: 2026-08-15T00:00:03.000000000+09:00
+custom:
+  Issue: 9

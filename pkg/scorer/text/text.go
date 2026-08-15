@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package text scores documents with BM25 over the index's inverted index.
 //
 // It is one of four interchangeable scorers. Nothing outside this package knows

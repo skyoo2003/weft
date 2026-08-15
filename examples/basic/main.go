@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command basic is the smallest useful weft program: index, search, print.
 //
 // For an interactive version with a per-scorer breakdown, see ./cmd/weft.

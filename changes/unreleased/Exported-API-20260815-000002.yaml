@@ -1,0 +1,7 @@
+kind: Exported API
+body: Baseline. The surface at this tag is whatever pkg/engine/testdata/engine_api.txt
+  and public_api.txt record at the tagged commit; every later release states its
+  diff against them rather than restating the whole surface.
+time: 2026-08-15T00:00:02.000000000+09:00
+custom:
+  Issue: 9

@@ -1,0 +1,33 @@
+version: 2
+
+# Only github-actions. There is no gomod entry because there is nothing for one
+# to watch: go.mod has no require block, there is no go.sum, and
+# TestNoExternalDependencies fails the build if that ever stops being true.
+#
+# The actions are therefore the entire external supply chain of this repository
+# — someone else's code, running with this repository's token. They are pinned
+# to commit SHAs in the workflow files, which is what makes a moved tag
+# harmless and what makes this file necessary: a pin with no way to move is a
+# pin that rots.
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    # One pull request for the lot. With half a dozen actions, separate PRs
+    # would be more review overhead than the change deserves, and CI judges the
+    # combination anyway.
+    groups:
+      actions:
+        patterns:
+          - "*"

@@ -1,0 +1,6 @@
+kind: Minimum Go
+body: 1.26. This is the floor, not a tested ceiling — newer is untested rather than
+  unsupported, and the gate pins this one line rather than a matrix.
+time: 2026-08-15T00:00:00.000000000+09:00
+custom:
+  Issue: 9

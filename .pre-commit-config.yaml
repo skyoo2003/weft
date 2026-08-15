@@ -1,0 +1,49 @@
+# Optional. Nothing in this repository requires pre-commit, and CI does not run
+# it — CI runs the Makefile targets directly, so a contributor who never
+# installs this is judged by exactly the same rules.
+#
+#   pip install pre-commit && pre-commit install
+#
+# Every Go hook shells out to a Makefile target rather than spelling out the
+# command, for the same reason the CI workflow does: one definition of the gate,
+# in the file that already owns it.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: detect-private-key
+      - id: mixed-line-ending
+      - id: end-of-file-fixer
+      # Markdown is excluded: two trailing spaces is a line break, so stripping
+      # them rewrites the prose. .editorconfig makes the same carve-out.
+      - id: trailing-whitespace
+        exclude: '\.md$'
+
+  - repo: local
+    hooks:
+      - id: make-all
+        name: make all (fmt, build, vet, test -race)
+        entry: make all
+        language: system
+        files: '(\.go|go\.mod)$'
+        pass_filenames: false
+
+      - id: spdx
+        name: SPDX headers
+        entry: make spdx
+        language: system
+        files: '\.go$'
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: make lint
+        language: system
+        files: '(\.go|go\.mod|\.golangci\.yaml)$'
+        pass_filenames: false
+
+# Deliberately not here: `make fuzz`. It takes a minute and finds things by
+# chance rather than by rule, which makes it a bad thing to put between someone
+# and their commit. CI runs it instead.

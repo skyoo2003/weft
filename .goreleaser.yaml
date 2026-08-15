@@ -1,0 +1,75 @@
+version: 2
+
+# What this ships and what it does not.
+#
+# It ships `cmd/weft`, the interactive demo. That is genuinely all there is to
+# ship: weft is a library, and a library is consumed with `go get`, which needs
+# no artefact from here. README calls the binary a demo and this file does not
+# promote it to a product — what the archives buy is that someone evaluating
+# the project can run it without a Go toolchain.
+#
+# No Docker image and no Homebrew tap. Both are distribution channels that have
+# to be maintained on a schedule this project cannot promise, and neither is on
+# the path of anyone deciding whether to depend on the library.
+
+project_name: weft
+
+before:
+  hooks:
+    # No `go mod tidy`: there is nothing to tidy, and it is the one command in
+    # this pipeline capable of writing a require line into a go.mod that
+    # TestNoExternalDependencies exists to keep empty.
+    - go build ./...
+
+builds:
+  - id: weft
+    main: ./cmd/weft
+    binary: weft
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    # No version stamp. The demo pins its own clock and reads no build
+    # metadata, so stamping would mean adding a symbol to main purely so that
+    # this file had somewhere to write.
+
+archives:
+  - id: weft
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - NOTICE
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  # changie owns the release notes; the workflow passes the batched file to
+  # --release-notes. Letting GoReleaser also build one from git would put two
+  # different accounts of the same release on the same page.
+  disable: true
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    ---
+
+    weft is a library first. `go get github.com/skyoo2003/weft` needs nothing from this page — the archives exist so the demo can be run without a Go toolchain.
+
+    **This is not production software.** See the Status and Limitations sections of the README.

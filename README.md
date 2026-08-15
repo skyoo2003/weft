@@ -28,7 +28,7 @@ If you need text + vector hybrid search today, [bleve](https://github.com/bleves
 Milestones 1 and 2 passed. **Not usable in production:** every commit rewrites the whole corpus and every open reads it all into memory, so the corpus must fit in RAM.
 
 | # | Milestone | State |
-|---|---|---|
+| --- | --- | --- |
 | 1 | Scorer-agnostic fusion | ✅ 3/3 assertions pass |
 | 2 | Persistence | ✅ restores identically, commits atomically |
 | 3 | Scale — segment merge, ANN | Not started |
@@ -44,7 +44,7 @@ No tag yet; the first will be `v0.1.0`. Until then `go get` resolves to a pseudo
 go run ./cmd/weft
 ```
 
-```
+```text
 query> ranking fusion
   1. rrf        0.03226  text:2  vector:-  graph:-  recency:2
   2. hnsw       0.03200  text:-  vector:-  graph:2  recency:3
@@ -92,7 +92,7 @@ The third assertion carries the weight. `Fuse` never reads `Candidate.Score`, on
 
 ## Layout
 
-```
+```text
 cmd/weft/          interactive demo binary
 examples/basic/    minimal library embedding
 pkg/
@@ -117,19 +117,21 @@ Dependencies point inward. `engine` imports no weft package; `fusion` imports on
 ## Development
 
 ```bash
-make            # fmt + build + vet + test -race — the same gate CI runs
+make            # fmt + build + vet + test -race — needs only the Go toolchain
 make arch       # the three assertions above
 make deps       # zero dependencies, and fusion sees no scorer
 make run        # interactive demo
 make example    # minimal example
 ```
 
+CI runs `make all` plus four targets kept out of it because each costs a tool to install or a minute of wall clock: `make spdx`, `make lint`, `make lint-docs`, and `make fuzz` — the last being 30 seconds each against the two segment-decoder fuzz targets, which is where a hostile file would land. [CONTRIBUTING](CONTRIBUTING.md#the-gate) has the detail.
+
 2,396 implementation lines under `pkg/`, 4,352 test lines, **zero external dependencies**. Go 1.26+.
 
 ## Limitations
 
 | Limitation | Detail |
-|---|---|
+| --- | --- |
 | Corpus must fit in memory | `Commit` rewrites the whole corpus and `Open` loads all of it. Incremental segments and lazy loading are milestone 3: [FORMAT.md §8](docs/FORMAT.md). |
 | No deletion | Documents can be added, never removed. Tombstones and DocID namespacing are one design problem, taken together in milestone 3: [FINDINGS, milestone 2 §4](docs/FINDINGS.md). |
 | Durability stops at fsync | Atomic against process death; best-effort against power loss, with no platform write barrier: [FORMAT.md §6](docs/FORMAT.md). |
@@ -144,7 +146,13 @@ make example    # minimal example
 
 `make all` is the gate, and CI runs that same target. What the three assertions mean is [Adding a scorer](#adding-a-scorer), above. How to contribute — which of them a test decides for you, what the 100-line figure does and does not enforce, what a pull request should say, why a decision is recorded — is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Vulnerabilities go to [SECURITY.md](SECURITY.md), not to the issue tracker. Behavior is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
+| | |
+| --- | --- |
+| Where to take a bug, a proposal or a question | [SUPPORT.md](SUPPORT.md) |
+| A vulnerability — **not** the issue tracker | [SECURITY.md](SECURITY.md) |
+| Behavior in this repository | [Code of Conduct](CODE_OF_CONDUCT.md) |
+| Who decides what, and what is decided by a test instead | [GOVERNANCE.md](GOVERNANCE.md) |
+| How a tag gets cut | [RELEASE.md](RELEASE.md) |
 
 ## License
 
