@@ -303,11 +303,19 @@ func (ix *Index) adopt(root *os.Root, info segInfo) error {
 	return nil
 }
 
-// Open loads the last committed generation from dir.
+// Open maps the last committed generation from dir. The returned index is ready
+// for further Adds and Commits.
 //
-// The returned index is a fully in-memory copy, independent of the files it
-// came from and ready for further Adds and Commits. Lazy loading is milestone
-// 3's work.
+// The caller must Close it. What Open returns is no longer a copy: milestone 3
+// replaced the eager decode with mappings that stay live for as long as the
+// index does, and a mapping is not memory the garbage collector owns — dropping
+// the last reference to an index leaks six regions per segment for the life of
+// the process. Close is the only thing that releases them.
+//
+// The files those mappings point at may be replaced or unlinked underneath a
+// reader; the mapping survives it, which is what lets Commit and Merge prune a
+// generation somebody is still reading. Independence from the *directory* holds.
+// Independence from the bytes does not.
 //
 // A missing directory or manifest reports fs.ErrNotExist. Damaged or foreign
 // files report ErrCorrupt; files from a different format version report
@@ -639,7 +647,20 @@ func scrubDocs(docsR *segReader, offs docOffsets, seg string, found map[string]s
 			return nil, 0, 0, fmt.Errorf("%s: document %d is recorded at offset %d, its record begins at %d: %w",
 				offs.name, i, off, at, ErrCorrupt)
 		}
+		// Bounded by the record, not by what is left of the section — the same
+		// reason segment.recordAt gives, and the same table. Narrowing the view
+		// rather than building a second reader keeps this loop allocation-free,
+		// which is what lets a scrub walk a corpus it cannot hold.
+		full := docsR.b
+		if next, ok := offs.at(DocID(i + 1)); ok {
+			if next < off || next-segHeaderLen > len(full) {
+				return nil, 0, 0, fmt.Errorf("%s: document %d runs from %d to %d, which is not a record: %w",
+					offs.name, i, off, next, ErrCorrupt)
+			}
+			docsR.b = full[:next-segHeaderLen]
+		}
 		d, dl, err := decodeDocRecord(docsR, i)
+		docsR.b = full
 		if err != nil {
 			return nil, 0, 0, err
 		}

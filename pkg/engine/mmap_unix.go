@@ -45,3 +45,9 @@ func unmapFile(b []byte) error {
 	}
 	return syscall.Munmap(b)
 }
+
+// mapsLazily is whether this build reaches a section's bytes through the page
+// cache rather than through the heap. The milestone 3 memory assertions measure
+// the difference between the two, so they have nothing to measure where mapFile
+// reads the file instead.
+const mapsLazily = true

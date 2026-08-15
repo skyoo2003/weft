@@ -169,11 +169,10 @@ func (s *segment) holds(id DocID) bool {
 // Nothing in this file can.
 func (s *segment) doc(id DocID) (Document, bool) {
 	local := id - s.base
-	off, ok := s.offs.at(local)
-	if !ok || off < segHeaderLen || off-segHeaderLen > len(s.docs) {
+	r, ok := s.recordAt(local)
+	if !ok {
 		return Document{}, false
 	}
-	r := &segReader{name: docsFile, b: s.docs, off: off - segHeaderLen}
 	d, _, err := decodeDocRecord(r, int(local))
 	if err != nil {
 		// The checksum says this record is not intact, or not the one asked
@@ -228,13 +227,44 @@ func (s *segment) resolve(key string) (DocID, bool) {
 // independently written structures agreeing on the key is the question being
 // asked, and the first field answers it.
 func (s *segment) keyAt(local DocID) (string, bool) {
-	off, ok := s.offs.at(local)
-	if !ok || off < segHeaderLen || off-segHeaderLen > len(s.docs) {
+	r, ok := s.recordAt(local)
+	if !ok {
 		return "", false
 	}
-	r := &segReader{name: docsFile, b: s.docs, off: off - segHeaderLen}
 	got, err := r.str("document key")
 	return got, err == nil
+}
+
+// recordAt positions a reader on a segment-local id's record and bounds it by
+// that record, which is the part that is not bookkeeping.
+//
+// A record's seeded checksum is what says its fields are real, and it cannot be
+// consulted first: it stands at the end of the record, and where the record ends
+// is what decoding it establishes. So every length inside is acted on before
+// anything has vouched for it, and the only question is what bounds it. Handed
+// the whole section, a damaged vector width or text length is bounded by the
+// corpus — one flipped byte asks for an allocation the size of the index and
+// gets the process killed instead of Doc returning false.
+//
+// docoff answers it for nothing: the next document's offset is where this
+// record stops. The table is fixed-width, so the second read is arithmetic, and
+// its frame checksum is one of the two Open verifies.
+func (s *segment) recordAt(local DocID) (*segReader, bool) {
+	off, ok := s.offs.at(local)
+	if !ok || off < segHeaderLen || off-segHeaderLen > len(s.docs) {
+		return nil, false
+	}
+	// The last record runs to the end of the section; every other one stops
+	// where the next begins. An entry that would end this record before it
+	// starts, or past the section, describes no record the writer produced.
+	end := len(s.docs)
+	if next, ok := s.offs.at(local + 1); ok {
+		if next < off || next-segHeaderLen > len(s.docs) {
+			return nil, false
+		}
+		end = next - segHeaderLen
+	}
+	return &segReader{name: docsFile, b: s.docs[:end], off: off - segHeaderLen}, true
 }
 
 // lookup decodes the postings for term, ascending by index-wide DocID, or nil

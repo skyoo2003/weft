@@ -37,3 +37,9 @@ func mapFile(f *os.File, size int) ([]byte, error) {
 // unmapFile has nothing to release: mapFile returned heap memory the garbage
 // collector owns.
 func unmapFile([]byte) error { return nil }
+
+// mapsLazily is false here: mapFile above reads every section into a retained
+// heap slice, so an index costs its own size in Go heap and the milestone 3
+// memory assertions are measuring the fallback rather than the claim. See the
+// skips in lazy_test.go.
+const mapsLazily = false

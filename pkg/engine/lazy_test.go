@@ -399,6 +399,7 @@ func TestHeapDoesNotScaleWithTheCorpus(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds two corpora, the larger 8 MB")
 	}
+	requireLazyMapping(t)
 	small, smallDisk := openHeap(t, 250)
 	large, largeDisk := openHeap(t, 2000)
 	t.Logf("250 docs: %d bytes on disk, %d heap; 2000 docs: %d on disk, %d heap",
@@ -905,6 +906,7 @@ func TestMergeDoesNotBufferPostingLists(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a corpus of 800,000 postings")
 	}
+	requireLazyMapping(t)
 	dir := t.TempDir()
 	ix := New()
 	defer ix.Close() //nolint:errcheck // teardown
@@ -969,6 +971,7 @@ func TestScrubDoesNotMaterializeTheSegment(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a corpus of 800,000 postings")
 	}
+	requireLazyMapping(t)
 	dir := t.TempDir()
 	ix := New()
 	ubiquitousCorpus(t, ix, 0, 4000)
@@ -1213,4 +1216,21 @@ func TestADamagedRecordCannotAllocateTheCorpus(t *testing.T) {
 			allocated, limit)
 	}
 	t.Logf("refusing the record allocated %d bytes", allocated)
+}
+
+// requireLazyMapping skips a memory assertion on the platforms mmap_other.go
+// serves.
+//
+// The fallback reads each section into a retained heap slice, deliberately and
+// documented as such: correctness is identical and laziness is absent. Every
+// bound below is the difference between mapped bytes and heap bytes, so on those
+// platforms these tests do not measure a weaker version of the claim — they
+// measure the fallback, and fail for behaving exactly as documented. Skipping is
+// the honest answer; asserting the fallback's own shape would be pinning a
+// number nobody runs.
+func requireLazyMapping(t *testing.T) {
+	t.Helper()
+	if !mapsLazily {
+		t.Skip("this platform reads sections into the heap; see mmap_other.go")
+	}
 }
