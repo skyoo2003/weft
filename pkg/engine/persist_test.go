@@ -1014,3 +1014,53 @@ func TestCommitRefusesADirectoryItDidNotOpen(t *testing.T) {
 		t.Fatalf("Commit into its own directory: %v", err)
 	}
 }
+
+// TestOpenRefusesADamagedDocOffsetTable is meta's argument applied to the other
+// table Open already reads a header of.
+//
+// A docoff entry's token count is the one derived value nothing downstream can
+// contradict: the record carries its own copy, but reading it costs a document
+// decode per posting, which is what this table exists to avoid. So BM25
+// normalizes by whatever the mapped bytes say until somebody runs Scrub. A frame
+// checksum over the table is 16 bytes a document — the same order as the terms
+// index Open already decodes in full, and a scan rather than a map build.
+//
+// What stays lazy is verifySeekSections, which re-derives every offset by
+// decoding the document it points at. That one is the size of the corpus, and it
+// is Scrub's.
+func TestOpenRefusesADamagedDocOffsetTable(t *testing.T) {
+	dir := t.TempDir()
+	ix := New()
+	addAll(t, ix, []Document{{Key: "one", Text: "a b c"}})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// uvarint(1), then one 16-byte entry: offset in the low eight, token count
+	// in the high eight. The token count is what BM25 divides by.
+	path := filepath.Join(dir, segDirName(1), docoffFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := segHeaderLen + 1 + docoffLenAt
+	if b[at] != 3 {
+		t.Fatalf("docoff token count is %d, this test is patching the wrong byte", b[at])
+	}
+	b[at] = 6
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Open(dir)
+	if err == nil {
+		defer got.Close() //nolint:errcheck // teardown
+		t.Fatalf("Open accepted a damaged length table; DocLen(0) is now %d", got.DocLen(0))
+	}
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open with a damaged docoff table: got %v, want ErrCorrupt", err)
+	}
+}
