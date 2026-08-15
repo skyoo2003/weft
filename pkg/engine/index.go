@@ -411,10 +411,18 @@ func (ix *Index) Stats() (docs int, avgDocLen float64) {
 // the whole corpus, and an average over only the documents added since the last
 // commit would rescale every score the moment a commit happened.
 func (ix *Index) avgDocLen() float64 {
-	n, total := len(ix.docs), ix.totalLen
+	// The sum is wider than its terms. Each segment's own total is ranged
+	// against maxInt where it is decoded, which is all a segment can be asked
+	// for — it knows nothing about the segments beside it. Incremental commit
+	// makes the collection-wide sum a different quantity: on a 32-bit build a
+	// handful of segments of a few hundred million tokens each overflow an int,
+	// and a wrapped total is a negative average length BM25 divides every score
+	// by. The document count needs no such care — readManifest already refuses a
+	// segment list running past maxDocCount.
+	n, total := len(ix.docs), uint64(ix.totalLen)
 	for _, s := range ix.segs {
 		n += s.count
-		total += s.totalLen
+		total += uint64(s.totalLen)
 	}
 	if n == 0 {
 		return 0

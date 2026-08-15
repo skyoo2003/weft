@@ -136,6 +136,21 @@ func (ix *Index) Commit(dir string) error {
 	}
 	defer root.Close()
 
+	// The write lock, for the whole commit. See the ponytail note above.
+	//
+	// Taken before the manifest is read, and that order is load-bearing rather
+	// than tidy. Merge is this index's other public mutator and it holds this
+	// same lock while it publishes generation gen+1 and prunes what it replaced.
+	// A snapshot taken outside the lock can therefore be a generation stale by
+	// the time this commit is admitted, and both of the destructive things it
+	// decides would then be aimed wrongly: the RemoveAll below clears
+	// seg-<gen+1>, which is the segment that merge just published as live, and
+	// the manifest written after it names the source directories the merge has
+	// already deleted. The rename is the commit point, so neither is
+	// recoverable.
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+
 	// The previous generation number comes from the manifest. A missing
 	// manifest is a first commit; a corrupt one is not — guessing a generation
 	// on top of a directory in an unknown state could orphan a commit the
@@ -151,10 +166,6 @@ func (ix *Index) Commit(dir string) error {
 	} else if err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
-
-	// The write lock, for the whole commit. See the ponytail note above.
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
 
 	// The destination has to be the directory this index's committed segments
 	// came from. The count comparison below cannot tell two unrelated
@@ -200,6 +211,15 @@ func (ix *Index) Commit(dir string) error {
 	// when a generation already exists: the first Commit on an empty index is
 	// how an empty index gets written at all, which restore asks for.
 	if len(ix.docs) == 0 && gen > 0 {
+		// The sweep still runs. A commit that died between writing its segment
+		// and renaming the manifest leaves a directory nothing names, as large
+		// as the batch it was writing, and Open documents that debris as costing
+		// disk only until the next Commit. Returning before the sweep makes that
+		// false exactly when it matters: the reopened index has nothing pending,
+		// so the orphan survives every commit until one happens to carry a
+		// document. Same keep set and same best-effort contract as the sweep at
+		// the end — everything it removes is unreachable.
+		prune(root, live)
 		return nil
 	}
 
@@ -411,10 +431,33 @@ func Scrub(dir string) error {
 	}
 	defer root.Close()
 
-	_, segs, err := readManifest(root)
-	if err != nil {
-		return fmt.Errorf("scrub %s: %w", dir, err)
+	// The same window Open re-reads its way out of, for the same reason. A merge
+	// publishes its replacement before it prunes the segments it replaced, so a
+	// scrub holding the pre-merge list reaches a directory that is no longer
+	// there while the index itself is sound throughout. Reporting that as
+	// corruption turns a scheduled integrity check into a false alarm, which is
+	// worse than no check: "is this directory sound" is the only question Scrub
+	// is asked.
+	//
+	// Bounded the same way, and for the same reason: a merge finishes, and a
+	// manifest that keeps naming a segment nothing can open is damage.
+	for attempt := 0; ; attempt++ {
+		_, segs, err := readManifest(root)
+		if err != nil {
+			return fmt.Errorf("scrub %s: %w", dir, err)
+		}
+		err = scrubGeneration(root, segs)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errSegmentGone) || attempt+1 == openAttempts {
+			return err
+		}
 	}
+}
+
+// scrubGeneration verifies every segment one manifest names.
+func scrubGeneration(root *os.Root, segs []segInfo) error {
 	// Keys are unique across the whole index and not merely inside a segment.
 	// Resolve rests on that — it is why the first segment to answer is treated
 	// as the only one that can — and Add enforces it against the segments, so a
@@ -479,8 +522,17 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 		// genuinely there and still will not open is the filesystem refusing us,
 		// not corruption, and reports as itself. Lstat, not Stat, for the reason
 		// openSection gives: Stat follows the link in question.
+		//
+		// Absence is errSegmentGone rather than a bare ErrCorrupt, the same
+		// distinction openSegment draws: it is the one failure here that can
+		// mean the directory is sound and this reader is simply late. A foreign
+		// layout standing at the name is not — a merge leaves no plain file
+		// behind.
 		fi, serr := root.Lstat(info.name)
-		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.IsDir()) {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, errSegmentGone
+		}
+		if serr == nil && !fi.IsDir() {
 			return 0, fmt.Errorf("the manifest names this segment but no directory stands there: %w", ErrCorrupt)
 		}
 		return 0, err

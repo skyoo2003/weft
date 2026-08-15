@@ -9,15 +9,17 @@ import (
 	"os"
 )
 
-// errSegmentGone is a manifest naming a segment directory that is not there.
+// errSegmentGone is a manifest naming a segment that is not there — the
+// directory itself, or a section file inside one that a prune is partway
+// through removing.
 //
 // It is ErrCorrupt to every caller that only asks what kind of failure this is.
-// Open tells it apart because it is the one failure that can mean nothing is
-// wrong: Merge publishes its replacement and then prunes what it replaced, so a
-// reader that read the manifest before the flip and reaches the mapping after
-// the prune is holding a list that was true when it read it. Mappings already
-// taken survive the unlink; only this window does not.
-var errSegmentGone = fmt.Errorf("the manifest names this segment but no directory stands there: %w", ErrCorrupt)
+// Open and Scrub tell it apart because it is the one failure that can mean
+// nothing is wrong: Merge publishes its replacement and then prunes what it
+// replaced, so a reader that read the manifest before the flip and reaches the
+// files after the prune is holding a list that was true when it read it.
+// Mappings already taken survive the unlink; only this window does not.
+var errSegmentGone = fmt.Errorf("the manifest names this segment but it is no longer there: %w", ErrCorrupt)
 
 // segment is one immutable on-disk segment, mapped and answering point queries.
 //
@@ -45,14 +47,15 @@ type segment struct {
 	offs     docOffsets
 	keys     keyTable
 
-	// terms maps a term to the absolute file offset of its postings entry.
+	// terms maps a term to the extent of its postings entry, both offsets
+	// absolute into the postings file.
 	//
 	// This one structure is built eagerly, and what allows that is its size
 	// being the vocabulary and not the corpus: the milestone 4 index carries
 	// 626 MiB of documents behind a 2.7 MB terms index. Making it a binary
 	// search over a third fixed-width table would remove that too, and would be
 	// a format section bought before anything measured a need for it.
-	terms map[string]int
+	terms map[string]termSpan
 }
 
 // openSegment maps a segment directory and reads the parts bounded by the
@@ -125,7 +128,9 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 		return nil, fmt.Errorf("%s: meta says %d documents, %s indexes %d keys: %w",
 			metaR.name, s.count, keysFile, s.keys.n, ErrCorrupt)
 	}
-	if s.terms, err = decodeTermIndex(termsR); err != nil {
+	// The postings payload's end is where the last term's entry stops, which is
+	// what gives every entry an extent rather than only a start.
+	if s.terms, err = decodeTermIndex(termsR, segHeaderLen+len(s.postings)); err != nil {
 		return nil, err
 	}
 	ok = true
@@ -262,12 +267,18 @@ func (s *segment) lookup(term string) []Posting {
 // Streaming, because Merge writes a term's postings without ever holding them:
 // see segSource. Lookup is the caller that does want the slice, and builds it.
 func (s *segment) scanPostings(term string, yield func(Posting)) int {
-	off, ok := s.terms[term]
-	if !ok || off < segHeaderLen || off-segHeaderLen > len(s.postings) {
+	sp, ok := s.terms[term]
+	if !ok || sp.off < segHeaderLen || sp.off-segHeaderLen > len(s.postings) {
 		return 0
 	}
-	r := &segReader{name: postingsFile, b: s.postings, off: off - segHeaderLen}
-	n, err := decodeTermPostings(r, term, s.count, func(p Posting) {
+	// The end is bounded here for the same reason the start is: both come off
+	// disk, and an entry whose extent runs past the payload is one the decoder
+	// can never satisfy.
+	if sp.end < sp.off || sp.end-segHeaderLen > len(s.postings) {
+		return 0
+	}
+	r := &segReader{name: postingsFile, b: s.postings, off: sp.off - segHeaderLen}
+	n, err := decodeTermPostings(r, term, s.offs, sp.end-segHeaderLen, func(p Posting) {
 		p.Doc += s.base
 		yield(p)
 	})

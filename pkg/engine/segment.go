@@ -657,8 +657,17 @@ func (r *segReader) done() error {
 func openSection(root *os.Root, name string, kind byte, frame bool) (*segReader, []byte, error) {
 	f, err := root.Open(name)
 	if err != nil {
+		// Absence is errSegmentGone, not a bare ErrCorrupt: a prune removes a
+		// segment directory tree entry by entry, so a reader overtaken by a
+		// merge can find the directory still standing and a section file inside
+		// it already unlinked. That is the same window Open and Scrub re-read
+		// the manifest out of. A foreign layout at the name is not a window, and
+		// stays damage.
 		fi, serr := root.Lstat(name)
-		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.Mode().IsRegular()) {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, fmt.Errorf("%s: %w", name, errSegmentGone)
+		}
+		if serr == nil && !fi.Mode().IsRegular() {
 			return nil, nil, fmt.Errorf("%s: the manifest names this segment but no section file stands here: %w", name, ErrCorrupt)
 		}
 		return nil, nil, err
@@ -888,7 +897,12 @@ func decodeDocRecord(r *segReader, i int) (Document, int, error) {
 // that file yet — checking would mean walking it, which is the cost being
 // avoided — so a wrong offset surfaces as a block that fails its own checksum
 // when the term is looked up, and Scrub is what checks them all.
-func decodeTermIndex(terms *segReader) (map[string]int, error) {
+//
+// What each entry does get is the offset of the entry after it, which postEnd
+// supplies for the last. The two together are a term's extent in the postings
+// file, and an extent is what stands in for the one number in that file no unit
+// checksum reaches — see termSpan.
+func decodeTermIndex(terms *segReader, postEnd int) (map[string]termSpan, error) {
 	n, err := terms.intn("term count", len(terms.b))
 	if err != nil {
 		return nil, err
@@ -896,8 +910,9 @@ func decodeTermIndex(terms *segReader) (map[string]int, error) {
 	// Same capacity discipline as the document decoders: a hostile count cannot
 	// make this allocate more than the payload could back. An entry is at least
 	// 3 bytes.
-	out := make(map[string]int, min(n, len(terms.b)/3, 1<<16))
+	out := make(map[string]termSpan, min(n, len(terms.b)/3, 1<<16))
 	prev := ""
+	prevOff := 0
 	for i := range n {
 		start := terms.off
 		term, err := terms.str("term")
@@ -910,18 +925,50 @@ func decodeTermIndex(terms *segReader) (map[string]int, error) {
 		if term <= prev {
 			return nil, fmt.Errorf("%s: term %q out of order after %q: %w", terms.name, term, prev, ErrCorrupt)
 		}
-		prev = term
 		off, err := terms.intn("term offset", maxInt)
 		if err != nil {
 			return nil, err
 		}
+		// Entries are written in sorted term order and each term's postings are
+		// laid out in that same order, so the offsets ascend with the terms.
+		// Without that the extent below would not be one, and a table whose
+		// offsets ran backwards would hand a term a negative span rather than a
+		// wrong one.
+		if i > 0 && off <= prevOff {
+			return nil, fmt.Errorf("%s: term %q is recorded at offset %d, %q sits at %d: %w",
+				terms.name, term, off, prev, prevOff, ErrCorrupt)
+		}
 		if err := terms.unit(fmt.Sprintf("term entry %d", i), start, uint64(i)); err != nil {
 			return nil, err
 		}
-		out[term] = off
+		if i > 0 {
+			e := out[prev]
+			e.end = off
+			out[prev] = e
+		}
+		out[term] = termSpan{off: off}
+		prev, prevOff = term, off
+	}
+	// The last term runs to the end of the payload: encodePostings writes
+	// nothing after the final block, which post.done() is what pins.
+	if prev != "" {
+		e := out[prev]
+		e.end = postEnd
+		out[prev] = e
 	}
 	return out, terms.done()
 }
+
+// termSpan is where one term's postings entry begins and ends in the postings
+// file, both absolute the way the terms index records them.
+//
+// The end is what protects the block count. That count stands in front of the
+// blocks rather than inside any of them, so no unit checksum covers it: a flip
+// that lowers it makes the decoder stop early and hand back the surviving
+// prefix as a complete posting list, and the blocks it skipped are never
+// touched, so their own checksums protect nothing. Decoding that ends short of
+// the next term's entry is the witness the count itself does not carry.
+type termSpan struct{ off, end int }
 
 // decodeTermPostings reads one term's postings from wherever r is positioned.
 //
@@ -937,11 +984,22 @@ func decodeTermIndex(terms *segReader) (map[string]int, error) {
 // of segments it mapped precisely because they do not fit — so the caller that
 // reads a whole segment's postings must never be handed one whole list.
 // Index.Lookup still wants the slice, and builds it by appending in its yield.
-func decodeTermPostings(post *segReader, term string, docCount int, yield func(Posting)) (int, error) {
+// end is where this term's entry stops, payload-relative — the offset of the
+// next term's entry, or the end of the payload for the last. It is what the
+// block count is checked against; see termSpan.
+//
+// offs is the segment's docoff table, which turns a document's token count into
+// arithmetic. A term cannot occur in a document more often than that document
+// has tokens, and the eager decoder enforces it through a running budget per
+// document. That budget needs every term, which this decoder does not read —
+// but the per-document ceiling does not, and without it a frequency the writer
+// could never have produced reaches BM25 and comes back as a plausible score.
+func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, yield func(Posting)) (int, error) {
 	nblocks, err := post.intn("block count", len(post.b))
 	if err != nil {
 		return 0, err
 	}
+	docCount := offs.n
 	if nblocks == 0 {
 		return 0, fmt.Errorf("%s: term %q has no blocks; a term with no postings is never written: %w", post.name, term, ErrCorrupt)
 	}
@@ -1005,6 +1063,13 @@ func decodeTermPostings(post *segReader, term string, docCount int, yield func(P
 			if freq == 0 {
 				return 0, fmt.Errorf("%s: term %q in document %d has frequency 0, which Add never writes: %w", post.name, term, id, ErrCorrupt)
 			}
+			// Every occurrence of this term was one of the document's tokens, so
+			// its length is the ceiling. Read from docoff, which is arithmetic
+			// on a mapped table — the record itself stays on disk.
+			if dl := offs.docLen(DocID(id)); freq > dl {
+				return 0, fmt.Errorf("%s: term %q occurs %d times in document %d, which holds %d tokens: %w",
+					post.name, term, freq, id, dl, ErrCorrupt)
+			}
 			yield(Posting{Doc: DocID(id), Freq: freq})
 			n++
 			gotMaxTF = max(gotMaxTF, freq)
@@ -1021,6 +1086,15 @@ func decodeTermPostings(post *segReader, term string, docCount int, yield func(P
 		if err := post.unit(fmt.Sprintf("term %q block %d", term, b), blockStart, uint64(segHeaderLen+blockStart)); err != nil {
 			return 0, err
 		}
+	}
+	// The blocks have to fill the entry. A count that names fewer than were
+	// written leaves every block it does name intact and verifying, so nothing
+	// above notices — this is the only place the omission is visible, and the
+	// terms index is what makes it visible at all. A count that names more runs
+	// into the next term's bytes and fails a checksum before reaching here.
+	if post.off != end {
+		return 0, fmt.Errorf("%s: term %q holds %d blocks ending at %d, its entry runs to %d: %w",
+			post.name, term, nblocks, segHeaderLen+post.off, segHeaderLen+end, ErrCorrupt)
 	}
 	return n, nil
 }

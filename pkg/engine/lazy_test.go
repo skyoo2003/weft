@@ -870,11 +870,11 @@ func manifestBytes(t *testing.T, dir string) []byte {
 // two characters each, which is the smallest a token can be and still leave 676
 // of them: the fewer text bytes a posting costs, the more plainly a number taken
 // here is about posting lists.
-func ubiquitousCorpus(t *testing.T, ix *Index, from, n, terms int) {
+func ubiquitousCorpus(t *testing.T, ix *Index, from, n int) {
 	t.Helper()
-	if terms > 26*26 {
-		t.Fatalf("%d two-character terms do not exist", terms)
-	}
+	// 200 of the 676 two-character tokens, which is enough vocabulary for the
+	// terms index to be a real one and few enough that the postings dominate.
+	const terms = 200
 	var sb strings.Builder
 	for j := range terms {
 		fmt.Fprintf(&sb, "%c%c ", 'a'+j/26, 'a'+j%26)
@@ -915,13 +915,13 @@ func TestMergeDoesNotBufferPostingLists(t *testing.T) {
 	// holds everything. "The first committed segment can contain the entire
 	// corpus" is the case this is about, and the one that reusing a buffer
 	// across segments would not touch.
-	ubiquitousCorpus(t, ix, 0, 4000, 200)
+	ubiquitousCorpus(t, ix, 0, 4000)
 	if err := ix.Commit(dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	onDisk := segmentBytes(t, dir)
 	for i := range 8 {
-		ubiquitousCorpus(t, ix, 4000+i, 1, 200)
+		ubiquitousCorpus(t, ix, 4000+i, 1)
 		if err := ix.Commit(dir); err != nil {
 			t.Fatalf("Commit %d: %v", i, err)
 		}
@@ -971,7 +971,7 @@ func TestScrubDoesNotMaterializeTheSegment(t *testing.T) {
 	}
 	dir := t.TempDir()
 	ix := New()
-	ubiquitousCorpus(t, ix, 0, 4000, 200)
+	ubiquitousCorpus(t, ix, 0, 4000)
 	if err := ix.Commit(dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}

@@ -1296,7 +1296,7 @@ func TestOpenSurvivesAConcurrentMerge(t *testing.T) {
 	// nine trivial segments finishes inside the window it is supposed to be
 	// caught in, so there is nothing for a merge to overtake.
 	for i := range 9 {
-		ubiquitousCorpus(t, ix, i*400, 400, 200)
+		ubiquitousCorpus(t, ix, i*400, 400)
 		if err := ix.Commit(dir); err != nil {
 			t.Fatalf("Commit %d: %v", i, err)
 		}
@@ -1408,7 +1408,7 @@ func TestScrubSurvivesAConcurrentMerge(t *testing.T) {
 	// nine trivial segments finishes inside the window it is supposed to be
 	// caught in, so there is nothing for a merge to overtake.
 	for i := range 9 {
-		ubiquitousCorpus(t, ix, i*400, 400, 200)
+		ubiquitousCorpus(t, ix, i*400, 400)
 		if err := ix.Commit(dir); err != nil {
 			t.Fatalf("Commit %d: %v", i, err)
 		}
@@ -1436,7 +1436,7 @@ func TestScrubSurvivesAConcurrentMerge(t *testing.T) {
 	}()
 
 	for i := range 10 {
-		ubiquitousCorpus(t, ix, 3600+i, 1, 200)
+		ubiquitousCorpus(t, ix, 3600+i, 1)
 		if err := ix.Commit(dir); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
@@ -1505,5 +1505,48 @@ func TestCommitAndMergeSerialize(t *testing.T) {
 	defer got.Close() //nolint:errcheck // teardown
 	if got.Len() != want {
 		t.Errorf("Open recovered %d documents, want %d", got.Len(), want)
+	}
+}
+
+// TestScrubRereadsAManifestAMergeReplaced is the deterministic half of the
+// window above, pinned the way Open's is: the retry cannot be driven from
+// outside — Scrub re-reads the manifest from disk, so a test cannot hand it a
+// stale one — so what is fixed here is both ends. The window produces
+// errSegmentGone and nothing else, and a segment that stays missing is still
+// reported rather than spun on.
+func TestScrubRereadsAManifestAMergeReplaced(t *testing.T) {
+	dir := t.TempDir()
+	ix := commitEach(t, dir, 9)
+	defer ix.Close() //nolint:errcheck // teardown
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	// What a scrub that got here before the merge is holding.
+	_, stale, err := readManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Merge(); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	if err := scrubGeneration(root, stale); !errors.Is(err, errSegmentGone) {
+		t.Fatalf("scrubbing the manifest a merge replaced: got %v, want errSegmentGone", err)
+	}
+	// The directory was sound throughout, which is the whole complaint.
+	if err := Scrub(dir); err != nil {
+		t.Fatalf("Scrub after the merge that made that list stale: %v", err)
+	}
+
+	// A segment that is gone for good is damage, and bounded retries are what
+	// keep it from becoming a spin.
+	if err := os.RemoveAll(filepath.Join(dir, segDirName(10))); err != nil {
+		t.Fatal(err)
+	}
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with a segment that stays missing: got %v, want ErrCorrupt", err)
 	}
 }

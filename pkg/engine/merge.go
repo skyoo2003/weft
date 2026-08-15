@@ -130,6 +130,17 @@ func (m *mergedSource) count() int {
 
 func (m *mergedSource) totals() (totalLen, vecDim int) {
 	for _, s := range m.segs {
+		// The same sum avgDocLen widens, for the same reason: a segment's total
+		// is ranged against maxInt on its own and nothing ranges the collection.
+		// What differs is where a wrapped one lands. This total is written into
+		// meta, so it is not a bad answer to a query — it is a segment claiming
+		// a token count no walk of its documents can reach, published and then
+		// rejected by the next Scrub. Refuse before the merge names anything,
+		// the way every other unreadable source does.
+		if s.totalLen > maxInt-totalLen {
+			m.failf("merge: the segments hold more than %d tokens between them", maxInt)
+			return 0, vecDim
+		}
 		totalLen += s.totalLen
 		if vecDim == 0 {
 			vecDim = s.vecDim
