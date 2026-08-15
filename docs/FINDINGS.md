@@ -277,10 +277,10 @@ version 128 would be a format change anyway.
 
 **Verdict: the graph signal does not improve ranking quality.** The PRD's second
 falsification condition is met and answered *no*. Under equal-weight fusion it costs
-0.1202 nDCG@10, and no fusion weight makes it worth anything: the best delta available
+0.1227 nDCG@10, and no fusion weight makes it worth anything: the best delta available
 is exactly +0.0000. Measurement design and full numbers: [EVAL.md](EVAL.md).
 
-**The larger finding is about fusion, not about graphs.** That −0.1202 was RRF's equal
+**The larger finding is about fusion, not about graphs.** That −0.1227 was RRF's equal
 vote, not the graph's information — halving the graph stream's weight erases all but
 0.0019 of the regression (§7). Unweighted rank fusion makes a substantive ranking
 decision silently on every query, and its cost here was two orders of magnitude larger
@@ -290,16 +290,16 @@ than anything the graph signal was ever worth.
 |---|---|
 | `text` | 0.5826 |
 | `text+vector` | **0.6233** ← best |
-| `text+graph` | 0.3987 |
-| `text+vector+graph` | 0.5031 |
-| `text+vector+graph-including-seeds` | 0.5464 |
+| `text+graph` | 0.3985 |
+| `text+vector+graph` | 0.5005 |
+| `text+vector+graph-including-seeds` | 0.5451 |
 
 | Comparison | Delta | 95% CI |
 |---|---|---|
-| `text+vector+graph` − `text+vector` | **−0.1202** | [−0.1521, −0.0886] |
+| `text+vector+graph` − `text+vector` | **−0.1227** | [−0.1550, −0.0909] |
 | `text+vector` − `text` | +0.0407 | [+0.0010, +0.0798] |
 
-TREC-COVID, 50 queries, 171,332 documents, 579,720 in-corpus citation edges, 148,232
+TREC-COVID, 50 queries, 171,332 documents, 579,719 in-corpus citation edges, 148,232
 SPECTER2 vectors. Paired bootstrap, 10,000 resamples, seed 20260814. 28-configuration
 sweep over `RRFk` and over-fetch: **0 sign flips, negative throughout.**
 
@@ -327,7 +327,7 @@ of them; five arms differ only in the contents of a slice. The milestone 1 claim
 one level up from the engine, which is where it would have been cheapest to quietly
 break.
 
-**Assertion 3 — the graph signal regresses, robustly.** −0.1202 against the
+**Assertion 3 — the graph signal regresses, robustly.** −0.1227 against the
 pre-registered baseline, CI far from zero, sign stable across 28 configurations of that
 same pair — over-fetch to depth 100, rank constants from 1 to 200 — with the interval
 excluding zero in every one of them.
@@ -434,6 +434,16 @@ any fusion weight was published as +0.0018 and is **+0.0000** — a figure small
 the run-to-run spread of the graph it was measured on, and the one number in this
 document a reader might have taken as a reason to keep the scorer.
 
+**A later round of the same review moved it again, by one edge.** A reference naming
+the same `CorpusId` twice, or resolving back to the citing document, was written as two
+links and counted as two edges; the traversal walked neither. Deduplicating them
+removes exactly **one** edge from this snapshot — 579,720 becomes 579,719 — and the
+binding delta moves from −0.1202 to **−0.1227**. That a single adjacency is worth
+0.0025 nDCG is §5's degeneracy seen from the other side: 960 slots are settled by
+`DocID`, so one changed edge re-decides a whole tie group. The verdict is robust and
+the third decimal of a graph arm is not; [EVAL.md](EVAL.md) section 5.13 carries the
+full re-measurement.
+
 The fix is four lines: iterate in sorted key order, keep the first, print the collision
 count. The check that would have caught it is cheaper still — build twice, compare the
 bytes — and is now in the repository as a unit test on `corpusIDIndex` and as a command
@@ -507,7 +517,7 @@ stream moving.
 
 | Graph stream weight | nDCG@10 | Delta vs `text+vector` | 95% CI |
 |---|---|---|---|
-| 1.0 | 0.5031 | **−0.1202** | [−0.1521, −0.0886] |
+| 1.0 | 0.5005 | **−0.1227** | [−0.1550, −0.0909] |
 | 0.5 | 0.6214 | −0.0019 | [−0.0057, +0.0000] |
 | 0.25 | 0.6214 | −0.0019 | [−0.0057, +0.0000] |
 | ≤ 0.1 | 0.6233 | +0.0000 | [+0.0000, +0.0000] — converged to baseline |

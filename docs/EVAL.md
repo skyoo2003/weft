@@ -398,7 +398,7 @@ comparison; section 3.2 is the like-for-like one.
 | Documents indexed | 171,332 | 100% |
 | Documents with a vector | 148,232 | 86.5% |
 | Documents with at least one in-corpus citation edge | 48,194 | 28.1% |
-| In-corpus edges | 579,720 | — |
+| In-corpus edges | 579,719 | — |
 | References pointing outside the corpus (dangling) | 1,692,610 | 74.5% of all references |
 
 The fetch itself covered 165,192 documents in 1 h 34 m, found 147,267 vectors and
@@ -504,13 +504,13 @@ strictly an extension.
 |---|---|---|
 | Queries producing a graph stream at all | 45 of 50 | 45 of 50 |
 | Queries whose stream's membership is settled by DocID | 45 of 45 | 41 of 45 |
-| Slots decided by DocID across all queries | 2,082 | 958 |
-| Distinct scores per query | 3 | 3–29, and 3 is still the mode |
+| Slots decided by DocID across all queries | 2,082 | 960 |
+| Distinct scores per query | 3 | 3–24, and 3 is still the mode |
 
 The reason is the graph, not the formula. Only 28.1% of documents have an in-corpus
 out-edge (section 5.6), so two seeds rarely cite the same paper — the sum almost
 always has exactly one non-zero term, and 0.5 remains the modal score. Granularity did
-widen where seeds agree, from a flat 3 distinct scores to as many as 29 on one query,
+widen where seeds agree, from a flat 3 distinct scores to as many as 24 on one query,
 but 3 is still the most common value across the 50 and the tie group still crosses the
 cut on 41 of the 45 queries that answer at all. Multiplying granularity by `SeedN` only
 helps if the seeds agree, and on a citation graph this sparse they mostly do not.
@@ -519,15 +519,15 @@ It did move the numbers, in the right direction and not nearly far enough:
 
 | Arm | Before | After | Change |
 |---|---|---|---|
-| `text+graph` | 0.3527 | 0.3987 | +0.0460 |
-| `text+vector+graph` | 0.4661 | 0.5031 | +0.0370 |
-| `text+vector+graph-including-seeds` | 0.6071 | 0.5464 | −0.0607 |
+| `text+graph` | 0.3527 | 0.3985 | +0.0458 |
+| `text+vector+graph` | 0.4661 | 0.5005 | +0.0344 |
+| `text+vector+graph-including-seeds` | 0.6071 | 0.5451 | −0.0620 |
 
 | Comparison (after fix) | Delta | 95% CI | Reading |
 |---|---|---|---|
-| `text+vector+graph` − `text+vector` **(binding)** | **−0.1202** | [−0.1521, −0.0886] | **regresses** |
-| `text+graph` − `text` | −0.1839 | [−0.2273, −0.1407] | regresses |
-| `text+vector+graph-including-seeds` − `text+vector` | −0.0769 | [−0.1034, −0.0502] | regresses |
+| `text+vector+graph` − `text+vector` **(binding)** | **−0.1227** | [−0.1550, −0.0909] | **regresses** |
+| `text+graph` − `text` | −0.1841 | [−0.2274, −0.1409] | regresses |
+| `text+vector+graph-including-seeds` − `text+vector` | −0.0782 | [−0.1047, −0.0510] | regresses |
 | `text+vector` − `text` | +0.0407 | [+0.0010, +0.0798] | improves |
 
 `make eval` reprints this block. Largest per-query moves for the binding pair: query 24
@@ -567,13 +567,13 @@ comparison.
 | Configurations | 28 | 28 |
 | Sign flips | **0** | **0** |
 | Cells where the graph arm is ahead | **0** | **0** |
-| CI upper bound, worst case | **−0.0065** (never reaches zero) | **−0.1261** |
-| Widest gap | 0.4916 vs 0.6189 at `RRFk`=1, over-fetch 1 | 0.3931 vs 0.5826 |
-| Narrowest gap | 0.6829 vs 0.7047 at `RRFk`=60, over-fetch 10 | 0.4064 vs 0.5826 |
+| CI upper bound, worst case | **−0.0065** (never reaches zero) | **−0.1278** |
+| Widest gap | 0.4890 vs 0.6189 at `RRFk`=1, over-fetch 1 | 0.3929 vs 0.5826 |
+| Narrowest gap | 0.6829 vs 0.7047 at `RRFk`=60, over-fetch 10 | 0.4039 vs 0.5826 |
 | Baseline across the grid | 0.6189 → 0.7091 | 0.5826, invariant |
 
 The comparison column reproduces what this section published before the binding pair
-was added — delta range −0.1762 to −0.1895, worst-case CI upper bound −0.1261 — so the
+was added — delta range −0.1786 to −0.1896, worst-case CI upper bound −0.1278 — so the
 grid was extended, not re-measured.
 
 Over-fetching to depth 100 does not rescue it, and neither does collapsing the rank
@@ -582,7 +582,7 @@ matters least: the sign is perfectly stable, and it is stably negative.
 
 Two things this rules out. The result is not an artifact of `RRFk = 60`, which
 [DATASETS.md](DATASETS.md) section 3 requirement 4 warned about: at the frozen depth the
-binding delta is identical for every rank constant from 10 to 200, and −0.1273 at 1.
+binding delta is identical for every rank constant from 10 to 200, and −0.1299 at 1.
 
 And it is not an artifact of shallow streams, though this is where the binding grid
 answers differently from the comparison grid, so it is worth stating precisely. Depth is
@@ -626,7 +626,7 @@ is untouched, and nothing in the variant branches on a scorer.
 
 | Graph stream weight | nDCG@10 | Delta vs `text+vector` | 95% CI | Reading |
 |---|---|---|---|---|
-| 1.0 (as measured everywhere above) | 0.5031 | **−0.1202** | [−0.1521, −0.0886] | regresses |
+| 1.0 (as measured everywhere above) | 0.5005 | **−0.1227** | [−0.1550, −0.0909] | regresses |
 | 0.5 | 0.6214 | −0.0019 | [−0.0057, +0.0000] | undetermined |
 | 0.25 | 0.6214 | −0.0019 | [−0.0057, +0.0000] | undetermined |
 | **0.1** | 0.6233 | **+0.0000** | [+0.0000, +0.0000] | converged to baseline |
@@ -639,7 +639,7 @@ gets there by weight 0.1 rather than 0.02.
 
 **Two conclusions, pointing in opposite directions.**
 
-**The entire −0.1202 belonged to fusion, not to the graph.** Halving the weight erases
+**The entire −0.1227 belonged to fusion, not to the graph.** Halving the weight erases
 all but 0.0019 of it. What section 5.8 measured was not a signal destroying a ranking;
 it was RRF handing ten slots to a stream that had not earned them, exactly as
 [FINDINGS](FINDINGS.md) milestone 4 section 5.2 suspected. Equal weighting is a
@@ -728,6 +728,49 @@ A second review finding touched the numbers directly: `percentileIndex` truncate
 statistic high. Corrected, and every interval above reflects the correction; the effect
 is in the third or fourth decimal and changes no reading.
 
+### 5.13 One edge, and every number moved
+
+Found in review of the same pull request, two rounds after 5.12.
+
+`build` wrote a `Document.Link` for every reference that resolved inside the corpus and
+counted each one. A references list can name the same `CorpusId` twice, and the
+duplicate-paper merging described in 5.12 can resolve one back to the citing document
+itself — so both produced entries the graph does not have. The traversal dedupes on
+visit and a self-edge leads nowhere, so neither was ever walked; what they inflated was
+the published edge total, which is a claim about density that no ranking can
+corroborate or contradict.
+
+**On this snapshot it is exactly one reference**, and the count goes from 579,720 to
+**579,719**. `build` now prints the collapsed count on its own line, separate from the
+dangling references that point outside the corpus.
+
+**One edge in 579,720 moved the headline by 0.0025.** The binding delta went from
+−0.1202 to **−0.1227**, interval [−0.1550, −0.0909]. That is not noise in the
+measurement and it is not a flaw in the fix — it is section 5.9's degeneracy restated
+as a sensitivity. The modal graph score is 0.5, the tie group crosses the cut on 41 of
+the 45 queries that answer at all, and 960 slots in the reported rankings are settled
+by `DocID`. A single changed adjacency re-decides a whole tie group, and the tie group
+is most of what the graph stream contributes. **Read section 6 with that in mind: the
+verdict is robust — 28 configurations, 0 sign flips, no interval near zero — and the
+third decimal of any individual graph arm is not.**
+
+**Every current figure was retaken** against the rebuilt index: the arm table and tie
+analysis in 5.9, the 28-configuration sweep in 5.10, the weight sweep in 5.11, and the
+degeneracy diagnostic. `text` at 0.5826 and `text+vector` at 0.6233 are unchanged to
+four decimals, as they must be — neither fuses a graph stream. The weight sweep's
+headline is unchanged: the best available delta is still exactly **+0.0000**, and the
+arm still converges onto the baseline by weight 0.1. Sections 5.8 and 5.12 describe
+states this repository has left behind and keep the numbers measured at the time.
+
+**The index also stopped being anonymous.** Nothing bound a committed index to the
+corpus it was built from: `build -any-snapshot` against another revision, followed by
+`run` beside the pinned queries and qrels, passed every check there was, and a revision
+keeping the same document keys satisfied the qrels check too. `build` now writes
+`index/provenance.json` recording the sha256 of the corpus it read and whether
+`-partial` was used, and `run`, `sweep`, `weights` and `diagnose` refuse an index that
+does not match the pinned release, cannot say which corpus it holds, or was built over
+a cache that does not cover it. `-any-snapshot` opts out, as everywhere else.
+
 ---
 
 ## 6. Verdict
@@ -737,7 +780,7 @@ as weft implements it does not improve nDCG@10.**
 
 | Section 4 condition | Result |
 |---|---|
-| 1. Frozen: paired 95% CI for `+graph` − baseline excludes zero and is positive | **FAILS** — excludes zero and is *negative*: −0.1202, [−0.1521, −0.0886] |
+| 1. Frozen: paired 95% CI for `+graph` − baseline excludes zero and is positive | **FAILS** — excludes zero and is *negative*: −0.1227, [−0.1550, −0.0909] |
 | 2. Stable: the sign does not flip across the sweep | Holds — 0 flips in 28 configurations **of the pair this rule names**, negative throughout, closest interval [−0.0380, −0.0065] |
 | Best case under any fusion weight (section 5.11) | **+0.0000** — no weight beats the baseline; below 0.1 the arm *is* the baseline |
 
@@ -745,7 +788,7 @@ Condition 1 fails, which is the "no" branch. Per the PRD and [D-004](DECISIONS.m
 consequence is that `pkg/scorer/graph` goes while the `Scorer` interface,
 `Query.Seeds` and `pkg/scorer/recency` stay.
 
-**Section 5.11 changes why, without changing what.** The headline −0.1202 was fusion's
+**Section 5.11 changes why, without changing what.** The headline −0.1227 was fusion's
 doing: give the graph stream half a vote and all but 0.0019 of the regression
 disappears. The honest statement of the result is therefore not "graph proximity
 destroys rankings" but the flatter and less dramatic one — **at no weight between 1.0

@@ -263,7 +263,7 @@ above, PRD falsification condition 2
 ### Question
 
 Milestone 4 answered the PRD's second falsification condition *no*: graph proximity
-costs 0.1202 nDCG@10, with the sign stable across 28 configurations. The PRD is
+costs 0.1227 nDCG@10, with the sign stable across 28 configurations. The PRD is
 unambiguous about the consequence — keep the interface, discard the graph — and D-004
 restated it before the numbers existed. So `pkg/scorer/graph` should be deleted.
 
@@ -313,7 +313,7 @@ and is being reported as owed rather than done.
 ### What the weight sweep changed
 
 The three options above were framed while the graph scorer looked actively harmful:
-−0.1202 nDCG@10. Testing fusion weights moved that number's owner.
+−0.1227 nDCG@10. Testing fusion weights moved that number's owner.
 [EVAL.md](EVAL.md) section 5.11: halving the graph stream's weight erases all but
 0.0019 of the regression, and no weight makes the signal worth having — the best delta
 available is exactly +0.0000, the arm having converged onto the baseline.
