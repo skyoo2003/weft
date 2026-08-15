@@ -5,9 +5,9 @@ package engine
 import (
 	"encoding/binary"
 	"fmt"
-	"maps"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // This file is the half of format v2 that version 1 could not express: two
@@ -23,26 +23,40 @@ import (
 // Offsets are absolute into the file, header included — the same convention the
 // terms index already uses for postings. One convention, two places.
 
-// docoffWidth is the byte width of one offset table entry.
+// docoffWidth is the byte width of one docoff entry: an absolute file offset
+// and the document's token count, eight bytes each.
 //
-// Eight rather than four. The milestone 4 corpus already writes a 656 MB docs
-// file, so a uint32 table sits one order of magnitude away from a corpus weft
-// is meant to hold — and raising the ceiling later is a format migration, the
-// one cost D-007 says this format does not get to pay a second time. At 8
-// bytes a 171,332-document table is 1.4 MB against a 626 MiB docs file.
-const docoffWidth = 8
+// Eight rather than four for the offset. The milestone 4 corpus already writes
+// a 656 MB docs file, so a uint32 table sits one order of magnitude away from a
+// corpus weft is meant to hold — and raising the ceiling later is a format
+// migration, the one cost D-007 says this format does not get to pay twice.
+//
+// The token count rides along rather than living in the record, and that is not
+// tidiness either. BM25 asks for a document's length once per posting, and a
+// length reachable only by decoding the record would make every posting cost a
+// key, a text and a vector. Two words per document is 2.7 MB against a 626 MiB
+// docs file, and it turns DocLen into arithmetic.
+//
+// The record still carries its own length as well. The two agreeing is checked
+// where every other derived value is checked — a copy nobody compares is the
+// rot D-001 is about.
+const docoffWidth = 16
+
+// docoffLenAt is the offset of the token count within a docoff entry.
+const docoffLenAt = 8
 
 // ---------------------------------------------------------------------------
 // writing
 // ---------------------------------------------------------------------------
 
-// encodeDocOffsets writes the docoff section: one absolute offset per DocID, in
-// DocID order, so entry i sits at a computable position.
-func encodeDocOffsets(w *segWriter, offs []int) {
+// encodeDocOffsets writes the docoff section: one (offset, token count) pair
+// per DocID, in DocID order, so entry i sits at a computable position.
+func encodeDocOffsets(w *segWriter, offs []int, docLen []int) {
 	w.uvarint(uint64(len(offs)))
-	for _, off := range offs {
+	for i, off := range offs {
 		var b [docoffWidth]byte
 		binary.LittleEndian.PutUint64(b[:], uint64(off))
+		binary.LittleEndian.PutUint64(b[docoffLenAt:], uint64(docLen[i]))
 		w.write(b[:])
 	}
 }
@@ -57,20 +71,27 @@ func encodeDocOffsets(w *segWriter, offs []int) {
 // seeking backwards. That is not tidiness: milestone 3's merge cannot buffer
 // O(corpus) in order to patch, so a writer that needed to would have to be
 // rewritten one task later.
-func encodeKeys(w *segWriter, ix *Index) {
-	keys := slices.Sorted(maps.Keys(ix.byKey))
-	w.uvarint(uint64(len(keys)))
+func encodeKeys(w *segWriter, docKeys []string) {
+	// Sorted by key, carrying the DocID each key belongs to. The keys arrive in
+	// DocID order from encodeDocs, which has already decoded every document —
+	// asking the index for them again would decode the corpus twice.
+	order := make([]int, len(docKeys))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortFunc(order, func(a, b int) int { return strings.Compare(docKeys[a], docKeys[b]) })
 
-	off := w.off() + len(keys)*docoffWidth
-	for _, k := range keys {
+	w.uvarint(uint64(len(order)))
+	off := w.off() + len(order)*docoffWidth
+	for _, id := range order {
 		var b [docoffWidth]byte
 		binary.LittleEndian.PutUint64(b[:], uint64(off))
 		w.write(b[:])
-		off += keyEntryLen(k, ix.byKey[k])
+		off += keyEntryLen(docKeys[id], DocID(id))
 	}
-	for _, k := range keys {
-		w.str(k)
-		w.uvarint(uint64(ix.byKey[k]))
+	for _, id := range order {
+		w.str(docKeys[id])
+		w.uvarint(uint64(id))
 	}
 }
 
@@ -137,6 +158,20 @@ func (d docOffsets) at(id DocID) (int, bool) {
 		return 0, false
 	}
 	return int(off), true
+}
+
+// docLen returns the token count recorded for id, and 0 for an id the table
+// does not cover — the same answer Index.DocLen gives for an unknown id, which
+// BM25 is documented to read as "no normalization".
+func (d docOffsets) docLen(id DocID) int {
+	if uint64(id) >= uint64(d.n) {
+		return 0
+	}
+	n := binary.LittleEndian.Uint64(d.tab[int(id)*docoffWidth+docoffLenAt:])
+	if n > uint64(maxInt) {
+		return 0
+	}
+	return int(n)
 }
 
 // keyTable is the parsed keys section: a sorted key list reachable by binary
@@ -222,9 +257,16 @@ func verifySeekSections(docoffR, keysR, docsR *segReader, ix *Index) error {
 				offs.name, id, off, docsR.name, ErrCorrupt)
 		}
 		r := &segReader{name: docsR.name, b: docsR.b, off: off - segHeaderLen}
-		d, _, err := decodeDocRecord(r, id)
+		d, dl, err := decodeDocRecord(r, id)
 		if err != nil {
 			return err
+		}
+		// The token count is written twice — in the record and in this table —
+		// so the two are compared. A copy nobody checks is what D-001 calls
+		// rot, and this one is the copy every BM25 score is computed from.
+		if got := offs.docLen(DocID(id)); got != dl {
+			return fmt.Errorf("%s: document %d is %d tokens, its record says %d: %w",
+				offs.name, id, got, dl, ErrCorrupt)
 		}
 		// Key equality is the whole check. Landing one byte early or late
 		// almost always fails to decode at all, and the case that does not —

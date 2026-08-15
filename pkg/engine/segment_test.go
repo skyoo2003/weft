@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io/fs"
-	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -30,50 +29,6 @@ func addAll(t *testing.T, ix *Index, docs []Document) {
 		if _, err := ix.Add(d); err != nil {
 			t.Fatalf("Add(%q): %v", d.Key, err)
 		}
-	}
-}
-
-// assertIndexEqual compares every piece of state a segment carries. Field by
-// field rather than reflect.DeepEqual, because time.Time's internal
-// representation legitimately differs across a disk round trip (zone dropped,
-// monotonic reading stripped) while still naming the same instant.
-func assertIndexEqual(t *testing.T, want, got *Index) {
-	t.Helper()
-	if len(got.docs) != len(want.docs) {
-		t.Fatalf("restored %d documents, want %d", len(got.docs), len(want.docs))
-	}
-	for i := range want.docs {
-		w, g := want.docs[i], got.docs[i]
-		if g.Key != w.Key || g.Text != w.Text {
-			t.Errorf("doc %d: got %q/%q, want %q/%q", i, g.Key, g.Text, w.Key, w.Text)
-		}
-		if !slices.Equal(g.Vector, w.Vector) {
-			t.Errorf("doc %d vector: got %v, want %v", i, g.Vector, w.Vector)
-		}
-		if !slices.Equal(g.Links, w.Links) {
-			t.Errorf("doc %d links: got %v, want %v", i, g.Links, w.Links)
-		}
-		if !g.Time.Equal(w.Time) {
-			t.Errorf("doc %d time: got %v, want %v", i, g.Time, w.Time)
-		}
-		if g.Time.IsZero() != w.Time.IsZero() {
-			// recency reads IsZero as "no opinion", so zeroness must survive
-			// the trip as a meaning, not merely as an instant.
-			t.Errorf("doc %d: IsZero got %v, want %v", i, g.Time.IsZero(), w.Time.IsZero())
-		}
-	}
-	if !maps.Equal(got.byKey, want.byKey) {
-		t.Errorf("byKey: got %v, want %v", got.byKey, want.byKey)
-	}
-	if !maps.EqualFunc(got.postings, want.postings, slices.Equal) {
-		t.Errorf("postings differ: got %d terms, want %d", len(got.postings), len(want.postings))
-	}
-	if !slices.Equal(got.docLen, want.docLen) {
-		t.Errorf("docLen: got %v, want %v", got.docLen, want.docLen)
-	}
-	if got.totalLen != want.totalLen || got.vecDim != want.vecDim {
-		t.Errorf("totalLen/vecDim: got %d/%d, want %d/%d",
-			got.totalLen, got.vecDim, want.totalLen, want.vecDim)
 	}
 }
 
@@ -136,7 +91,8 @@ func TestSegmentRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open: %v", err)
 			}
-			assertIndexEqual(t, ix, got)
+			defer got.Close() //nolint:errcheck // teardown
+			assertReadAPIsAgree(t, ix, got)
 		})
 	}
 }
@@ -176,7 +132,7 @@ func TestReopenedIndexAcceptsAdds(t *testing.T) {
 //	postings: 1 | 1 | 2 1 2 1  0 2 1 1 ⨯
 //	          (terms) (blocks) (cnt maxDoc maxTF minDL) (docID freq delta freq)
 //	terms:    1 | "x" 7 ⨯
-//	docoff:   2 | off(a) off(b)        (fixed width, 8 bytes each)
+//	docoff:   2 | (off,len)(a) (off,len)(b)  (fixed width, 16 bytes each)
 //	keys:     2 | off off | "a" 0 | "b" 1
 //
 // — the postings entry starts at payload byte 1, and terms records absolute
@@ -434,8 +390,12 @@ func TestLyingFilesAreRefused(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir, segDir := commitTiny(t)
 			rewriteSection(t, filepath.Join(segDir, tt.file), tt.kind, tt.body)
-			if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
-				t.Fatalf("Open: got %v, want ErrCorrupt", err)
+			// Scrub, not Open. Every case here is a lie the bytes are
+			// internally consistent about — the checksums all pass — so
+			// catching it means decoding the section and re-deriving what it
+			// claims. Open stopped doing that, which is the milestone.
+			if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("Scrub: got %v, want ErrCorrupt", err)
 			}
 		})
 	}
@@ -498,7 +458,7 @@ func TestBlocksStartAtAbsoluteDocIDs(t *testing.T) {
 	}
 
 	rewriteSection(t, path, kindPostings, payload(1)) // the chained encoding
-	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("second block continuing the delta chain: got %v, want ErrCorrupt", err)
 	}
 }
@@ -528,8 +488,8 @@ func TestOverlongVersionEncodingIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("Open: got %v, want ErrCorrupt", err)
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub: got %v, want ErrCorrupt", err)
 	}
 }
 
@@ -597,9 +557,9 @@ func TestUnsortedTermsAreRefused(t *testing.T) {
 	rewriteSection(t, filepath.Join(dir, segDirName(1), termsFile), kindTerms, func(w *segWriter) {
 		termsPayload(w, 2, termEntry{"y", 7}, termEntry{"x", 18})
 	})
-	_, err := Open(dir)
+	err := Scrub(dir)
 	if !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("Open: got %v, want ErrCorrupt", err)
+		t.Fatalf("Scrub: got %v, want ErrCorrupt", err)
 	}
 	// The reason is asserted, not just the sentinel. Every rule in this decoder
 	// reports ErrCorrupt, so a payload that trips a different one passes this
@@ -607,7 +567,7 @@ func TestUnsortedTermsAreRefused(t *testing.T) {
 	// happened when per-unit checksums arrived and this file's handcrafted
 	// entries stopped carrying one.
 	if !strings.Contains(err.Error(), "out of order") {
-		t.Fatalf("Open failed for the wrong reason: %v", err)
+		t.Fatalf("Scrub failed for the wrong reason: %v", err)
 	}
 }
 

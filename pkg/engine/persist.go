@@ -192,10 +192,17 @@ func Open(dir string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}
-	ix, err := loadSegment(root, segs[0], false)
+	s, err := openSegment(root, segs[0], 0)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", segs[0], err)
 	}
+	ix := New()
+	ix.segs = []*segment{s}
+	// The pending segment starts where the committed one ends, so ids stay
+	// dense across the join and an Add after an Open cannot collide with a
+	// document already on disk.
+	ix.base = DocID(uint64(s.base) + uint64(s.count))
+	ix.vecDim = s.vecDim
 	return ix, nil
 }
 

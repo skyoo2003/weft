@@ -10,10 +10,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io/fs"
-	"maps"
 	"math"
 	"os"
-	"slices"
 	"time"
 )
 
@@ -329,13 +327,18 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 	func() {
 		ix.mu.RLock()
 		defer ix.mu.RUnlock()
-		meta.uvarint(uint64(len(ix.docs)))
-		meta.uvarint(uint64(ix.totalLen))
+		total := ix.totalLen
+		for _, s := range ix.segs {
+			total += s.totalLen
+		}
+		meta.uvarint(uint64(ix.lenAt()))
+		meta.uvarint(uint64(total))
 		meta.uvarint(uint64(ix.vecDim))
 		// docoff records where each record landed, so it is written from what
 		// encodeDocs returns rather than by predicting record sizes twice.
-		encodeDocOffsets(docoff, encodeDocs(docs, ix))
-		encodeKeys(keys, ix)
+		offs, lens, docKeys := encodeDocs(docs, ix)
+		encodeDocOffsets(docoff, offs, lens)
+		encodeKeys(keys, docKeys)
 		encodePostings(post, terms, ix)
 	}()
 
@@ -371,15 +374,29 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 // order — what the docoff section records. They are collected here rather than
 // recomputed because a second implementation predicting record sizes would be
 // a second thing to keep in step with this one.
-func encodeDocs(w *segWriter, ix *Index) []int {
-	w.uvarint(uint64(len(ix.docs)))
-	offs := make([]int, len(ix.docs))
-	for i, d := range ix.docs {
+func encodeDocs(w *segWriter, ix *Index) (offs, lens []int, keys []string) {
+	n := ix.lenAt()
+	w.uvarint(uint64(n))
+	offs, lens, keys = make([]int, n), make([]int, n), make([]string, n)
+	for i := range n {
+		// Read through the router rather than off ix.docs. A committed segment
+		// holds the front of the corpus and the pending one holds the tail, so
+		// writing only what is in memory would drop everything already on disk
+		// — an index that commits and then reopens shorter than it was.
+		d, ok := ix.docAt(DocID(i))
+		if !ok {
+			// Unreachable while every id below lenAt is either in a segment or
+			// pending. If it ever is reachable, writing a hole is worse than
+			// writing an empty document, and the decoder refuses an empty key.
+			d = Document{}
+		}
+		lens[i] = ix.docLenAt(DocID(i))
+		keys[i] = d.Key
 		offs[i] = w.off()
 		w.beginUnit(uint64(i))
 		w.str(d.Key)
 		w.str(d.Text)
-		w.uvarint(uint64(ix.docLen[i]))
+		w.uvarint(uint64(lens[i]))
 		w.uvarint(uint64(len(d.Vector)))
 		for _, c := range d.Vector {
 			var b [4]byte
@@ -394,7 +411,7 @@ func encodeDocs(w *segWriter, ix *Index) []int {
 		w.uvarint(uint64(d.Time.Nanosecond()))
 		w.endUnit()
 	}
-	return offs
+	return offs, lens, keys
 }
 
 // encodePostings writes the postings file and the terms index side by side.
@@ -422,7 +439,9 @@ func encodeDocs(w *segWriter, ix *Index) []int {
 // immutable, and together the block's true BM25 score ceiling under whatever
 // the collection statistics are at query time.
 func encodePostings(post, terms *segWriter, ix *Index) {
-	keys := slices.Sorted(maps.Keys(ix.postings))
+	// Every term the index holds, committed and pending alike, for the reason
+	// encodeDocs reads through the router.
+	keys := ix.terms()
 	post.uvarint(uint64(len(keys)))
 	terms.uvarint(uint64(len(keys)))
 
@@ -434,7 +453,7 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 		terms.uvarint(uint64(post.off()))
 		terms.endUnit()
 
-		pl := ix.postings[t]
+		pl := ix.lookupAt(t)
 		post.uvarint(uint64((len(pl) + blockSize - 1) / blockSize))
 
 		for start := 0; start < len(pl); start += blockSize {
@@ -442,7 +461,7 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 			maxTF, minDL := 0, maxInt
 			for _, p := range blk {
 				maxTF = max(maxTF, p.Freq)
-				minDL = min(minDL, ix.docLen[p.Doc])
+				minDL = min(minDL, ix.docLenAt(p.Doc))
 			}
 			// A block's own file offset seeds its checksum: blocks are
 			// independently decodable by design (D-001), so nothing else stops
@@ -891,6 +910,145 @@ func decodeDocRecord(r *segReader, i int) (Document, int, error) {
 // invariants below are the ones the scorers actually rest on; term-to-text
 // correspondence is not one of them, and buying it would cost a full
 // re-tokenization of the corpus on every Open.
+// decodeTermIndex reads the whole terms section into a term -> postings offset
+// map, verifying each entry's checksum and the sorted order as it goes.
+//
+// Eager, and allowed to be: the terms index is bounded by the vocabulary, not
+// the corpus — 2.7 MB against 626 MiB of documents on the milestone 4 index.
+// The alternative is a third fixed-width table and a binary search, which is a
+// format section bought before anything measured a need. If a corpus ever turns
+// up whose vocabulary is the problem, this is the function that says so.
+//
+// The offsets are not checked against the postings file here. Nothing has read
+// that file yet — checking would mean walking it, which is the cost being
+// avoided — so a wrong offset surfaces as a block that fails its own checksum
+// when the term is looked up, and Scrub is what checks them all.
+func decodeTermIndex(terms *segReader) (map[string]int, error) {
+	n, err := terms.intn("term count", len(terms.b))
+	if err != nil {
+		return nil, err
+	}
+	// Same capacity discipline as decodeDocs: a hostile count cannot make this
+	// allocate more than the payload could back. An entry is at least 3 bytes.
+	out := make(map[string]int, min(n, len(terms.b)/3, 1<<16))
+	prev := ""
+	for i := range n {
+		start := terms.off
+		term, err := terms.str("term")
+		if err != nil {
+			return nil, err
+		}
+		if term == "" {
+			return nil, fmt.Errorf("%s: term %d is empty, which the tokenizer never emits: %w", terms.name, i, ErrCorrupt)
+		}
+		if term <= prev {
+			return nil, fmt.Errorf("%s: term %q out of order after %q: %w", terms.name, term, prev, ErrCorrupt)
+		}
+		prev = term
+		off, err := terms.intn("term offset", maxInt)
+		if err != nil {
+			return nil, err
+		}
+		if err := terms.unit(fmt.Sprintf("term entry %d", i), start, uint64(i)); err != nil {
+			return nil, err
+		}
+		out[term] = off
+	}
+	return out, terms.done()
+}
+
+// decodeTermPostings reads one term's postings from wherever r is positioned.
+//
+// It is decodePostings' inner loop with the corpus-wide checks left out, and
+// the difference is the point. Each block still re-derives its own metadata and
+// still verifies its own checksum, because those are answerable from the block.
+// What is not answerable from one term is whether a document's frequencies add
+// up across every term that names it, so that check stays where it can be made:
+// in Scrub, which reads all of them.
+func decodeTermPostings(post *segReader, term string, docCount int) ([]Posting, error) {
+	nblocks, err := post.intn("block count", len(post.b))
+	if err != nil {
+		return nil, err
+	}
+	if nblocks == 0 {
+		return nil, fmt.Errorf("%s: term %q has no blocks; a term with no postings is never written: %w", post.name, term, ErrCorrupt)
+	}
+
+	var pl []Posting
+	prev := uint64(0)
+	for b := range nblocks {
+		blockStart := post.off
+		cnt, err := post.intn("block posting count", blockSize)
+		if err != nil {
+			return nil, err
+		}
+		if cnt == 0 || (b < nblocks-1 && cnt != blockSize) {
+			return nil, fmt.Errorf("%s: term %q block %d holds %d postings: %w", post.name, term, b, cnt, ErrCorrupt)
+		}
+		maxDoc, err := post.uvarint("block maxDocID")
+		if err != nil {
+			return nil, err
+		}
+		maxTF, err := post.intn("block maxTF", maxInt)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := post.intn("block minDocLen", maxInt); err != nil {
+			return nil, err
+		}
+
+		gotMaxTF := 0
+		for j := range cnt {
+			delta, err := post.uvarint("posting docID delta")
+			if err != nil {
+				return nil, err
+			}
+			var id uint64
+			switch {
+			case j > 0:
+				if delta == 0 {
+					return nil, fmt.Errorf("%s: term %q repeats a docID; postings are strictly ascending: %w", post.name, term, ErrCorrupt)
+				}
+				if delta > math.MaxUint64-prev {
+					return nil, fmt.Errorf("%s: term %q docID delta %d overflows past %d: %w", post.name, term, delta, prev, ErrCorrupt)
+				}
+				id = prev + delta
+			case b == 0:
+				id = delta
+			default:
+				id = delta
+				if id <= prev {
+					return nil, fmt.Errorf("%s: term %q block %d starts at document %d, block %d ended at %d; postings are strictly ascending: %w",
+						post.name, term, b, id, b-1, prev, ErrCorrupt)
+				}
+			}
+			if id >= uint64(docCount) {
+				return nil, fmt.Errorf("%s: term %q names document %d of a %d-document segment: %w", post.name, term, id, docCount, ErrCorrupt)
+			}
+			prev = id
+			freq, err := post.intn("posting frequency", maxInt)
+			if err != nil {
+				return nil, err
+			}
+			if freq == 0 {
+				return nil, fmt.Errorf("%s: term %q in document %d has frequency 0, which Add never writes: %w", post.name, term, id, ErrCorrupt)
+			}
+			pl = append(pl, Posting{Doc: DocID(id), Freq: freq})
+			gotMaxTF = max(gotMaxTF, freq)
+		}
+		if last := uint64(pl[len(pl)-1].Doc); last != maxDoc {
+			return nil, fmt.Errorf("%s: term %q block %d records maxDocID %d, contents end at %d: %w", post.name, term, b, maxDoc, last, ErrCorrupt)
+		}
+		if gotMaxTF != maxTF {
+			return nil, fmt.Errorf("%s: term %q block %d records maxTF %d, contents say %d: %w", post.name, term, b, maxTF, gotMaxTF, ErrCorrupt)
+		}
+		if err := post.unit(fmt.Sprintf("term %q block %d", term, b), blockStart, uint64(segHeaderLen+blockStart)); err != nil {
+			return nil, err
+		}
+	}
+	return pl, nil
+}
+
 func decodePostings(post, terms *segReader, host *Index) error {
 	pn, err := post.intn("term count", len(post.b))
 	if err != nil {

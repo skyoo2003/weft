@@ -6,6 +6,7 @@ func Tokenize(string) []string
 func TopK([]Candidate, int) []Candidate
 method Index.Add(Document) (DocID, error)
 method Index.AvgDocLen() float64
+method Index.Close() error
 method Index.Commit(string) error
 method Index.Doc(DocID) (Document, bool)
 method Index.DocLen(DocID) int

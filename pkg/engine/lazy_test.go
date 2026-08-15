@@ -307,23 +307,57 @@ func TestCloseReleasesTheSegments(t *testing.T) {
 	}
 }
 
-// TestOpenStillRefusesDamageInsideAUnit guards the boundary against moving too
-// far. Skipping the frame checksum decides *where* verification happens; it is
-// not permission to load a corrupt record.
-func TestOpenStillRefusesDamageInsideAUnit(t *testing.T) {
-	dir, segDir, _ := commitSeeded(t)
+// TestADamagedRecordIsNeverServed guards the boundary against moving too far,
+// and records what it cost to move it at all.
+//
+// Open no longer reads a document record, so it cannot refuse one. What must
+// still hold is that nobody is ever handed a damaged document: the read that
+// touches it verifies the record's checksum and reports the id as absent, and
+// Scrub is what names the damage.
+//
+// The cost is in that sentence. Doc's signature is (Document, bool), and
+// keeping it — the milestone's central claim — means corruption and "no such
+// document" are the same answer at the read API. Widening Doc to return an
+// error is the one change that would break every scorer, which is the trade
+// this milestone exists to avoid making; docs/FINDINGS.md carries it.
+func TestADamagedRecordIsNeverServed(t *testing.T) {
+	dir, segDir, want := commitSeeded(t)
 	path := filepath.Join(segDir, docsFile)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A byte of document text, which no semantic rule re-derives — a unit
+	// A byte of document 0's text, which no semantic rule re-derives — a unit
 	// checksum is the only thing that can see it.
 	b[segHeaderLen+6] ^= 0xff
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("Open with a damaged document record: got %v, want ErrCorrupt", err)
+
+	ix, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ix.Close() //nolint:errcheck // teardown
+
+	// Not the damaged text, not a wrong document, not a panic.
+	if d, ok := ix.Doc(0); ok {
+		t.Errorf("Doc(0) returned %q from a record that fails its checksum", d.Text)
+	}
+	// And the documents beside it are untouched: damage is contained to its
+	// own unit, which is the whole reason the checksums are per unit.
+	for id := 1; id < want.Len(); id++ {
+		d, ok := ix.Doc(DocID(id))
+		if !ok {
+			t.Errorf("Doc(%d) went missing alongside a damaged neighbour", id)
+			continue
+		}
+		if w, _ := want.Doc(DocID(id)); d.Text != w.Text {
+			t.Errorf("Doc(%d).Text = %q, want %q", id, d.Text, w.Text)
+		}
+	}
+
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with a damaged document record: got %v, want ErrCorrupt", err)
 	}
 }

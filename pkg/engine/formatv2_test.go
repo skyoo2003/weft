@@ -226,9 +226,14 @@ func TestEveryByteFlipIsCaughtWithoutTheFrameCRC(t *testing.T) {
 			// and the frame is what this test is doing without.
 			for i := segHeaderLen; i < len(orig)-crc32.Size; i++ {
 				flipAndRepairFrame(t, path, i)
+				// Scrub, because Open no longer decodes a payload. The frame
+				// checksum is repaired, so Scrub's own whole-file check passes
+				// and what is left to catch the flip is the per-unit checksum
+				// — which is still exactly what this test measures.
+				//
 				// Errorf, not Fatalf: how many positions slip through is the
 				// measurement, and stopping at the first one hides it.
-				if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+				if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
 					t.Errorf("%s payload byte %d flipped, frame checksum repaired: got %v, want ErrCorrupt", name, i, err)
 				}
 				if err := os.WriteFile(path, orig, 0o644); err != nil {

@@ -116,7 +116,7 @@ func TestSuccessiveCommitsKeepOneGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	assertIndexEqual(t, ix, got)
+	assertReadAPIsAgree(t, ix, got)
 }
 
 func TestCommitAfterOpenContinuesTheGenerations(t *testing.T) {
@@ -141,7 +141,7 @@ func TestCommitAfterOpenContinuesTheGenerations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
-	assertIndexEqual(t, second, got)
+	assertReadAPIsAgree(t, second, got)
 	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000002"}) {
 		t.Fatalf("generations did not continue past the restart: %v", names)
 	}
