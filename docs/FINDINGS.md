@@ -657,6 +657,26 @@ the one change that reaches every scorer, and the change this milestone exists t
 avoid making. What still holds is pinned: never a wrong document, never a panic,
 neighbouring documents untouched, and `Scrub` names the damage. [D-006](DECISIONS.md).
 
+`Lookup` answers the same way, and it did not at first — the sentence above was
+written before the code kept it. A term's offset is the one value on the lazy
+path that nothing re-derives. `decodePostings` can refuse a bad one because it
+walks the postings file in step with the terms file and knows where each entry
+belongs; `decodeTermIndex` cannot, because not walking is precisely what makes
+`Open` lazy. Nothing replaced the check at the point of use, so an offset below
+the frame header indexed a slice negatively and `Index.Lookup` panicked on a
+directory whose every checksum verified. That the checksums verified is the
+point: CRC32C is an integrity code, not a signature, and this package parses
+files it did not write. The guard now sits beside `doc`'s, and
+`TestALyingTermOffsetIsNeverFollowed` is what keeps this paragraph true.
+
+The lesson is narrower than "check offsets". A check that lives in a sequential
+decoder does not survive the decoder being made random-access, and it does not
+announce its absence — the walk was providing it for free, and removing the walk
+removed it silently. Every other check this milestone moved was moved
+deliberately, from `Open` to `Scrub`, and written down. This one was not moved;
+it was dropped, and the fuzzers did not reach it because reaching it needs a
+checksum that verifies.
+
 ### 4.2 A unit nobody reads is never verified
 
 Milestone 2 got whole-index verification free, because `Open` read every byte.

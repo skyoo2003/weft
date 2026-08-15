@@ -147,6 +147,52 @@ binding deltas keep their confidence intervals, and the largest per-query moves
 are unchanged. `Open` went from 979 ms to 54 ms. Recorded in
 [EVAL.md](../EVAL.md) section 8.
 
+## Review follow-up — a check the walk was providing
+
+Found by reviewing this branch after CI went green, not by a plan task.
+
+`segment.lookup` took the offset out of the terms index and handed it to a
+`segReader` without bounding it. `segment.doc` bounds the offset it takes from
+`docoff` on the line it uses it; `lookup` did not, and the asymmetry is what the
+review noticed. The eager decoder has the check — `decodePostings` refuses a
+term recorded anywhere but where its sequential walk sits — and `decodeTermIndex`
+could not inherit it, because not walking is what makes `Open` lazy.
+
+**RED** — commit `87a9901`.
+
+```text
+$ go test ./pkg/engine/ -run TestALyingTermOffsetIsNeverFollowed
+panic: runtime error: slice bounds out of range [-6:]
+
+engine.(*segReader).uvarint      segment.go:488
+engine.decodeTermPostings        segment.go:950
+engine.(*segment).lookup         segments.go:187
+engine.(*Index).lookupAt         index.go:116
+engine.(*Index).Lookup           index.go:371
+```
+
+Runtime RED, caused by the missing bound and nothing else: the test compiles,
+runs, and reaches the panic through `Open` and `Lookup` on a directory whose
+every checksum verifies. Reaching it needs exactly that — a doctored terms
+section framed and checksummed the way the real writer frames it — which is why
+neither fuzzer found it. CRC32C is an integrity code, not a signature.
+
+**GREEN** — commit `1ce8a3a`.
+
+```text
+$ go test ./pkg/engine/ -run TestALyingTermOffsetIsNeverFollowed -v
+--- PASS: TestALyingTermOffsetIsNeverFollowed/before_the_frame_header
+--- PASS: TestALyingTermOffsetIsNeverFollowed/past_the_payload
+ok      github.com/skyoo2003/weft/pkg/engine    6.113s
+
+$ make all && make arch && make deps && make spdx
+OK   # every gate, plus golangci-lint 0 issues
+```
+
+Three conditions on one line, the shape `doc` already used. `nil` rather than an
+error, because `Lookup` has none to return — the D-006 trade, applied to the
+sibling that had been answering with a panic.
+
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
@@ -180,6 +226,7 @@ are unchanged. `Open` went from 979 ms to 54 ms. Recorded in
 | 27 | The same corpus produces the same bytes, committed or merged | `lazy_test.go:TestCommitIsByteDeterministic`, `TestMergeIsByteDeterministic` | unit | PASS | same |
 | 28 | The milestone 4 evaluation reproduces on the new format | `weft-eval build` then `make eval` | integration | PASS | five arms to four decimals, both deltas with intervals |
 | 29 | Commit atomicity, symlink refusal, generation bounds and foreign-entry refusal all survive the rewrite | `persist_test.go` (20 tests) | unit | PASS | `go test ./pkg/engine/` |
+| 30 | A term offset the terms index does not justify is never followed — `Lookup` reports absence where it used to panic, on a directory whose every checksum verifies | `lazy_test.go:TestALyingTermOffsetIsNeverFollowed` | unit | PASS | same |
 
 ## Merge evidence
 
@@ -205,6 +252,8 @@ Checkpoint commits on `m3-scale`, oldest first:
 | `20915a6` | GREEN | Count bounded, rankings unmoved, bytes deterministic |
 | `d02869a` | GREEN | Heap flat at 74,504 B across an 8× corpus; commit determinism |
 | `4de2e8f` | docs | FINDINGS verdict, FORMAT v2, D-006/D-007, EVAL section 8 |
+| `87a9901` | RED | `Index.Lookup` panics on a doctored terms offset, reached through `Open` with every checksum verifying |
+| `1ce8a3a` | GREEN | The offset is bounded where it is used; both cases report absence; every gate green |
 
 If these are squashed, this table and the two blocks above are the surviving
 record.
