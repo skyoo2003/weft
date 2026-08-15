@@ -1,6 +1,7 @@
 # ../fusion
 const RRFk = 60.0
 func Fuse([][]engine.Candidate, int) []engine.Candidate
+func FuseWeighted(...float64) engine.Fuser
 package fusion
 
 # ../scorer/graph

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
@@ -785,9 +787,70 @@ func TestBuildRecordsWhatItBuiltFrom(t *testing.T) {
 	}
 }
 
-// TestVerifyProvenanceRefusesAnIndexItCannotPublish covers the three answers that are
-// not "this is the published index": a corpus that is not the pinned one, a build that
-// did not cover the corpus, and an index too old to say either way.
+// TestBuildCarriesUnpinnedPreparationIntoTheIndex closes the laundering route.
+//
+// `prepare -any-snapshot` says the join ran against inputs docs/EVAL.md does not pin,
+// and until now that claim died with the command. The cache it leaves is an ordinary
+// complete one, so a later plain `build` finds full coverage, hashes a corpus that does
+// match, and records partial=false — an index every check downstream accepts, whose
+// citation edges and SPECTER vectors came from a metadata release nothing verified.
+// The second build is the one that matters here: it passes no flag at all.
+func TestBuildCarriesUnpinnedPreparationIntoTheIndex(t *testing.T) {
+	dir := evalDir(t, map[string]string{
+		corpusFile: twoDocCorpus,
+		s2File:     `{"key":"a","corpus_id":"1"}` + "\n" + `{"key":"b","corpus_id":"2"}` + "\n",
+	})
+	if err := os.WriteFile(filepath.Join(dir, s2UnpinnedFile), []byte("x\n"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	// -any-snapshot here is only about this fixture's corpus.jsonl not being the
+	// pinned 221 MB one; the flag under test is the one prepare left behind.
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, indexDir, provenanceFile))
+	if err != nil {
+		t.Fatalf("read provenance: %v", err)
+	}
+	var p provenance
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("parse provenance: %v", err)
+	}
+	if !p.PrepareUnpinned {
+		t.Error("the index does not record that its cache was joined against unpinned inputs, " +
+			"so a later run would publish its vector and graph arms")
+	}
+
+	// And the marker survives a build, because the cache it describes does.
+	if _, err := os.Stat(filepath.Join(dir, s2UnpinnedFile)); err != nil {
+		t.Errorf("build removed the marker beside the cache: %v", err)
+	}
+}
+
+// TestPrepareMarksAnUnpinnedJoin is the other half: the marker has to exist before
+// build can carry it, and prepare is what writes it.
+func TestPrepareMarksAnUnpinnedJoin(t *testing.T) {
+	dir := evalDir(t, map[string]string{
+		corpusFile:   twoDocCorpus,
+		metadataFile: "cord_uid,doi,pmcid,pubmed_id,s2_id\na,,,,1\nb,,,,2\n",
+		// Both documents already cached, so prepare finishes without an API call.
+		s2File: `{"key":"a","corpus_id":"1"}` + "\n" + `{"key":"b","corpus_id":"2"}` + "\n",
+	})
+
+	if err := prepare(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, s2UnpinnedFile)); err != nil {
+		t.Fatalf("prepare -any-snapshot left no marker beside the cache: %v", err)
+	}
+}
+
+// TestVerifyProvenanceRefusesAnIndexItCannotPublish covers the answers that are not
+// "this is the published index": a corpus that is not the pinned one, a build that did
+// not cover the corpus, an index too old to say either way, and a cache whose join ran
+// against inputs the snapshot table does not pin.
 func TestVerifyProvenanceRefusesAnIndexItCannotPublish(t *testing.T) {
 	_, wantSHA, ok := pinned(corpusFile)
 	if !ok {
@@ -819,6 +882,13 @@ func TestVerifyProvenanceRefusesAnIndexItCannotPublish(t *testing.T) {
 	t.Run("an index that cannot say", func(t *testing.T) {
 		if err := verifyProvenance(t.TempDir()); err == nil {
 			t.Error("accepted an index with no provenance at all, which is the one most likely stale")
+		}
+	})
+	t.Run("a cache joined against unpinned inputs", func(t *testing.T) {
+		dir := write(t, provenance{Corpus: wantSHA, PrepareUnpinned: true})
+		if err := verifyProvenance(dir); err == nil {
+			t.Error("accepted an index whose edges and vectors came from a metadata release " +
+				"nothing verified; the corpus hash matches, so nothing else would have noticed")
 		}
 	})
 	t.Run("the published index", func(t *testing.T) {

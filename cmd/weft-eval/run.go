@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
@@ -341,7 +343,7 @@ func run(ctx context.Context, args []string) error {
 	var k, overfetch, iters int
 	var rankConst float64
 	var anySnapshot bool
-	data, flagErr := dataFlags("run", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags(cmdRun, args, func(fs *flag.FlagSet) {
 		fs.IntVar(&k, "k", frozenK, "rank cut")
 		fs.IntVar(&overfetch, "overfetch", frozenOverfetch, "ask each scorer for k*this")
 		fs.IntVar(&iters, "iters", bootstrapIters, "bootstrap resamples")
@@ -473,7 +475,7 @@ func topMoves(base, arm map[string]float64, n int) []move {
 func sweep(ctx context.Context, args []string) error {
 	var k, iters int
 	var anySnapshot bool
-	data, flagErr := dataFlags("sweep", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags(cmdSweep, args, func(fs *flag.FlagSet) {
 		fs.IntVar(&k, "k", frozenK, "rank cut")
 		fs.IntVar(&iters, "iters", 2000,
 			"bootstrap resamples per configuration (lower than the headline: this is a sign check, not a published interval)")
@@ -682,7 +684,7 @@ func sweep(ctx context.Context, args []string) error {
 func weights(ctx context.Context, args []string) error {
 	var k, iters int
 	var anySnapshot bool
-	data, flagErr := dataFlags("weights", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags(cmdWeights, args, func(fs *flag.FlagSet) {
 		fs.IntVar(&k, "k", frozenK, "rank cut")
 		fs.IntVar(&iters, "iters", bootstrapIters, "bootstrap resamples")
 		snapshotFlag(fs, &anySnapshot)
@@ -785,7 +787,7 @@ func weights(ctx context.Context, args []string) error {
 func diagnose(ctx context.Context, args []string) error {
 	var deep, k int
 	var anySnapshot bool
-	data, flagErr := dataFlags("diagnose", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags(cmdDiagnose, args, func(fs *flag.FlagSet) {
 		fs.IntVar(&deep, "deep", 1_000_000, "k to request, large enough not to truncate the frontier")
 		fs.IntVar(&k, "k", frozenK, "the cut whose tie group is measured")
 		snapshotFlag(fs, &anySnapshot)

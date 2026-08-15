@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package eval
 
 import (
@@ -208,6 +210,21 @@ func TestEvaluateRejectsMisconfiguration(t *testing.T) {
 			qs:   okQueries,
 			k:    3,
 			want: ErrForeignDocID,
+		},
+		{
+			// An injected Fuser, which is what Evaluate accepts, returning d0 twice.
+			// Unscored this is nDCG above 1.0 for a ranking holding one relevant
+			// document: NDCG credits the grade at both ranks, idealDCG counts it
+			// once. The bundled fusers cannot do it; the interface permits it. See
+			// ErrDuplicateRanked.
+			name: "a Fuser repeating one DocID is caught, not scored above 1.0",
+			arm: Arm{Name: "dup", Scorers: []engine.Scorer{ts},
+				Fuse: func([][]engine.Candidate, int) []engine.Candidate {
+					return []engine.Candidate{{Doc: 0, Score: 2}, {Doc: 0, Score: 1}}
+				}},
+			qs:   []Query{{ID: "q1", Query: engine.Query{Text: "alpha"}, Qrels: map[string]int{"d0": 1}}},
+			k:    3,
+			want: ErrDuplicateRanked,
 		},
 		{
 			// The qrels half of the foreign-id hazard. d9 is judged relevant and not in

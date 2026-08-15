@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package eval
 
 import (
@@ -362,7 +364,9 @@ func (c *S2Client) do(ctx context.Context, body []byte) (raw []byte, status int,
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	defer resp.Body.Close()
+	// Nothing to report that the read below does not report first: this handle is
+	// open for reading, and its Close has no buffered write to fail on.
+	defer func() { _ = resp.Body.Close() }()
 
 	// The body is read even on an error status: the endpoint puts its reason
 	// there, and a request rejected for a fixable reason should say which.

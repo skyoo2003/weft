@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package eval
 
 import (
@@ -45,6 +47,19 @@ var (
 	// is free, because the harness has to resolve each DocID to a key for qrels anyway,
 	// and free is the whole argument for it. It is not a guarantee.
 	ErrForeignDocID = errors.New("eval: fused DocID is not in this index")
+
+	// ErrDuplicateRanked reports the same DocID at two ranks of one fused result.
+	// Distinct from ErrDuplicateDoc, which is the corpus reader's complaint about
+	// an input file; this one is about a ranking a Fuser just produced.
+	//
+	// The bundled fusers cannot produce it — both accumulate into a map keyed by
+	// DocID — but Evaluate takes an arbitrary engine.Fuser on purpose, and the
+	// interface says nothing about uniqueness. A repeat is not a cosmetic flaw in
+	// the ranking: NDCG credits the document's grade at every rank it occupies
+	// while idealDCG counts it once, so a duplicated relevant document scores an
+	// arm above 1.0. That is a number no reader would question and no arm could
+	// have earned, which is the shape of failure this harness exists to refuse.
+	ErrDuplicateRanked = errors.New("eval: fused result holds the same DocID twice")
 
 	// ErrForeignQrelDoc reports a relevant judgment naming a document the index
 	// does not hold. It is the qrels half of the same pairing hazard: the index and
@@ -265,11 +280,21 @@ func rankedKeys(ctx context.Context, ix *engine.Index, q engine.Query, fetch, k 
 	}
 
 	keys := make([]string, 0, len(cands))
+	seen := make(map[engine.DocID]int, len(cands))
 	for rank, c := range cands {
 		doc, ok := ix.Doc(c.Doc)
 		if !ok {
 			return nil, fmt.Errorf("rank %d: doc %d: %w", rank+1, c.Doc, ErrForeignDocID)
 		}
+		// Checked here rather than trusted from the Fuser, for the same reason the
+		// bound above is: this loop already has to touch every candidate, so the
+		// check is free, and NDCG scores the slice it returns without looking for
+		// repeats. See ErrDuplicateRanked.
+		if first, dup := seen[c.Doc]; dup {
+			return nil, fmt.Errorf("rank %d: doc %d (%q) is already at rank %d: %w",
+				rank+1, c.Doc, doc.Key, first, ErrDuplicateRanked)
+		}
+		seen[c.Doc] = rank + 1
 		keys = append(keys, doc.Key)
 	}
 	return keys, nil
@@ -278,7 +303,7 @@ func rankedKeys(ctx context.Context, ix *engine.Index, q engine.Query, fetch, k 
 // fetchDepth is k*overfetch, with 0 and 1 both meaning k.
 func fetchDepth(k, overfetch int) (int, error) {
 	if overfetch < 0 {
-		return 0, fmt.Errorf("Overfetch is %d: %w", overfetch, ErrOverfetchRange)
+		return 0, fmt.Errorf("overfetch is %d: %w", overfetch, ErrOverfetchRange)
 	}
 	if overfetch <= 1 {
 		return k, nil

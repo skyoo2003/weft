@@ -45,7 +45,7 @@ Milestone 4 ran ahead of 3 because the dataset fits in memory and the project's 
 TREC-COVID, 50 queries, 171,332 documents, 579,719 in-corpus citation edges from Semantic Scholar, 148,232 SPECTER2 vectors. nDCG@10, paired bootstrap over 10,000 resamples.
 
 | Arm | nDCG@10 |
-|---|---|
+| --- | --- |
 | `text` (BM25) | 0.5826 |
 | `text + vector` | **0.6233** |
 | `text + vector + graph` | 0.5005 |
@@ -55,7 +55,7 @@ TREC-COVID, 50 queries, 171,332 documents, 579,719 in-corpus citation edges from
 **But that −0.1227 belonged to the fusion operator, not to the graph.** Giving the graph stream half a vote instead of a full one erases all but 0.0019 of the regression. No weight in the tested grid beats the baseline, and from 0.1 downward the arm *is* the baseline, delta exactly zero — see [EVAL.md](docs/EVAL.md) section 5.11 for what that is and is not entitled to claim. So the accurate statement is the flatter one: the graph signal is not harmful information, it is not information.
 
 | Graph stream weight | nDCG@10 | Delta vs baseline |
-|---|---|---|
+| --- | --- | --- |
 | 1.0 | 0.5005 | −0.1227 |
 | 0.5 | 0.6214 | −0.0019 |
 | ≤0.1 | 0.6233 | +0.0000, converged to baseline |
@@ -179,7 +179,7 @@ CI runs `make all` plus four targets kept out of it because each costs a tool to
 
 `make eval` needs data that is not in the repository. [EVAL.md §7](docs/EVAL.md) lists the downloads and the one-time `weft-eval prepare` step.
 
-2,626 implementation lines under `pkg/`, 4,701 test lines, **zero external dependencies**. Go 1.26+. The evaluation harness in `internal/eval` and `cmd/weft-eval` is another 3,173 and 2,109; it ships no API and is not part of the library.
+2,753 implementation lines under `pkg/`, 5,138 test lines, **zero external dependencies**. Go 1.26+. The evaluation harness in `internal/eval` and `cmd/weft-eval` is another 3,753 and 2,851; it ships no API and is not part of the library.
 
 ## Limitations
 

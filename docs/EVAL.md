@@ -1,8 +1,10 @@
 # Evaluation — how milestone 4's numbers are produced
 
-**Status: in progress.** The instrument is built and checked against reference
-implementations. No arm numbers exist yet — the corpus join (plan Task 1) has not
-run. Sections 4 and 5 are the shape the results will take, not results.
+**Status: complete.** The instrument is built and checked against reference
+implementations, the corpus join has run, and section 5 holds measured numbers
+rather than the shape they would take. Section 4's judgment rule was written down
+before any of them existed, and section 6 applies it. Section 7 is how to
+re-derive every figure here from a fresh checkout.
 
 This is the provenance document for every number milestone 4 publishes. The
 milestone's deliverable is a figure, and a figure without a reproducible origin
@@ -22,7 +24,7 @@ nDCG@10, the signal is worthless — keep the interface, discard the graph.*
 Three arms, per [DATASETS.md](DATASETS.md) section 3 requirement 2:
 
 | Arm | Scorers | Question it answers |
-|---|---|---|
+| --- | --- | --- |
 | 1 | `text + vector` | the baseline everything is measured against |
 | 2 | `+ graph.New` | does graph proximity contribute? |
 | 3 | `+ graph.NewIncludingSeeds` | how much of arm 2 would have been double counting? |
@@ -40,7 +42,7 @@ evaluation harness is not part of weft's library contract, and keeping it out of
 untouched by the measurement.
 
 | File | Contents |
-|---|---|
+| --- | --- |
 | `ndcg.go` | `NDCG(ranked, qrels, k)` |
 | `eval.go` | `Arm`, `Query`, `Run`, `Evaluate` |
 | `bootstrap.go` | `BootstrapCI` — paired percentile bootstrap |
@@ -59,7 +61,9 @@ one, two, three and four scorers, and a reordered list, through one call shape.
 parameter on `Search`. It does not need one. `fusion.Fuse` scores a document from
 its ranks alone and passes `k` only to `TopK`, so
 
-    Fuse(streams, k*m)[:k]  ==  Fuse(streams, k)
+```go
+Fuse(streams, k*m)[:k]  ==  Fuse(streams, k)
+```
 
 and over-fetching is `Search(ctx, q, k*m, ...)` truncated to `k`.
 `TestOverfetchIsTruncationNotADifferentRanking` asserts the equality across
@@ -121,7 +125,7 @@ The fixture that separates them — `swapped_grades`, qrels `{a:2, b:1}` ranked
 `[b, a]`:
 
 | Gain | nDCG@10 |
-|---|---|
+| --- | --- |
 | linear `rel` | **0.8597186998521972** ← `pytrec_eval` |
 | exponential `2^rel − 1` | 0.7967 |
 
@@ -131,7 +135,7 @@ needed a fixture built to discriminate rather than a happy path.
 Five more behaviours the reference settled rather than us guessing:
 
 | Question | Answer | Fixture |
-|---|---|---|
+| --- | --- | --- |
 | Does an unjudged document consume a rank slot? | Yes — contributes 0, pushes everything below it down | `unjudged_at_top` |
 | Is a judged grade of 0 different from unjudged? | No, identical | `judged_zero_at_top` |
 | Is IDCG truncated at k? | Yes | `ideal_beyond_k` |
@@ -160,7 +164,7 @@ substituted into its table.** That substitution is an alignment, stated rather
 than hidden, and it is necessary:
 
 | | IDF |
-|---|---|
+| --- | --- |
 | `BM25Okapi` | `ln(N − n + 0.5) − ln(n + 0.5)` — negative for `n > N/2`, then floored by an epsilon heuristic |
 | weft / Lucene | `ln(1 + (N − n + 0.5)/(n + 0.5))` — always positive |
 
@@ -274,7 +278,7 @@ norm as no opinion and `text+vector` would silently be `text`.
 ### 5.1 Snapshot and provenance
 
 | Source | Snapshot | Size | Auth |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | BEIR trec-covid | `public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/trec-covid.zip`, files dated 2021-02-11 | 70 MB zip; 171,332 documents, 50 queries, 66,336 judgments | none |
 | CORD-19 metadata | `ai2-semanticscholar-cord-19.s3-us-west-2.amazonaws.com/2022-06-02/metadata.csv` | 1.65 GB | none |
 | Citation graph | Semantic Scholar `/graph/v1/paper/batch`, `references.externalIds`, fetched 2026-08-14 | — | **none needed** |
@@ -291,7 +295,7 @@ from a `stat` instead of hashing gigabytes — before `prepare` writes anything 
 `run`, `sweep`, `weights` or `diagnose` prints anything.
 
 | File | Bytes | sha256 |
-|---|---|---|
+| --- | --- | --- |
 | `trec-covid/corpus.jsonl` | 221,370,065 | `aded6989…04ed00d7` |
 | `trec-covid/queries.jsonl` | 16,552 | `78f4b76b…783b208c` |
 | `trec-covid/qrels/test.tsv` | 980,831 | `10669ab7…2798982b` |
@@ -325,7 +329,7 @@ checking this rather than assuming it, because the columns differ between releas
 `ReadCORD19IDs` fails with `ErrNoJoinColumn` on a release that has none of them.
 
 | Join key | Documents |
-|---|---|
+| --- | --- |
 | `s2_id` → `CorpusId:` | 139,419 |
 | `doi` → `DOI:` | 25,543 |
 | `pmcid` → `PMCID:` | 230 |
@@ -363,7 +367,7 @@ embedding space or cosine between them is meaningless. Measured against Semantic
 Scholar's own vectors for documents we already had:
 
 | Local configuration | cosine vs S2's `specter_v2` (min / median) |
-|---|---|
+| --- | --- |
 | `specter2_base`, no adapter | 0.9279 / 0.9594 |
 | **`specter2_base` + `allenai/specter2` (proximity)** | **0.9989 / 1.000000** |
 | `specter2_base` + `specter2_adhoc_query` | 0.8423 / 0.8815 |
@@ -373,9 +377,11 @@ adapter, which AllenAI documents as the matched pair for that — and a document
 pairing is still an assumption, so it gets its own check: for each query, mean cosine
 to its judged-relevant documents against mean cosine to random ones.
 
-    mean cosine to judged-relevant  0.7620
-    mean cosine to random           0.6842
-    relevant wins                   50/50  (sign test p = 8.88e-16)
+```text
+mean cosine to judged-relevant  0.7620
+mean cosine to random           0.6842
+relevant wins                   50/50  (sign test p = 8.88e-16)
+```
 
 The query vectors are in a usable space. Both checks are built into the script and
 rerun with it.
@@ -403,7 +409,7 @@ comparison; section 3.2 is the like-for-like one.
 ### 5.6 Coverage at which the numbers below were measured
 
 | Quantity | Count | Share of corpus |
-|---|---|---|
+| --- | --- | --- |
 | Documents indexed | 171,332 | 100% |
 | Documents with a vector | 148,232 | 86.5% |
 | Documents with at least one in-corpus citation edge | 48,194 | 28.1% |
@@ -429,7 +435,7 @@ Measured through the public `Scorer` interface by asking for a very large k and
 bucketing candidates by score, which recovers each one's hop exactly.
 
 | Hop | Candidates across 50 queries | Mean per query |
-|---|---|---|
+| --- | --- | --- |
 | 1 | 2,076 | 41.5 |
 | 2 | 21,004 | 420 |
 | 3 | 108,287 | 2,166 |
@@ -467,7 +473,7 @@ running `weft-eval run` against the same rebuilt index, and restoring the file. 
 one command and a `git show`, not a code path kept alive for a historical number.
 
 | Arm | nDCG@10 |
-|---|---|
+| --- | --- |
 | `text` | 0.5826 |
 | `text+vector` | **0.6233** ← baseline |
 | `text+graph` | 0.3527 |
@@ -475,7 +481,7 @@ one command and a `git show`, not a code path kept alive for a historical number
 | `text+vector+graph-including-seeds` | 0.6071 |
 
 | Comparison | Delta | 95% CI | Reading |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `text+vector+graph` − `text+vector` **(binding)** | **−0.1572** | [−0.1947, −0.1200] | **regresses** |
 | `text+graph` − `text` | −0.2299 | [−0.2766, −0.1826] | regresses |
 | `text+vector+graph-including-seeds` − `text+vector` | −0.0161 | [−0.0336, +0.0017] | undetermined |
@@ -510,7 +516,7 @@ strictly an extension.
 **It did not fix the degeneracy.**
 
 | Tie analysis at k=10 (`weft-eval diagnose`) | Before | After |
-|---|---|---|
+| --- | --- | --- |
 | Queries producing a graph stream at all | 45 of 50 | 45 of 50 |
 | Queries whose stream's membership is settled by DocID | 45 of 45 | 41 of 45 |
 | Candidates excluded from the top k by DocID alone | 2,082 | 960 |
@@ -528,13 +534,13 @@ helps if the seeds agree, and on a citation graph this sparse they mostly do not
 It did move the numbers, in the right direction and not nearly far enough:
 
 | Arm | Before | After | Change |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `text+graph` | 0.3527 | 0.3985 | +0.0458 |
 | `text+vector+graph` | 0.4661 | 0.5005 | +0.0344 |
 | `text+vector+graph-including-seeds` | 0.6071 | 0.5451 | −0.0620 |
 
 | Comparison (after fix) | Delta | 95% CI | Reading |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `text+vector+graph` − `text+vector` **(binding)** | **−0.1227** | [−0.1550, −0.0909] | **regresses** |
 | `text+graph` − `text` | −0.1841 | [−0.2274, −0.1409] | regresses |
 | `text+vector+graph-including-seeds` − `text+vector` | −0.0782 | [−0.1047, −0.0510] | regresses |
@@ -573,7 +579,7 @@ configurations, 2,000 resamples each — **both pairs**: the binding
 comparison.
 
 | | Binding pair | Comparison pair |
-|---|---|---|
+| --- | --- | --- |
 | Configurations | 28 | 28 |
 | Sign flips | **0** | **0** |
 | Cells where the graph arm is ahead | **0** | **0** |
@@ -635,7 +641,7 @@ without learning what produced it. The milestone 1 property is intact — `pkg/f
 is untouched, and nothing in the variant branches on a scorer.
 
 | Graph stream weight | nDCG@10 | Delta vs `text+vector` | 95% CI | Reading |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1.0 (as measured everywhere above) | 0.5005 | **−0.1227** | [−0.1550, −0.0909] | regresses |
 | 0.5 | 0.6214 | −0.0019 | [−0.0057, +0.0000] | undetermined |
 | 0.25 | 0.6214 | −0.0019 | [−0.0057, +0.0000] | undetermined |
@@ -700,7 +706,7 @@ ranged over a Go map and let the last writer win. Go randomises map iteration, s
 winner was drawn afresh on every build:
 
 | Two builds from the identical cache | CorpusIds resolving to a different `cord_uid` |
-|---|---|
+| --- | --- |
 | run 1 vs run 0 | 9,377 of 142,281 |
 | run 2 vs run 0 | 2,571 |
 | run 3 vs run 0 | 8,240 |
@@ -718,9 +724,11 @@ collision count printed rather than left implicit
 that the same one always does; they carry near-identical text. Two consecutive builds
 from the same cache now produce byte-identical segments:
 
-    a466fd42bbf407eb  index/seg-NNNNNN/docs
-    f7709b3184820730  index/seg-NNNNNN/postings
-    6d24fd18e4c8032e  index/seg-NNNNNN/terms
+```text
+a466fd42bbf407eb  index/seg-NNNNNN/docs
+f7709b3184820730  index/seg-NNNNNN/postings
+6d24fd18e4c8032e  index/seg-NNNNNN/terms
+```
 
 **Every measured number in section 5 was then taken again** against the rebuilt index:
 sections 5.8 through 5.11, the 28-configuration sweep, the weight sweep and the
@@ -800,6 +808,19 @@ record is removed before the segments are replaced rather than written after, so
 rebuild that does not finish leaves an index that cannot say what it holds — which is
 refused — instead of one describing itself with the previous build's account.
 
+That record covers the documents and left the rest of the index unaccounted for. A
+`prepare -any-snapshot` joins the corpus against a `metadata.csv` nothing verified and
+produces an ordinary complete cache; a plain `build` then finds full coverage, hashes
+the pinned `corpus.jsonl`, and writes a provenance record every later check accepts —
+so the flag that said "these numbers are not the published ones" was laundered by a
+default build one step later, and the citation edges and SPECTER vectors it stood for
+went out under the published labels. `prepare -any-snapshot` now leaves `s2.unpinned`
+beside the cache, `build` carries it into the record as `prepare_unpinned`, and `run`,
+`sweep`, `weights` and `diagnose` refuse such an index without `-any-snapshot`. The
+marker is never cleared by a later pinned `prepare`: the cache is append-only, so what
+an unpinned run wrote is still in the file a pinned one resumes. Deleting `s2.jsonl` is
+what starts over.
+
 **And both sides of the vector arm now name their embedding.** Width is not provenance:
 SPECTER v1 and v2 are both 768-dimensional, so a cached document vector from the wrong
 one was indexed on a width match and the query vectors were checked for id and text but
@@ -820,7 +841,7 @@ than a mistake.
 as weft implements it does not improve nDCG@10.**
 
 | Section 4 condition | Result |
-|---|---|
+| --- | --- |
 | 1. Frozen: paired 95% CI for `+graph` − baseline excludes zero and is positive | **FAILS** — excludes zero and is *negative*: −0.1227, [−0.1550, −0.0909] |
 | 2. Stable: the sign does not flip across the sweep | Holds — 0 flips in 28 configurations **of the pair this rule names**, negative throughout, closest interval [−0.0380, −0.0065] |
 | Best case under any fusion weight (section 5.11) | **+0.0000** — no weight in the tested grid beats the baseline, and at 0.1 and below the arm *is* the baseline |
@@ -848,7 +869,7 @@ one specific construction, and every part of it is a choice that could have been
 differently:
 
 | Choice | What was measured |
-|---|---|
+| --- | --- |
 | Proximity metric | BFS hop distance, `Σ_seeds 1/(1+hops)`, `MaxDepth=3` |
 | Seed source | the text scorer's top 5 |
 | Fusion | unweighted RRF, one equal vote per stream |

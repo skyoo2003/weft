@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
@@ -49,15 +51,15 @@ var snapshot = []struct {
 
 // snapshotFlag registers the opt-out. The wording lives in one place because this is the
 // flag that decides whether a number is publishable.
-func snapshotFlag(fs *flag.FlagSet, any *bool) {
-	fs.BoolVar(any, "any-snapshot", false,
+func snapshotFlag(fs *flag.FlagSet, unpinned *bool) {
+	fs.BoolVar(unpinned, "any-snapshot", false,
 		"skip the size and hash check on the downloaded inputs (for a different corpus or "+
 			"release; numbers measured that way are not the ones docs/EVAL.md publishes)")
 }
 
 // pinned returns the size and hash the table fixes for name. A name that is not in it
 // is a programming error rather than a bad input, and callers report it as one.
-func pinned(name string) (int64, string, bool) {
+func pinned(name string) (size int64, sha string, found bool) {
 	for _, s := range snapshot {
 		if s.name == name {
 			return s.size, s.sha, true
@@ -147,6 +149,34 @@ type provenance struct {
 	// not be published, and this is what lets a later command act on it rather than
 	// trust that the operator read the log.
 	Partial bool `json:"partial"`
+
+	// PrepareUnpinned records that the Semantic Scholar cache behind this index was
+	// joined by a `prepare -any-snapshot` — against a metadata.csv the snapshot table
+	// does not pin.
+	//
+	// Corpus above covers the documents, and nothing covered where their edges and
+	// vectors came from. `prepare -any-snapshot` against a truncated or foreign
+	// metadata release produces an ordinary complete cache; a plain `build` then
+	// finds full coverage, hashes the pinned corpus.jsonl and, without this field,
+	// records an index that every later check accepts. The flag that said "not
+	// publishable" would have been laundered by a default build one step later.
+	//
+	// Read from the marker beside the cache rather than from a flag, because the
+	// command that built the index is not the command that made the claim.
+	PrepareUnpinned bool `json:"prepare_unpinned,omitempty"`
+}
+
+// markUnpinned records that the cache beside it was joined against unpinned inputs.
+// The file's existence is the whole signal, so its contents are only for whoever
+// finds it in the data directory and wonders what it is.
+func markUnpinned(path string) error {
+	const note = "`weft-eval prepare -any-snapshot` wrote part of s2.jsonl beside this file.\n" +
+		"Its citation edges and SPECTER vectors came from inputs docs/EVAL.md does not pin,\n" +
+		"so an index built from it is not publishable. Delete s2.jsonl to start over.\n"
+	if err := os.WriteFile(path, []byte(note), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }
 
 // writeProvenance records what an index was built from. Written after the commit, so a
@@ -157,7 +187,7 @@ func writeProvenance(indexPath string, p provenance) error {
 		return err
 	}
 	path := filepath.Join(indexPath, provenanceFile)
-	if err := os.WriteFile(path, append(raw, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
@@ -200,6 +230,13 @@ func verifyProvenance(indexPath string) error {
 		return fmt.Errorf("%s says this index was built with -partial, over a Semantic Scholar cache "+
 			"that does not cover the corpus, so its vector and graph arms measure a corpus that is "+
 			"partly text-only (pass -any-snapshot to measure it deliberately)", path)
+	}
+	if p.PrepareUnpinned {
+		return fmt.Errorf("%s says the Semantic Scholar cache behind this index was joined by "+
+			"`prepare -any-snapshot`, against a metadata.csv the snapshot table does not pin; the "+
+			"corpus hash above matches, so nothing else here would have noticed that its citation "+
+			"edges and vectors came from an unverified release (pass -any-snapshot to measure this "+
+			"index deliberately)", path)
 	}
 	return nil
 }

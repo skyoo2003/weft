@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package eval
 
 import (
@@ -401,7 +403,7 @@ var cord19JoinColumns = []struct {
 // The header is inspected before any row is read, and a release carrying none of
 // the join columns is an error rather than an empty result — the plan's explicit
 // instruction, because these columns differ between releases.
-func ReadCORD19IDs(path string, want map[string]bool) (map[string]ExternalIDs, map[string]int, error) {
+func ReadCORD19IDs(path string, want map[string]bool) (ids map[string]ExternalIDs, tally map[string]int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open metadata: %w", err)
@@ -445,7 +447,7 @@ func ReadCORD19IDs(path string, want map[string]bool) (map[string]ExternalIDs, m
 	}
 
 	out := make(map[string]ExternalIDs, len(want))
-	tally := make(map[string]int, len(joiners)+2)
+	tally = make(map[string]int, len(joiners)+2)
 	for {
 		row, err := r.Read()
 		if errors.Is(err, io.EOF) {

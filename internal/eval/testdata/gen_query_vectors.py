@@ -181,12 +181,24 @@ def sanity(query_vecs: dict[str, list[float]]) -> bool:
     """
     import random
 
+    # Restricted to the corpus being measured, as --verify already is. The cache is
+    # allowed to hold records from an older or larger corpus — `build` accepts that
+    # shape explicitly — but the relevant side of this comparison comes only from
+    # this corpus's qrels. Leaving foreign vectors in the random pool compares
+    # relevant documents against a different topical distribution, which moves both
+    # halves of the gate: the aggregate margin and the sign test. A large enough
+    # foreign corpus could pass an incompatible adapter or fail a compatible one,
+    # and either way the check would be answering a question nobody asked.
+    corpus_keys = {rec["_id"] for rec in read_jsonl(CORPUS)}
     vecs: dict[str, list[float]] = {}
     for rec in read_jsonl(S2):
-        if rec.get("vec"):
+        if rec.get("vec") and rec["key"] in corpus_keys:
             vecs[rec["key"]] = rec["vec"]
     if not vecs:
-        print("\nsanity check skipped: no document vectors yet", file=sys.stderr)
+        print(
+            f"\nsanity check skipped: no vectors in {S2} for any document in {CORPUS}",
+            file=sys.stderr,
+        )
         return True
 
     rel: dict[str, list[str]] = {}

@@ -176,8 +176,8 @@ The general fix is for `DocID` to carry its namespace, which milestone 2 needs a
 
 ---
 
-<!-- Two top-level headings on purpose. This file is an append-only log of
-     milestone reports, each its own document with its own verdict; demoting
+<!-- More than one top-level heading on purpose. This file is an append-only log
+     of milestone reports, each its own document with its own verdict; demoting
      them under a single title would imply one report with sections, and a
      later milestone would then be filed under a conclusion it did not reach. -->
 <!-- markdownlint-disable-next-line MD025 -->
@@ -271,8 +271,8 @@ version 128 would be a format change anyway.
    old). Fine at in-memory scale; incremental segments make it moot.
 
 ---
----
 
+<!-- markdownlint-disable-next-line MD025 -->
 # Milestone 4 — Quality
 
 **Verdict: the graph signal does not improve ranking quality.** The PRD's second
@@ -287,7 +287,7 @@ decision silently on every query, and its cost here was two orders of magnitude 
 than anything the graph signal was ever worth.
 
 | Arm | nDCG@10 |
-|---|---|
+| --- | --- |
 | `text` | 0.5826 |
 | `text+vector` | **0.6233** ← best |
 | `text+graph` | 0.3985 |
@@ -295,7 +295,7 @@ than anything the graph signal was ever worth.
 | `text+vector+graph-including-seeds` | 0.5451 |
 
 | Comparison | Delta | 95% CI |
-|---|---|---|
+| --- | --- | --- |
 | `text+vector+graph` − `text+vector` | **−0.1227** | [−0.1550, −0.0909] |
 | `text+vector` − `text` | +0.0407 | [+0.0010, +0.0798] |
 
@@ -517,7 +517,7 @@ multiplying each stream by a weight, text and vector held at 1.0, only the graph
 stream moving.
 
 | Graph stream weight | nDCG@10 | Delta vs `text+vector` | 95% CI |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1.0 | 0.5005 | **−0.1227** | [−0.1550, −0.0909] |
 | 0.5 | 0.6214 | −0.0019 | [−0.0057, +0.0000] |
 | 0.25 | 0.6214 | −0.0019 | [−0.0057, +0.0000] |
@@ -530,9 +530,13 @@ this corpus it was worth two orders of magnitude more than the signal being eval
 
 **Weights do not compromise scorer-agnosticism.** They index by *position in the
 stream list*, and the caller already fixed that order when it passed scorers to
-`Search`. The fuser still never learns what produced a stream. `pkg/fusion` was not
-touched to run this; the variant lives in `cmd/weft-eval` and is injected as an
-`engine.Fuser`, the same mechanism the RRF-constant sweep uses.
+`Search`. The fuser still never learns what produced a stream. The first pass was run
+without touching `pkg/fusion` at all — a weighted variant local to `cmd/weft-eval`,
+injected as an `engine.Fuser`, the same mechanism the RRF-constant sweep uses — which
+is what established that the library needed no change to answer the question. The
+table above is not from that copy. Once the result was worth publishing, the variant
+moved into `pkg/fusion` as `FuseWeighted` and `weft-eval weights` now calls it, so the
+reproducible command and the shipped API are the same code.
 
 **It does not rescue the graph.** No weight beats the baseline. From 0.1 downward the
 arm *is* the baseline — delta exactly zero, interval a point at zero — meaning the

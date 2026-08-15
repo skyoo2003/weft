@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command weft-eval measures ranking quality for milestone 4.
 //
 // It is the reproducibility half of the milestone: every number published in
@@ -42,6 +44,24 @@ const (
 	s2File       = "s2.jsonl"
 	indexDir     = "index"
 
+	// s2UnpinnedFile marks an s2.jsonl whose join ran against inputs the snapshot
+	// table does not pin — that is, a `prepare -any-snapshot`.
+	//
+	// The flag says the numbers measured from it are not the ones docs/EVAL.md
+	// publishes, and until now that claim died with the command that made it. The
+	// cache it produced is an ordinary complete cache: a later plain `build` finds
+	// full coverage, hashes the pinned corpus.jsonl, and records partial=false, so
+	// `run` publishes vector and graph arms whose edges and vectors came from a
+	// metadata release nobody verified. The marker is what carries the flag across
+	// that gap.
+	//
+	// A file rather than a field, because the cache is append-only and cumulative:
+	// the taint belongs to the whole of it, not to the records one invocation
+	// appended. It is created, never removed by a later pinned run, for the same
+	// reason — a pinned prepare resuming an unpinned one does not un-taint what is
+	// already in the file. Deleting s2.jsonl is what starts over.
+	s2UnpinnedFile = "s2.unpinned"
+
 	// queryVecFile is written by internal/eval/testdata/gen_query_vectors.py. It is
 	// optional; run reports its absence rather than quietly measuring a text-only
 	// baseline.
@@ -54,6 +74,19 @@ const (
 	queryVecModel = "allenai/specter2_base+allenai/specter2_adhoc_query"
 )
 
+// Subcommand names. Written once because two places have to agree on each: the
+// switch in main, and the FlagSet the subcommand builds. The FlagSet name is what
+// -h prints and what a leftover-argument error quotes back, so a drift between the
+// two tells an operator about a command they did not run.
+const (
+	cmdPrepare  = "prepare"
+	cmdBuild    = "build"
+	cmdDiagnose = "diagnose"
+	cmdRun      = "run"
+	cmdSweep    = "sweep"
+	cmdWeights  = "weights"
+)
+
 func main() {
 	log.SetFlags(log.Ltime)
 	if len(os.Args) < 2 {
@@ -64,22 +97,21 @@ func main() {
 	// value is entirely in its append-only output file; a signal that terminates
 	// mid-write is the one way to corrupt it.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
 	switch cmd {
-	case "prepare":
+	case cmdPrepare:
 		err = prepare(ctx, args)
-	case "build":
+	case cmdBuild:
 		err = build(ctx, args)
-	case "diagnose":
+	case cmdDiagnose:
 		err = diagnose(ctx, args)
-	case "run":
+	case cmdRun:
 		err = run(ctx, args)
-	case "sweep":
+	case cmdSweep:
 		err = sweep(ctx, args)
-	case "weights":
+	case cmdWeights:
 		err = weights(ctx, args)
 	case "-h", "--help", "help":
 		usage()
@@ -87,6 +119,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "weft-eval: unknown subcommand %q\n", cmd)
 		usage()
 	}
+	// Called rather than deferred: log.Fatal below exits through os.Exit, which
+	// runs no deferred function, so a `defer stop()` here would be a handler that
+	// only ever ran on the success path.
+	stop()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -139,7 +175,7 @@ func prepare(ctx context.Context, args []string) error {
 	var apiKey string
 	var limit int
 	var anySnapshot bool
-	data, flagErr := dataFlags("prepare", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags(cmdPrepare, args, func(fs *flag.FlagSet) {
 		fs.StringVar(&apiKey, "api-key", os.Getenv("S2_API_KEY"),
 			"Semantic Scholar API key (optional; raises the rate limit)")
 		fs.IntVar(&limit, "limit", 0,
@@ -168,9 +204,25 @@ func prepare(ctx context.Context, args []string) error {
 	// Before anything is written. This command's output is a cache that later commands
 	// trust as a record of what was asked, so a truncated metadata file here becomes a
 	// corpus recorded as permanently unjoinable — see the snapshot table.
-	if !anySnapshot {
+	unpinnedPath := filepath.Join(*data, s2UnpinnedFile)
+	if anySnapshot {
+		// Written before the first append, so a run killed halfway still leaves the
+		// cache described. See s2UnpinnedFile.
+		if err := markUnpinned(unpinnedPath); err != nil {
+			return err
+		}
+	} else {
 		if err := verifySnapshot(*data, corpusFile, metadataFile); err != nil {
 			return err
+		}
+		// A pinned run does not clear the mark: what an earlier -any-snapshot run
+		// appended is still in the file this one is about to extend.
+		if _, err := os.Stat(unpinnedPath); err == nil {
+			log.Printf("WARNING: %s exists, so part of %s was joined against inputs the snapshot",
+				unpinnedPath, outPath)
+			log.Printf("WARNING: table does not pin. An index built from it is marked unpublishable.")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("stat %s: %w", unpinnedPath, err)
 		}
 	}
 
@@ -233,6 +285,16 @@ func prepare(ctx context.Context, args []string) error {
 	// scanning 1.6 GB.
 	log.Printf("scanning %s for %d cord_uids...", metaPath, len(want))
 	ids, tally, err := eval.ReadCORD19IDs(metaPath, want)
+	// ReadCORD19IDs takes no context: it is one streaming pass over 1.6 GB, and a
+	// Ctrl-C during it is absorbed by signal.NotifyContext rather than killing the
+	// process, so the scan runs to EOF whatever the operator asked for. Checked
+	// here, before the tombstones below, because those are the part of this command
+	// that changes the cache — appending them under a cancellation would record
+	// every unjoinable document as asked-and-answered on the way out, which is the
+	// one thing an interrupted prepare must not leave behind.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 	if err != nil && !errors.Is(err, eval.ErrEmptyDataset) {
 		return err
 	}
@@ -300,7 +362,7 @@ func prepare(ctx context.Context, args []string) error {
 		log.Printf("limit: fetching only the first %d", limit)
 	}
 
-	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", outPath, err)
 	}
@@ -596,7 +658,7 @@ func estimate(docs int) time.Duration {
 
 func build(ctx context.Context, args []string) error {
 	var partial, anySnapshot bool
-	data, flagErr := dataFlags("build", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags(cmdBuild, args, func(fs *flag.FlagSet) {
 		fs.BoolVar(&partial, "partial", false,
 			"build even though the Semantic Scholar cache does not cover every document "+
 				"(the vector and graph arms then measure a corpus that is partly text-only)")
@@ -617,6 +679,24 @@ func build(ctx context.Context, args []string) error {
 		if err := verifySnapshot(*data, corpusFile); err != nil {
 			return err
 		}
+	}
+
+	// The other half of the corpus check, and the half this command cannot verify
+	// for itself: the cache's own inputs. build never reads metadata.csv — the join
+	// already happened — so the only evidence about the release behind these edges
+	// and vectors is what prepare left. Read before the build rather than after, so
+	// an operator who is about to spend minutes indexing sees it now, and carried
+	// into the provenance record below so a later `run` acts on it rather than
+	// trusting the log was read. See s2UnpinnedFile.
+	preparedUnpinned := false
+	if _, err := os.Stat(filepath.Join(*data, s2UnpinnedFile)); err == nil {
+		preparedUnpinned = true
+		log.Printf("WARNING: %s was joined with `prepare -any-snapshot`, so its edges and vectors",
+			s2Path)
+		log.Printf("WARNING: come from inputs docs/EVAL.md does not pin. The index is recorded as")
+		log.Printf("WARNING: unpublishable and `run` will refuse it without -any-snapshot.")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat %s: %w", filepath.Join(*data, s2UnpinnedFile), err)
 	}
 
 	// The Semantic Scholar side is loaded first so every document can be added
@@ -795,7 +875,7 @@ func build(ctx context.Context, args []string) error {
 		log.Printf("  repeated   %d references collapsed into an edge that already existed (or into a self-edge)", repeated)
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	// The old account of this index goes before the new index does.
@@ -841,7 +921,11 @@ func build(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := writeProvenance(dir, provenance{Corpus: corpusSHA, Partial: partial}); err != nil {
+	if err := writeProvenance(dir, provenance{
+		Corpus:          corpusSHA,
+		Partial:         partial,
+		PrepareUnpinned: preparedUnpinned,
+	}); err != nil {
 		return err
 	}
 	return nil
@@ -871,9 +955,8 @@ func build(ctx context.Context, args []string) error {
 // citation to that paper then resolves to nothing, and real in-corpus edges are
 // counted as dangling and dropped — a quietly sparser graph, from a cache the
 // coverage gate above accepts as complete because it does cover the corpus.
-func corpusIDIndex(recs map[string]eval.S2Record, corpus map[string]bool) (map[string]string, int, int) {
-	byCorpusID := make(map[string]string, len(recs))
-	var duplicated, foreign int
+func corpusIDIndex(recs map[string]eval.S2Record, corpus map[string]bool) (byCorpusID map[string]string, duplicated, foreign int) {
+	byCorpusID = make(map[string]string, len(recs))
 	for _, key := range sortedKeys(recs) {
 		if !corpus[key] {
 			foreign++
@@ -964,8 +1047,8 @@ func checkVectorModels(recs map[string]eval.S2Record, corpus map[string]bool, pa
 		foreign, worst, eval.S2Model, eval.S2Model, s2File)
 }
 
-func dominantDim(recs map[string]eval.S2Record, corpus map[string]bool) (int, map[int]int) {
-	tally := make(map[int]int)
+func dominantDim(recs map[string]eval.S2Record, corpus map[string]bool) (dim int, tally map[int]int) {
+	tally = make(map[int]int)
 	for key, r := range recs {
 		if corpus[key] && len(r.Vector) > 0 {
 			tally[len(r.Vector)]++

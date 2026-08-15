@@ -275,7 +275,7 @@ Executing that turned up a cost neither document accounted for.
 are built on, and those assertions are the project's central evidence:
 
 | Site | What breaks |
-|---|---|
+| --- | --- |
 | `architecture_test.go` | "three scorers then four" becomes "two then three"; `TestAddingAFourthScorerDoesNotChangeTheCallShape` loses its fourth scorer |
 | `TestFourthScorerIsUnderOneHundredLines` | measures `recency`, which becomes the *third* signal |
 | `Query.Seeds` | kept per the PRD, but its only consumer is the graph scorer — an interface field nothing reads |

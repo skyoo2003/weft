@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package eval measures ranking quality. It is milestone 4's instrument, not
 // part of weft's library contract, which is why it lives under internal/: an
 // arm, a qrels file and a bootstrap interval are things this repo does once to

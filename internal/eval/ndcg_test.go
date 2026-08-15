@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package eval
 
 import (
@@ -95,8 +97,7 @@ func TestNDCGArithmeticIsIndependentOfTheGoldenFile(t *testing.T) {
 			name:   "linear gain, not exponential",
 			ranked: []string{"b", "a"},
 			qrels:  map[string]int{"a": 2, "b": 1},
-			// DCG  = 1/log2(2) + 2/log2(3)
-			// IDCG = 2/log2(2) + 1/log2(3)
+			// DCG is 1/log2(2) plus 2/log2(3); IDCG is 2/log2(2) plus 1/log2(3).
 			want: (1 + 2/log2of3) / (2 + 1/log2of3),
 			arith: "if this fails at 0.7967 the gain was changed to 2^rel-1, " +
 				"which disagrees with trec_eval and therefore with BEIR",
@@ -105,7 +106,7 @@ func TestNDCGArithmeticIsIndependentOfTheGoldenFile(t *testing.T) {
 			name:   "IDCG counts relevant documents never retrieved",
 			ranked: []string{"a"},
 			qrels:  map[string]int{"a": 1, "b": 1, "c": 1},
-			// DCG = 1; IDCG = 1 + 1/log2(3) + 1/log2(4)
+			// DCG is 1; IDCG is 1 plus 1/log2(3) plus 1/log2(4).
 			want:  1 / (1 + 1/log2of3 + 1/log2of4),
 			arith: "a short run is penalised for the pool it did not reach",
 		},
