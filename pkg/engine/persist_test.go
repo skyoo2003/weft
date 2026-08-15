@@ -1064,3 +1064,153 @@ func TestOpenRefusesADamagedDocOffsetTable(t *testing.T) {
 		t.Fatalf("Open with a damaged docoff table: got %v, want ErrCorrupt", err)
 	}
 }
+
+// TestMergeRefusesWhenOneSegmentsPostingsAreDamaged is the gap the first pass at
+// this check left open.
+//
+// Refusing only when a term comes back with no postings at all catches damage in
+// the single segment that held it. A term in nine segments loses one segment's
+// list and the other eight still make the result non-empty, so the merge
+// published a replacement missing those documents' postings and pruned the
+// segment that could have supplied them — an internally consistent index that
+// Scrub cannot tell from a smaller corpus.
+func TestMergeRefusesWhenOneSegmentsPostingsAreDamaged(t *testing.T) {
+	dir := t.TempDir()
+	ix := commitEach(t, dir, 9) // every document carries the term "shared"
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	before := dirNames(t, dir)
+
+	path := filepath.Join(dir, segDirName(1), postingsFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b[segHeaderLen+3] ^= 0xff
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	if got.Lookup("shared") == nil {
+		t.Fatal("no segment answers for the shared term; this test damaged the wrong file")
+	}
+	if err := got.Merge(); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Merge with one segment's postings damaged: got %v, want ErrCorrupt", err)
+	}
+	for _, name := range before {
+		if !slices.Contains(dirNames(t, dir), name) {
+			t.Errorf("a refused merge removed %s", name)
+		}
+	}
+}
+
+// TestOpenRefusesTwoVectorWidthsInOneIndex is the corpus-wide invariant Add
+// enforces, checked where the corpus is assembled rather than only inside each
+// segment.
+//
+// Two individually valid segments of different widths open without complaint and
+// leave ix.vecDim as whichever came last. Every vector query then reaches a
+// document from the other segment and aborts, and Add enforces a width the
+// corpus does not actually have.
+func TestOpenRefusesTwoVectorWidthsInOneIndex(t *testing.T) {
+	one, two := t.TempDir(), t.TempDir()
+	a := New()
+	addAll(t, a, []Document{{Key: "wide", Text: "four wide", Vector: []float32{1, 0, 0, 1}}})
+	if err := a.Commit(one); err != nil {
+		t.Fatalf("Commit a: %v", err)
+	}
+	b := New()
+	addAll(t, b, []Document{{Key: "narrow", Text: "two wide", Vector: []float32{1, 0}}})
+	if err := b.Commit(two); err != nil {
+		t.Fatalf("Commit b: %v", err)
+	}
+
+	copyTree(t, filepath.Join(two, segDirName(1)), filepath.Join(one, segDirName(2)))
+	republish(t, one, 2, []segInfo{
+		{name: segDirName(1), base: 0, count: 1},
+		{name: segDirName(2), base: 1, count: 1},
+	})
+
+	if ix, err := Open(one); !errors.Is(err, ErrCorrupt) {
+		if err == nil {
+			ix.Close() //nolint:errcheck // teardown
+		}
+		t.Fatalf("Open with a 4-wide and a 2-wide segment: got %v, want ErrCorrupt", err)
+	}
+	if err := Scrub(one); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with two vector widths: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestAdoptReleasesTheCommittedBatch is milestone 3's claim, checked rather than
+// assumed.
+//
+// Reslicing ix.docs to zero length keeps the backing array, and every Document
+// in it keeps its text, vector and links reachable. Reads have moved to the
+// mapping by then, so the corpus would be held twice — once in the page cache
+// where it belongs and once on the Go heap the mapping exists to stay off.
+func TestAdoptReleasesTheCommittedBatch(t *testing.T) {
+	dir := t.TempDir()
+	ix := New()
+	addAll(t, ix, []Document{{Key: "held", Text: "a text worth releasing", Vector: []float32{1, 2}, Links: []string{"held"}}})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	// Past the length, inside the capacity: what the garbage collector still
+	// sees.
+	held := ix.docs[:1:1]
+	if held[0].Text != "" || held[0].Vector != nil || held[0].Links != nil {
+		t.Errorf("adopt left the committed batch reachable: %+v", held[0])
+	}
+	// And the document is still readable, through the mapping.
+	if d, ok := ix.Doc(0); !ok || d.Text != "a text worth releasing" {
+		t.Errorf("Doc(0) = %+v, %v after adopt", d, ok)
+	}
+}
+
+// TestOpenStoresAnAbsoluteDirectory is what a relative path costs once the
+// directory is remembered rather than used immediately.
+//
+// Merge reopens ix.dir and Commit now stats it, both of them later than Open. A
+// process that changes its working directory in between would send Merge
+// somewhere else entirely, and would make Commit fail against the correct
+// absolute destination because the stat of the remembered path went astray
+// first.
+func TestOpenStoresAnAbsoluteDirectory(t *testing.T) {
+	dir := t.TempDir()
+	ix := New()
+	addAll(t, ix, []Document{{Key: "one", Text: "a b c"}})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	t.Chdir(filepath.Dir(dir))
+	got, err := Open(filepath.Base(dir))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	if !filepath.IsAbs(got.dir) {
+		t.Errorf("Open remembered %q, which stops naming this index the moment the process moves", got.dir)
+	}
+
+	// The same for the path Commit remembers.
+	fresh := New()
+	addAll(t, fresh, []Document{{Key: "two", Text: "d e f"}})
+	if err := fresh.Commit("."); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	defer fresh.Close() //nolint:errcheck // teardown
+	if !filepath.IsAbs(fresh.dir) {
+		t.Errorf("Commit remembered %q", fresh.dir)
+	}
+}
