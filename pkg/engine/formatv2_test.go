@@ -96,12 +96,13 @@ func TestDocOffsetsLandOnRecordStarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseDocOffsets: %v", err)
 	}
-	if offs.n != len(ix.docs) {
-		t.Fatalf("docoff holds %d entries, corpus has %d documents", offs.n, len(ix.docs))
+	if offs.n != ix.Len() {
+		t.Fatalf("docoff holds %d entries, corpus has %d documents", offs.n, ix.Len())
 	}
 
 	docsR := section(t, segDir, docsFile, kindDocs)
-	for id := range ix.docs {
+	for id := range ix.Len() {
+		want, _ := ix.Doc(DocID(id))
 		off, ok := offs.at(DocID(id))
 		if !ok {
 			t.Fatalf("docoff has no entry for document %d", id)
@@ -114,14 +115,14 @@ func TestDocOffsetsLandOnRecordStarts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("document %d at offset %d: %v", id, off, err)
 		}
-		if d.Key != ix.docs[id].Key {
-			t.Errorf("offset %d for document %d decoded key %q, want %q", off, id, d.Key, ix.docs[id].Key)
+		if d.Key != want.Key {
+			t.Errorf("offset %d for document %d decoded key %q, want %q", off, id, d.Key, want.Key)
 		}
 	}
 
 	// Out-of-range ids report false rather than indexing past the table.
-	if _, ok := offs.at(DocID(len(ix.docs))); ok {
-		t.Errorf("docoff answered for document %d, which does not exist", len(ix.docs))
+	if _, ok := offs.at(DocID(ix.Len())); ok {
+		t.Errorf("docoff answered for document %d, which does not exist", ix.Len())
 	}
 }
 
@@ -137,8 +138,8 @@ func TestKeysSectionIsSortedAndAgreesWithDocs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseKeyTable: %v", err)
 	}
-	if kt.n != len(ix.byKey) {
-		t.Fatalf("keys holds %d entries, corpus has %d keys", kt.n, len(ix.byKey))
+	if kt.n != ix.Len() {
+		t.Fatalf("keys holds %d entries, corpus has %d keys", kt.n, ix.Len())
 	}
 
 	prev := ""
@@ -151,13 +152,15 @@ func TestKeysSectionIsSortedAndAgreesWithDocs(t *testing.T) {
 			t.Fatalf("keys entry %d is %q, which does not sort after %q", i, key, prev)
 		}
 		prev = key
-		if want, ok := ix.byKey[key]; !ok || id != want {
+		if want, ok := ix.Resolve(key); !ok || id != want {
 			t.Errorf("keys maps %q to %d; the corpus says %d (present: %v)", key, id, want, ok)
 		}
 	}
 
 	// The lookup itself, including a key that is not there.
-	for key, want := range ix.byKey {
+	for id := range ix.Len() {
+		d, _ := ix.Doc(DocID(id))
+		key, want := d.Key, DocID(id)
 		got, ok, err := kt.lookup(key)
 		if err != nil {
 			t.Fatalf("lookup(%q): %v", key, err)
@@ -297,7 +300,7 @@ func TestDocOffsetTableIsFixedWidth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if limit := segHeaderLen + crc32.Size + 4 + len(ix.docs)*docoffWidth; len(b) > limit {
-		t.Fatalf("docoff is %d bytes, which is more than a %d-entry fixed-width table needs (%d)", len(b), len(ix.docs), limit)
+	if limit := segHeaderLen + crc32.Size + 4 + ix.Len()*docoffWidth; len(b) > limit {
+		t.Fatalf("docoff is %d bytes, which is more than a %d-entry fixed-width table needs (%d)", len(b), ix.Len(), limit)
 	}
 }

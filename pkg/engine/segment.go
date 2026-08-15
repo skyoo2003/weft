@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
+	"slices"
 	"time"
 )
 
@@ -295,18 +297,10 @@ func (w *segWriter) close() error {
 // writeSegment lays the index down as one segment: meta, docs, postings and
 // the terms index, each its own framed file in segDir.
 //
-// Everything is encoded under a single read lock, so the statistics in meta
-// and the documents they describe cannot come from different moments — the
-// atomicity FINDINGS section 4.4 asked for, statistics snapshot included.
-//
-// ponytail: the writer streams, so the disk writes now happen inside that read
-// lock rather than after it — Add waits for the commit, where before it waited
-// only for the encode. Queries are unaffected; they take the same read lock.
-// The ceiling is one writer blocked for the length of a full-corpus write, and
-// the trigger that removes it is milestone 3's incremental commit, after which
-// a commit writes only what was added since the last one. Buying it back
-// earlier would mean handing the encoders a snapshot to write from, which is
-// the whole-section buffer this writer was rewritten to stop keeping.
+// Requires ix.mu, held for writing by Commit. Everything is encoded under that
+// one lock, so the statistics in meta and the documents they describe cannot
+// come from different moments — the atomicity FINDINGS section 4.4 asked for,
+// statistics snapshot included.
 func (ix *Index) writeSegment(segRoot *os.Root) error {
 	ws := make([]*segWriter, len(segSections))
 	for i, s := range segSections {
@@ -321,18 +315,13 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 	}
 	meta, docs, post, terms, docoff, keys := ws[0], ws[1], ws[2], ws[3], ws[4], ws[5]
 
-	// Deferred inside a closure, not unlocked inline: a panic anywhere in the
-	// encoders would otherwise leave the index read-locked forever and deadlock
-	// every later Add.
+	// No locking here: Commit holds the write lock for its whole duration and
+	// sync.RWMutex is not reentrant, so taking a read lock inside would deadlock
+	// against the caller that already holds the write one. An earlier version
+	// locked here because Commit did not.
 	func() {
-		ix.mu.RLock()
-		defer ix.mu.RUnlock()
-		total := ix.totalLen
-		for _, s := range ix.segs {
-			total += s.totalLen
-		}
-		meta.uvarint(uint64(ix.lenAt()))
-		meta.uvarint(uint64(total))
+		meta.uvarint(uint64(len(ix.docs)))
+		meta.uvarint(uint64(ix.totalLen))
 		meta.uvarint(uint64(ix.vecDim))
 		// docoff records where each record landed, so it is written from what
 		// encodeDocs returns rather than by predicting record sizes twice.
@@ -374,23 +363,17 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 // order — what the docoff section records. They are collected here rather than
 // recomputed because a second implementation predicting record sizes would be
 // a second thing to keep in step with this one.
+// Only the pending segment is written: everything added since the last commit.
+// Ids inside a segment are local, starting at zero, and the manifest is what
+// says where the segment sits in the index — so a segment's bytes do not depend
+// on what was committed before it, which is what lets an old generation survive
+// a new one untouched.
 func encodeDocs(w *segWriter, ix *Index) (offs, lens []int, keys []string) {
-	n := ix.lenAt()
+	n := len(ix.docs)
 	w.uvarint(uint64(n))
 	offs, lens, keys = make([]int, n), make([]int, n), make([]string, n)
-	for i := range n {
-		// Read through the router rather than off ix.docs. A committed segment
-		// holds the front of the corpus and the pending one holds the tail, so
-		// writing only what is in memory would drop everything already on disk
-		// — an index that commits and then reopens shorter than it was.
-		d, ok := ix.docAt(DocID(i))
-		if !ok {
-			// Unreachable while every id below lenAt is either in a segment or
-			// pending. If it ever is reachable, writing a hole is worse than
-			// writing an empty document, and the decoder refuses an empty key.
-			d = Document{}
-		}
-		lens[i] = ix.docLenAt(DocID(i))
+	for i, d := range ix.docs {
+		lens[i] = ix.docLen[i]
 		keys[i] = d.Key
 		offs[i] = w.off()
 		w.beginUnit(uint64(i))
@@ -413,6 +396,9 @@ func encodeDocs(w *segWriter, ix *Index) (offs, lens []int, keys []string) {
 	}
 	return offs, lens, keys
 }
+
+// localOf turns an index-wide DocID into the pending segment's local one.
+func localOf(ix *Index, id DocID) int { return int(uint64(id) - uint64(ix.base)) }
 
 // encodePostings writes the postings file and the terms index side by side.
 // Requires ix.mu to be held.
@@ -439,9 +425,7 @@ func encodeDocs(w *segWriter, ix *Index) (offs, lens []int, keys []string) {
 // immutable, and together the block's true BM25 score ceiling under whatever
 // the collection statistics are at query time.
 func encodePostings(post, terms *segWriter, ix *Index) {
-	// Every term the index holds, committed and pending alike, for the reason
-	// encodeDocs reads through the router.
-	keys := ix.terms()
+	keys := slices.Sorted(maps.Keys(ix.postings))
 	post.uvarint(uint64(len(keys)))
 	terms.uvarint(uint64(len(keys)))
 
@@ -453,7 +437,7 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 		terms.uvarint(uint64(post.off()))
 		terms.endUnit()
 
-		pl := ix.lookupAt(t)
+		pl := ix.postings[t]
 		post.uvarint(uint64((len(pl) + blockSize - 1) / blockSize))
 
 		for start := 0; start < len(pl); start += blockSize {
@@ -461,19 +445,19 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 			maxTF, minDL := 0, maxInt
 			for _, p := range blk {
 				maxTF = max(maxTF, p.Freq)
-				minDL = min(minDL, ix.docLenAt(p.Doc))
+				minDL = min(minDL, ix.docLen[localOf(ix, p.Doc)])
 			}
 			// A block's own file offset seeds its checksum: blocks are
 			// independently decodable by design (D-001), so nothing else stops
 			// one being served in place of another term's.
 			post.beginUnit(uint64(post.off()))
 			post.uvarint(uint64(len(blk)))
-			post.uvarint(uint64(blk[len(blk)-1].Doc)) // maxDocID
+			post.uvarint(uint64(blk[len(blk)-1].Doc) - uint64(ix.base)) // maxDocID, segment-local
 			post.uvarint(uint64(maxTF))
 			post.uvarint(uint64(minDL))
 			prev := uint64(0)
 			for i, p := range blk {
-				id := uint64(p.Doc)
+				id := uint64(p.Doc) - uint64(ix.base)
 				if i == 0 {
 					post.uvarint(id)
 				} else {

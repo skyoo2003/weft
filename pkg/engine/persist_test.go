@@ -92,15 +92,37 @@ func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
 		t.Fatalf("Open touched the directory: %v", names)
 	}
+	// The next commit is generation 2, so it writes seg-000002 — the orphan's
+	// own name — and the RemoveAll before the write is what clears it. Same
+	// mechanism as milestone 2; what changed is that seg-000001 now stays,
+	// because incremental commit leaves older generations live and sweeping one
+	// would take the front of the corpus with it.
+	if _, err := got.Add(Document{Key: "later", Text: "added after the restart"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
 	if err := got.Commit(dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000002"}) {
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
 		t.Fatalf("orphan segment not swept by the next commit: %v", names)
+	}
+	// The name survived; the contents did not.
+	if _, ok := got.Resolve("ghost"); ok {
+		t.Fatal("the orphan's documents survived the commit that overwrote it")
+	}
+	if _, ok := got.Resolve("later"); !ok {
+		t.Fatal("the second commit's own document is missing")
+	}
+	if _, ok := got.Resolve("safe"); !ok {
+		t.Fatal("the first generation was lost")
 	}
 }
 
-func TestSuccessiveCommitsKeepOneGeneration(t *testing.T) {
+// TestSuccessiveCommitsAccumulateGenerations is the milestone 2 test of the
+// same name turned around. It asserted that only the newest generation
+// survived, which was true while a commit rewrote the whole corpus; now every
+// generation holds a slice of it and deleting one would delete documents.
+func TestSuccessiveCommitsAccumulateGenerations(t *testing.T) {
 	ix := New()
 	dir := t.TempDir()
 	for i, key := range []string{"one", "two", "three"} {
@@ -109,8 +131,8 @@ func TestSuccessiveCommitsKeepOneGeneration(t *testing.T) {
 			t.Fatalf("Commit %d: %v", i+1, err)
 		}
 	}
-	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000003"}) {
-		t.Fatalf("after three commits: %v, want only MANIFEST and seg-000003", names)
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002", "seg-000003"}) {
+		t.Fatalf("after three commits: %v, want all three generations", names)
 	}
 	got, err := Open(dir)
 	if err != nil {
@@ -142,7 +164,7 @@ func TestCommitAfterOpenContinuesTheGenerations(t *testing.T) {
 		t.Fatalf("second Open: %v", err)
 	}
 	assertReadAPIsAgree(t, second, got)
-	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000002"}) {
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
 		t.Fatalf("generations did not continue past the restart: %v", names)
 	}
 }

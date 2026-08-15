@@ -890,6 +890,19 @@ func build(ctx context.Context, args []string) error {
 	if err := os.Remove(filepath.Join(dir, provenanceFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove stale %s: %w", provenanceFile, err)
 	}
+	// Clear any previous index before committing over it. A commit is
+	// incremental now — it appends a segment to whatever the directory already
+	// holds — so committing a freshly built index into a populated directory is
+	// refused rather than silently overlapping the DocIDs. This command builds
+	// an index from the sources named in provenance.json, which is a
+	// replacement and not an addition, so it says so.
+	//
+	// Ordered after the provenance removal on purpose: the window a crash can
+	// land in already leaves an index that cannot say what it holds, and
+	// widening it to also leave no index is no worse.
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("clear %s before rebuilding: %w", dir, err)
+	}
 	start := time.Now()
 	if err := ix.Commit(dir); err != nil {
 		return err

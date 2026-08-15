@@ -51,8 +51,16 @@ const (
 // segDirName names the directory of one segment generation.
 func segDirName(gen uint64) string { return fmt.Sprintf("%s%06d", segPrefix, gen) }
 
-// Commit writes the index's entire current state into dir as a new segment
-// generation and atomically makes it the one Open sees.
+// segInfo is one entry in the manifest's segment list: where the segment's
+// files are, and which slice of the index's DocID space it owns.
+type segInfo struct {
+	name  string
+	base  DocID
+	count int
+}
+
+// Commit writes everything added since the last commit into dir as a new
+// segment generation and atomically publishes it.
 //
 // Atomicity is the MANIFEST flip: the segment's files are written and fsynced
 // first, then the manifest is renamed into place, so a crash at any point
@@ -61,17 +69,25 @@ func segDirName(gen uint64) string { return fmt.Sprintf("%s%06d", segPrefix, gen
 // power loss it is best-effort (fsync, no platform-specific write barriers),
 // and docs/FORMAT.md states the boundary.
 //
-// Each commit rewrites the whole corpus and replaces the previous generation.
+// A commit writes only the documents added since the last one, and the previous
+// generations' files are not touched. What it costs is therefore the size of
+// the addition rather than the size of the corpus — D-003's repayment, whose
+// trigger was this milestone. The previous generation's bytes surviving a new
+// commit is asserted, not assumed: rewriting them identically would look the
+// same from outside and would be exactly the work being removed.
 //
-// ponytail: O(corpus) per commit. Incremental segments — write only new
-// documents, read across many — arrive with milestone 3, where corpus size is
-// the point; the manifest already carries a segment list, so that change
-// extends the format's contents rather than the format.
+// On success the new segment joins the index in place, so a second Commit does
+// not write the same documents again.
 //
-// Commit is safe to run alongside Add and queries — the state is captured
-// under the same read lock every query takes, so a commit is a point-in-time
-// snapshot with its BM25 statistics intact — but not alongside another Commit
-// on the same directory. weft has a single writer by design.
+// ponytail: Commit holds the write lock for its whole duration, so queries wait
+// on it where before they ran alongside. The ceiling is the time to write one
+// commit's worth of new documents, which incremental commit is what bounds. The
+// upgrade is to encode under the read lock and swap under the write lock,
+// counting the documents captured so a concurrent Add is neither written twice
+// nor dropped — worth doing when a load test shows the pause, and not before.
+//
+// Commit is not safe alongside another Commit on the same directory. weft has a
+// single writer by design.
 func (ix *Index) Commit(dir string) error {
 	// 0o700, not 0o755: this directory holds the caller's corpus, and nothing
 	// weft does needs another user on the machine to read it. Owner-only rather
@@ -92,9 +108,9 @@ func (ix *Index) Commit(dir string) error {
 	// manifest is a first commit; a corrupt one is not — guessing a generation
 	// on top of a directory in an unknown state could orphan a commit the
 	// caller believes exists, so Commit refuses and reports.
-	gen, _, err := readManifest(root)
+	gen, live, err := readManifest(root)
 	if errors.Is(err, fs.ErrNotExist) {
-		gen = 0
+		gen, live = 0, nil
 		// No manifest means nothing here is published. It does not mean this
 		// directory is weft's.
 		if err := refuseForeignEntries(root); err != nil {
@@ -104,10 +120,29 @@ func (ix *Index) Commit(dir string) error {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
 
-	// readManifest has already established that the live segment is named for
-	// gen and that gen+1 does not wrap, and refuseForeignEntries has done the
-	// same job for a directory with no manifest at all, so the directory cleared
-	// below is this commit's own debris and never the published one.
+	// The write lock, for the whole commit. See the ponytail note above.
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+
+	// The manifest is the authority on what is already stored, and the index in
+	// memory has to agree with it — otherwise the segment written below would
+	// be given a base the directory does not expect, and the ids of everything
+	// in it would be wrong. A disagreement means this index was not the one
+	// that wrote this directory.
+	var stored uint64
+	if n := len(live); n > 0 {
+		stored = uint64(live[n-1].base) + uint64(live[n-1].count)
+	}
+	if stored != uint64(ix.base) {
+		return fmt.Errorf("commit %s: the directory holds %d documents, this index has %d committed: %w",
+			dir, stored, ix.base, ErrCorrupt)
+	}
+
+	// readManifest has already established that the newest live segment is
+	// named for gen and that gen+1 does not wrap, and refuseForeignEntries has
+	// done the same job for a directory with no manifest at all, so the
+	// directory cleared below is this commit's own debris and never a published
+	// one.
 	seg := segDirName(gen + 1)
 	// A crash after writing segment files but before the manifest flip leaves
 	// this directory half-written. It was never visible — no manifest names it
@@ -145,9 +180,14 @@ func (ix *Index) Commit(dir string) error {
 	if err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
+	published := append(slices.Clone(live), segInfo{name: seg, base: ix.base, count: len(ix.docs)})
 	w.uvarint(gen + 1)
-	w.uvarint(1)
-	w.str(seg)
+	w.uvarint(uint64(len(published)))
+	for _, s := range published {
+		w.str(s.name)
+		w.uvarint(uint64(s.base))
+		w.uvarint(uint64(s.count))
+	}
 	if err := w.close(); err != nil {
 		return fmt.Errorf("commit %s: %s: %w", dir, manifestName, err)
 	}
@@ -156,11 +196,37 @@ func (ix *Index) Commit(dir string) error {
 	}
 	syncDir(root)
 
+	// The commit is durable. Adopt what was just written so a second Commit
+	// does not write these documents again, and so reads of them go through the
+	// mapping like every other committed document. Failing here leaves the
+	// directory correct and the in-memory index stale, which is why it is an
+	// error rather than something swallowed: the caller has to Open again.
+	if err := ix.adopt(root, published[len(published)-1]); err != nil {
+		return fmt.Errorf("commit %s: %w", seg, err)
+	}
+
 	// The previous generation is unreachable now. Pruning it is best-effort:
 	// the commit above is already durable, and a leftover directory nothing
 	// names is invisible — failing to delete it must not turn a successful
 	// commit into a reported failure.
-	prune(root, seg)
+	prune(root, published)
+	return nil
+}
+
+// adopt maps the segment a commit just published and folds it into the index,
+// clearing the pending documents it now holds. Requires ix.mu.
+func (ix *Index) adopt(root *os.Root, info segInfo) error {
+	s, err := openSegment(root, info.name, info.base)
+	if err != nil {
+		return err
+	}
+	ix.segs = append(ix.segs, s)
+	ix.base = DocID(uint64(info.base) + uint64(info.count))
+	ix.docs = ix.docs[:0]
+	ix.docLen = ix.docLen[:0]
+	ix.totalLen = 0
+	clear(ix.byKey)
+	clear(ix.postings)
 	return nil
 }
 
@@ -192,17 +258,33 @@ func Open(dir string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}
-	s, err := openSegment(root, segs[0], 0)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", segs[0], err)
-	}
 	ix := New()
-	ix.segs = []*segment{s}
-	// The pending segment starts where the committed one ends, so ids stay
-	// dense across the join and an Add after an Open cannot collide with a
-	// document already on disk.
-	ix.base = DocID(uint64(s.base) + uint64(s.count))
-	ix.vecDim = s.vecDim
+	for _, info := range segs {
+		s, err := openSegment(root, info.name, info.base)
+		if err != nil {
+			ix.Close() //nolint:errcheck // already returning an error
+			return nil, fmt.Errorf("open %s: %w", info.name, err)
+		}
+		// The manifest says how many documents a segment holds and meta says it
+		// again. They are written by the same commit and read by different
+		// paths, so a disagreement means one of them is not describing this
+		// segment — and the manifest's number is what every base after it was
+		// computed from.
+		if s.count != info.count {
+			ix.segs = append(ix.segs, s)
+			ix.Close() //nolint:errcheck // ditto
+			return nil, fmt.Errorf("open %s: the manifest says %d documents, meta says %d: %w",
+				info.name, info.count, s.count, ErrCorrupt)
+		}
+		ix.segs = append(ix.segs, s)
+		// The pending segment starts where the last committed one ends, so ids
+		// stay dense across the join and an Add after an Open cannot collide
+		// with a document already on disk.
+		ix.base = DocID(uint64(s.base) + uint64(s.count))
+		if s.vecDim != 0 {
+			ix.vecDim = s.vecDim
+		}
+	}
 	return ix, nil
 }
 
@@ -236,8 +318,8 @@ func Scrub(dir string) error {
 		return fmt.Errorf("scrub %s: %w", dir, err)
 	}
 	for _, seg := range segs {
-		if _, err := loadSegment(root, seg, true); err != nil {
-			return fmt.Errorf("scrub %s: %w", seg, err)
+		if _, err := loadSegment(root, seg.name, true); err != nil {
+			return fmt.Errorf("scrub %s: %w", seg.name, err)
 		}
 	}
 	return nil
@@ -333,7 +415,7 @@ func loadSegment(root *os.Root, seg string, frame bool) (*Index, error) {
 // write, so a manifest whose generation and segment name disagree can aim that
 // RemoveAll at the segment that is still published, destroying the live commit
 // before its replacement is durable.
-func readManifest(root *os.Root) (gen uint64, segs []string, err error) {
+func readManifest(root *os.Root) (gen uint64, segs []segInfo, err error) {
 	b, err := root.ReadFile(manifestName)
 	if err != nil {
 		// An entry of the wrong kind at the entry point is classified the way
@@ -361,27 +443,62 @@ func readManifest(root *os.Root) (gen uint64, segs []string, err error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	// Bases are checked as they are read rather than afterwards: a segment list
+	// that does not tile [0, total) contiguously and in order would give two
+	// segments overlapping ids, and Index.segFor would answer with whichever it
+	// walked into first — a wrong document, not an error.
+	next := uint64(0)
 	for range n {
-		s, err := r.str("segment name")
+		name, err := r.str("segment name")
 		if err != nil {
 			return 0, nil, err
 		}
-		if !strings.HasPrefix(s, segPrefix) || strings.ContainsAny(s, `/\`) || s != filepath.Base(s) {
-			return 0, nil, fmt.Errorf("%s: segment name %q: %w", manifestName, s, ErrCorrupt)
+		if !strings.HasPrefix(name, segPrefix) || strings.ContainsAny(name, `/\`) || name != filepath.Base(name) {
+			return 0, nil, fmt.Errorf("%s: segment name %q: %w", manifestName, name, ErrCorrupt)
 		}
-		segs = append(segs, s)
+		base, err := r.uvarint("segment base")
+		if err != nil {
+			return 0, nil, err
+		}
+		count, err := r.intn("segment document count", maxDocCount)
+		if err != nil {
+			return 0, nil, err
+		}
+		if base != next {
+			return 0, nil, fmt.Errorf("%s: segment %q starts at document %d, the one before it ended at %d: %w",
+				manifestName, name, base, next, ErrCorrupt)
+		}
+		if base > uint64(maxDocCount)-uint64(count) {
+			return 0, nil, fmt.Errorf("%s: segment %q runs past the document ceiling: %w", manifestName, name, ErrCorrupt)
+		}
+		next = base + uint64(count)
+		segs = append(segs, segInfo{name: name, base: DocID(base), count: count})
 	}
 	if err := r.done(); err != nil {
 		return 0, nil, err
 	}
-	if want := segDirName(gen); len(segs) != 1 || segs[0] != want {
-		return 0, nil, fmt.Errorf("%s: generation %d names %q; format v1 writes exactly one segment, called %s: %w",
-			manifestName, gen, segs, want, ErrCorrupt)
+	if len(segs) == 0 {
+		return 0, nil, fmt.Errorf("%s: generation %d names no segments; a commit always publishes one: %w", manifestName, gen, ErrCorrupt)
+	}
+	// The newest segment is named for the generation that wrote it, which is
+	// what Commit needs: it clears the directory it is about to write, so a
+	// manifest whose generation and newest name disagree could aim that
+	// RemoveAll at a segment that is still published.
+	if want := segDirName(gen); segs[len(segs)-1].name != want {
+		return 0, nil, fmt.Errorf("%s: generation %d ends with %q, not %s: %w",
+			manifestName, gen, segs[len(segs)-1].name, want, ErrCorrupt)
+	}
+	seen := make(map[string]struct{}, len(segs))
+	for _, s := range segs {
+		if _, dup := seen[s.name]; dup {
+			return 0, nil, fmt.Errorf("%s: segment %q listed twice: %w", manifestName, s.name, ErrCorrupt)
+		}
+		seen[s.name] = struct{}{}
 	}
 	// Generation counts commits one at a time from a first commit that publishes
 	// 1, so neither end of the counter is a state a writer produced. Zero
 	// describes a commit that never happened: accepting it would load a foreign
-	// v1 layout, and let the next Commit publish over it and then sweep away a
+	// layout, and let the next Commit publish over it and then sweep away a
 	// seg-000000 weft never wrote. MaxUint64 is the other end, and refusing it is
 	// also what keeps Commit's gen+1 from wrapping back onto zero — a wrapped
 	// generation would aim the pre-write RemoveAll at seg-000000 and then publish
@@ -495,21 +612,32 @@ func readDir(root *os.Root, name string) ([]fs.DirEntry, error) {
 	return d.ReadDir(-1)
 }
 
-// prune removes every segment directory except keep, plus a stale manifest
-// temp file. Best-effort by design: everything it deletes is unreachable —
-// nothing reads a segment the manifest does not name — so failing to delete
-// must not fail the commit that already succeeded.
+// prune removes every segment directory the manifest does not name, plus a
+// stale manifest temp file. Best-effort by design: everything it deletes is
+// unreachable — nothing reads a segment the manifest does not name — so failing
+// to delete must not fail the commit that already succeeded.
+//
+// The keep set is the whole published list, not just the newest. Incremental
+// commit means older generations are still live, and deleting one would take
+// the front of the corpus with it.
 //
 // Only Commit calls this, and only after its own rename: weft's single writer
 // is the one party that knows no other segment is being written right now.
-func prune(root *os.Root, keep string) {
+func prune(root *os.Root, keep []segInfo) {
 	root.Remove(manifestName + ".tmp") //nolint:errcheck,gosec // best-effort by design, see above
+	live := make(map[string]struct{}, len(keep))
+	for _, s := range keep {
+		live[s.name] = struct{}{}
+	}
 	entries, err := readDir(root, ".")
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), segPrefix) && e.Name() != keep {
+		if _, ok := live[e.Name()]; ok {
+			continue
+		}
+		if e.IsDir() && strings.HasPrefix(e.Name(), segPrefix) {
 			root.RemoveAll(e.Name()) //nolint:errcheck,gosec // best-effort by design, see above
 		}
 	}

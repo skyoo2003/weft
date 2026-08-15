@@ -1092,14 +1092,26 @@ func TestBuildLeavesNoProvenanceForAnIndexItDidNotFinish(t *testing.T) {
 		t.Fatalf("first build wrote no provenance: %v", err)
 	}
 
-	// A manifest engine cannot read. It refuses rather than guessing a generation on
-	// top of a directory in an unknown state, which is a commit that fails after this
-	// build has already decided to replace the index — the window this test is about.
-	if err := os.WriteFile(filepath.Join(dir, indexDir, "MANIFEST"), []byte("not a manifest"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
+	// A rebuild that cannot replace the index. The data directory is made
+	// unwritable, so clearing the previous index fails — a build that has
+	// already removed the provenance record and then gets no further, which is
+	// the window this test is about.
+	//
+	// A corrupt MANIFEST used to serve here: engine refused to commit on top of
+	// a directory in an unknown state. It no longer reaches that refusal,
+	// because a commit is incremental now and build clears the index directory
+	// before committing into it — the previous manifest is gone before engine
+	// sees it. The property is unchanged; the way to trip it is not.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) }) //nolint:errcheck // teardown
+	if err := os.Remove(filepath.Join(dir, indexDir, provenanceFile)); err == nil {
+		// Running as a user the mode does not constrain — root, typically.
+		t.Skip("the data directory is writable despite mode 0500")
 	}
 	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err == nil {
-		t.Fatal("build committed over an entry weft did not write")
+		t.Fatal("build replaced an index it could not clear")
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("provenance survived a rebuild that did not finish (stat err %v); a later run "+
