@@ -409,6 +409,141 @@ func TestCommitAfterOneAddWritesOneDocument(t *testing.T) {
 	assertReadAPIsAgree(t, ix, got)
 }
 
+// ---------------------------------------------------------------------------
+// Merge: bounding the segment count, deterministically.
+// ---------------------------------------------------------------------------
+
+// commitEach commits after every document, so the directory ends up with one
+// generation per document — the shape merge exists to collapse.
+func commitEach(t *testing.T, dir string, n int) *Index {
+	t.Helper()
+	ix := New()
+	for i := range n {
+		if _, err := ix.Add(Document{
+			Key:   fmt.Sprintf("doc-%03d", i),
+			Text:  fmt.Sprintf("shared term%d and more shared", i%3),
+			Links: []string{fmt.Sprintf("doc-%03d", (i+1)%n)},
+		}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit %d: %v", i, err)
+		}
+	}
+	return ix
+}
+
+// TestMergeBoundsTheSegmentCount is the reason merge exists. Every commit adds
+// a segment, and every read consults all of them, so an index committed often
+// enough answers a point query by walking a list that grows without limit.
+func TestMergeBoundsTheSegmentCount(t *testing.T) {
+	dir := t.TempDir()
+	ix := commitEach(t, dir, 12)
+	defer ix.Close() //nolint:errcheck // teardown
+
+	if got := len(ix.segs); got != 12 {
+		t.Fatalf("12 commits left %d segments", got)
+	}
+	if err := ix.Merge(); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if got := len(ix.segs); got > maxSegments {
+		t.Errorf("Merge left %d segments, the ceiling is %d", got, maxSegments)
+	}
+
+	// The corpus is unchanged, read through the merged index and through a
+	// fresh Open of the directory it published.
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open after Merge: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	assertReadAPIsAgree(t, ix, got)
+	if got.Len() != 12 {
+		t.Errorf("reopened index holds %d documents, want 12", got.Len())
+	}
+}
+
+// TestMergeDoesNotMoveRankings is the correctness line merge has to hold.
+//
+// A merged segment renumbers nothing — merging adjacent segments is
+// concatenation, so a document keeps the id it had — but the postings are
+// rewritten and TopK breaks ties on DocID. Milestone 4 measured what that
+// tiebreak decides on a real corpus: 241 reported slots sat at a cut score 960
+// further candidates were excluded from by DocID alone. A merge that moved ids
+// would move rankings, silently.
+func TestMergeDoesNotMoveRankings(t *testing.T) {
+	dir := t.TempDir()
+	ix := commitEach(t, dir, 12)
+	defer ix.Close() //nolint:errcheck // teardown
+
+	before := map[string][]Posting{}
+	docs := make([]Document, ix.Len())
+	for i := range ix.Len() {
+		docs[i], _ = ix.Doc(DocID(i))
+	}
+	for _, term := range []string{"shared", "term0", "term1", "term2", "and", "more"} {
+		before[term] = slices.Clone(ix.Lookup(term))
+	}
+	n, avg := ix.Stats()
+
+	if err := ix.Merge(); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	for i := range docs {
+		got, ok := ix.Doc(DocID(i))
+		if !ok || got.Key != docs[i].Key {
+			t.Errorf("after Merge, document %d is %q; before it was %q", i, got.Key, docs[i].Key)
+		}
+	}
+	for term, want := range before {
+		if got := ix.Lookup(term); !slices.Equal(got, want) {
+			t.Errorf("after Merge, Lookup(%q) = %v; before it was %v", term, got, want)
+		}
+	}
+	if gn, gavg := ix.Stats(); gn != n || gavg != avg {
+		t.Errorf("after Merge, Stats = %d/%v; before it was %d/%v", gn, gavg, n, avg)
+	}
+}
+
+// TestMergeIsByteDeterministic is milestone 4 section 4.2 arriving upstream.
+//
+// That milestone published a number, then found the pipeline that produced it
+// was nondeterministic: a Go map ranged over during a build chose a different
+// winner every run, and 6.6% of the citation graph moved between builds. The
+// bootstrap, the pinned seed and the 28-configuration sweep were all downstream
+// of it and all blind to it.
+//
+// Merge is where this milestone could introduce the same thing. It reads term
+// sets out of maps and writes them to disk, and what it writes decides posting
+// order, which decides rankings. So: same inputs, same bytes.
+func TestMergeIsByteDeterministic(t *testing.T) {
+	build := func(t *testing.T) map[string]uint32 {
+		t.Helper()
+		dir := t.TempDir()
+		ix := commitEach(t, dir, 12)
+		defer ix.Close() //nolint:errcheck // teardown
+		if err := ix.Merge(); err != nil {
+			t.Fatalf("Merge: %v", err)
+		}
+		out := map[string]uint32{}
+		for name, sum := range dirBytes(t, dir) {
+			// The manifest names generations, and the generation number depends
+			// on how many commits came first — which is the same in both runs
+			// but is not what this test is about. Segment contents are.
+			if strings.HasPrefix(filepath.Base(name), segPrefix) || strings.Contains(name, string(filepath.Separator)) {
+				out[name] = sum
+			}
+		}
+		return out
+	}
+	first, second := build(t), build(t)
+	if !maps.Equal(first, second) {
+		t.Errorf("two merges of the same corpus produced different bytes:\n first %v\nsecond %v", first, second)
+	}
+}
+
 // TestADamagedRecordIsNeverServed guards the boundary against moving too far,
 // and records what it cost to move it at all.
 //
