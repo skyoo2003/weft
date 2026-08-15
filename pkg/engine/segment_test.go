@@ -456,9 +456,12 @@ func TestOverlongVersionEncodingIsRefused(t *testing.T) {
 	}
 	body := b[:len(b)-crc32.Size]
 
-	// Same magic, same kind, same payload; version 1 spelled in two bytes.
+	// Same magic, same kind, same payload; the current version spelled in two
+	// bytes. Derived from formatVersion rather than written out, so a version
+	// bump does not quietly turn this into a test that the *previous* version
+	// is refused — a different assertion, and one ErrBadVersion already covers.
 	overlong := append([]byte(nil), segMagic...)
-	overlong = append(overlong, 0x81, 0x00)
+	overlong = append(overlong, byte(formatVersion)|0x80, 0x00)
 	overlong = append(overlong, body[len(segMagic)+1:]...)
 	overlong = binary.LittleEndian.AppendUint32(overlong, crc32.Checksum(overlong, segCRC))
 	if err := os.WriteFile(path, overlong, 0o644); err != nil {
@@ -635,9 +638,13 @@ func TestOtherVersionsAreRefusedNotMisread(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		patchVersion(t, path, 2)
+		// One past the current version: a file from a weft that does not exist
+		// yet. TestVersionOneIsRefused covers the other direction, which is the
+		// one that has real files behind it.
+		next := byte(formatVersion) + 1
+		patchVersion(t, path, next)
 		if _, err := Open(dir); !errors.Is(err, ErrBadVersion) {
-			t.Fatalf("%s at version 2: got %v, want ErrBadVersion", filepath.Base(path), err)
+			t.Fatalf("%s at version %d: got %v, want ErrBadVersion", filepath.Base(path), next, err)
 		}
 		if err := os.WriteFile(path, orig, 0o644); err != nil {
 			t.Fatal(err)
@@ -697,7 +704,7 @@ func FuzzSegmentDecoding(f *testing.F) {
 }
 
 func FuzzParseSection(f *testing.F) {
-	for _, kind := range []byte{kindMeta, kindDocs, kindPostings, kindTerms, kindManifest} {
+	for _, kind := range []byte{kindMeta, kindDocs, kindPostings, kindTerms, kindManifest, kindDocoff, kindKeys} {
 		root, err := os.OpenRoot(f.TempDir())
 		if err != nil {
 			f.Fatal(err)

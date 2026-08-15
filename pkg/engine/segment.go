@@ -32,7 +32,13 @@ import (
 // stable across versions: a future reader can only reject what it cannot
 // parse if the version is always in the same place.
 const (
-	formatVersion = 1
+	// formatVersion 2 is milestone 3's. Version 1 wrote documents as a bare run
+	// of variable-length records and rebuilt byKey by reading all of them, so
+	// neither a DocID nor a Key could reach its document without decoding every
+	// document in front of it — no arrangement of a lazy reader fixes that, only
+	// different bytes do. v1 is refused rather than migrated; D-007 records why
+	// that argument is available exactly once.
+	formatVersion = 2
 
 	// segHeaderLen is the frame header size while the version encodes in one
 	// byte, which it does until version 128. The terms index records absolute
@@ -44,6 +50,8 @@ const (
 	kindPostings byte = 3
 	kindTerms    byte = 4
 	kindManifest byte = 5
+	kindDocoff   byte = 6
+	kindKeys     byte = 7
 
 	// blockSize is how many postings share one block and one
 	// (maxDocID, maxTF, minDocLen) header on disk. The metadata is written now
@@ -96,6 +104,8 @@ var segSections = []segSection{
 	{docsFile, kindDocs},
 	{postingsFile, kindPostings},
 	{termsFile, kindTerms},
+	{docoffFile, kindDocoff},
+	{keysFile, kindKeys},
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +191,7 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 		}
 		ws[i] = w
 	}
-	meta, docs, post, terms := ws[0], ws[1], ws[2], ws[3]
+	meta, docs, post, terms, docoff, keys := ws[0], ws[1], ws[2], ws[3], ws[4], ws[5]
 
 	// Deferred inside a closure, not unlocked inline: a panic anywhere in the
 	// encoders would otherwise leave the index read-locked forever and deadlock
@@ -192,7 +202,10 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 		meta.uvarint(uint64(len(ix.docs)))
 		meta.uvarint(uint64(ix.totalLen))
 		meta.uvarint(uint64(ix.vecDim))
-		encodeDocs(docs, ix)
+		// docoff records where each record landed, so it is written from what
+		// encodeDocs returns rather than by predicting record sizes twice.
+		encodeDocOffsets(docoff, encodeDocs(docs, ix))
+		encodeKeys(keys, ix)
 		encodePostings(post, terms, ix)
 	}()
 
@@ -224,9 +237,15 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 // reads. The zero Time needs no presence flag: its own Unix seconds decode
 // back to a Time that IsZero again, so "no timestamp", which recency treats
 // as "no opinion", survives the trip by arithmetic rather than by convention.
-func encodeDocs(w *segWriter, ix *Index) {
+// The returned offsets are absolute file positions, one per DocID, in DocID
+// order — what the docoff section records. They are collected here rather than
+// recomputed because a second implementation predicting record sizes would be
+// a second thing to keep in step with this one.
+func encodeDocs(w *segWriter, ix *Index) []int {
 	w.uvarint(uint64(len(ix.docs)))
+	offs := make([]int, len(ix.docs))
 	for i, d := range ix.docs {
+		offs[i] = w.off()
 		w.str(d.Key)
 		w.str(d.Text)
 		w.uvarint(uint64(ix.docLen[i]))
@@ -243,6 +262,7 @@ func encodeDocs(w *segWriter, ix *Index) {
 		w.varint(d.Time.Unix())
 		w.uvarint(uint64(d.Time.Nanosecond()))
 	}
+	return offs
 }
 
 // encodePostings writes the postings file and the terms index side by side.
@@ -440,14 +460,14 @@ func parseSection(name string, b []byte, kind byte) (*segReader, error) {
 	if v != formatVersion {
 		return nil, fmt.Errorf("%s: format version %d, this build reads %d: %w", name, v, formatVersion, ErrBadVersion)
 	}
-	// Version 1 is one byte, and only one byte. binary.Uvarint accepts overlong
-	// encodings — 0x81 0x00 also decodes to 1 — which would make the header
-	// seven bytes while segHeaderLen, and every absolute offset the terms index
-	// records against it, still says six. Two byte strings meaning the same
-	// index is one too many for a format whose writer is expected to be
-	// deterministic.
+	// The version is one byte, and only one byte. binary.Uvarint accepts
+	// overlong encodings — 0x82 0x00 also decodes to 2 — which would make the
+	// header seven bytes while segHeaderLen, and every absolute offset the
+	// terms index and the two v2 seek sections record against it, still says
+	// six. Two byte strings meaning the same index is one too many for a format
+	// whose writer is expected to be deterministic.
 	if n != segHeaderLen-len(segMagic)-1 {
-		return nil, fmt.Errorf("%s: format version 1 written in %d bytes, not 1: %w", name, n, ErrCorrupt)
+		return nil, fmt.Errorf("%s: format version %d written in %d bytes, not 1: %w", name, v, n, ErrCorrupt)
 	}
 	if got := body[len(segMagic)+n]; got != kind {
 		return nil, fmt.Errorf("%s: section kind %d where %d belongs: %w", name, got, kind, ErrCorrupt)
@@ -499,77 +519,23 @@ func decodeDocs(r *segReader) (*Index, error) {
 	}
 
 	for i := 0; i < n; i++ {
-		var d Document
-		if d.Key, err = r.str("document key"); err != nil {
+		d, dl, err := decodeDocRecord(r, i)
+		if err != nil {
 			return nil, err
-		}
-		if d.Key == "" {
-			return nil, fmt.Errorf("%s: document %d has an empty key, which Add refuses: %w", r.name, i, ErrCorrupt)
 		}
 		if _, dup := ix.byKey[d.Key]; dup {
 			return nil, fmt.Errorf("%s: duplicate key %q: %w", r.name, d.Key, ErrCorrupt)
 		}
-		if d.Text, err = r.str("document text"); err != nil {
-			return nil, err
-		}
-		dl, err := r.intn("document length", maxInt)
-		if err != nil {
-			return nil, err
-		}
 		if dl > maxInt-ix.totalLen {
 			return nil, fmt.Errorf("%s: document lengths overflow their sum: %w", r.name, ErrCorrupt)
 		}
-
-		vn, err := r.intn("vector width", (len(r.b)-r.off)/4)
-		if err != nil {
-			return nil, err
-		}
-		if vn > 0 {
+		if vn := len(d.Vector); vn > 0 {
 			if ix.vecDim == 0 {
 				ix.vecDim = vn
 			} else if vn != ix.vecDim {
 				return nil, fmt.Errorf("%s: document %d vector is %d wide, corpus is %d: %w", r.name, i, vn, ix.vecDim, ErrCorrupt)
 			}
-			d.Vector = make([]float32, vn)
-			for j := range d.Vector {
-				bits, err := r.u32("vector component")
-				if err != nil {
-					return nil, err
-				}
-				c := math.Float32frombits(bits)
-				if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
-					return nil, fmt.Errorf("%s: document %d vector component %d is %v, which Add refuses: %w", r.name, i, j, c, ErrCorrupt)
-				}
-				d.Vector[j] = c
-			}
 		}
-
-		ln, err := r.intn("link count", len(r.b)-r.off)
-		if err != nil {
-			return nil, err
-		}
-		if ln > 0 {
-			// Same ceiling as the document hint, for the same reason: a link is
-			// one byte on disk and sixteen in a slice header.
-			d.Links = make([]string, 0, min(ln, 1<<12))
-			for range ln {
-				l, err := r.str("link key")
-				if err != nil {
-					return nil, err
-				}
-				d.Links = append(d.Links, l)
-			}
-		}
-
-		sec, err := r.varint("time seconds")
-		if err != nil {
-			return nil, err
-		}
-		nsec, err := r.intn("time nanoseconds", int(time.Second/time.Nanosecond)-1)
-		if err != nil {
-			return nil, err
-		}
-		d.Time = time.Unix(sec, int64(nsec)).UTC()
 
 		ix.byKey[d.Key] = DocID(len(ix.docs))
 		ix.docs = append(ix.docs, d)
@@ -577,6 +543,80 @@ func decodeDocs(r *segReader) (*Index, error) {
 		ix.totalLen += dl
 	}
 	return ix, r.done()
+}
+
+// decodeDocRecord reads one document from wherever r is positioned and returns
+// it with its stored token count. i names the record in error messages only.
+//
+// It is split out of decodeDocs because milestone 3 reads records out of order
+// and one at a time — docoff hands over an offset, this decodes what stands
+// there — and one decoder serving both paths is what keeps a lazily read
+// document identical to an eagerly read one. Everything checkable from the
+// record alone is checked here; everything that needs the corpus stays in
+// decodeDocs, which is the only reason this returns rather than stores.
+func decodeDocRecord(r *segReader, i int) (Document, int, error) {
+	var d Document
+	var err error
+	if d.Key, err = r.str("document key"); err != nil {
+		return Document{}, 0, err
+	}
+	if d.Key == "" {
+		return Document{}, 0, fmt.Errorf("%s: document %d has an empty key, which Add refuses: %w", r.name, i, ErrCorrupt)
+	}
+	if d.Text, err = r.str("document text"); err != nil {
+		return Document{}, 0, err
+	}
+	dl, err := r.intn("document length", maxInt)
+	if err != nil {
+		return Document{}, 0, err
+	}
+
+	vn, err := r.intn("vector width", (len(r.b)-r.off)/4)
+	if err != nil {
+		return Document{}, 0, err
+	}
+	if vn > 0 {
+		d.Vector = make([]float32, vn)
+		for j := range d.Vector {
+			bits, err := r.u32("vector component")
+			if err != nil {
+				return Document{}, 0, err
+			}
+			c := math.Float32frombits(bits)
+			if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
+				return Document{}, 0, fmt.Errorf("%s: document %d vector component %d is %v, which Add refuses: %w", r.name, i, j, c, ErrCorrupt)
+			}
+			d.Vector[j] = c
+		}
+	}
+
+	ln, err := r.intn("link count", len(r.b)-r.off)
+	if err != nil {
+		return Document{}, 0, err
+	}
+	if ln > 0 {
+		// Same ceiling as the document hint, for the same reason: a link is
+		// one byte on disk and sixteen in a slice header.
+		d.Links = make([]string, 0, min(ln, 1<<12))
+		for range ln {
+			l, err := r.str("link key")
+			if err != nil {
+				return Document{}, 0, err
+			}
+			d.Links = append(d.Links, l)
+		}
+	}
+
+	sec, err := r.varint("time seconds")
+	if err != nil {
+		return Document{}, 0, err
+	}
+	nsec, err := r.intn("time nanoseconds", int(time.Second/time.Nanosecond)-1)
+	if err != nil {
+		return Document{}, 0, err
+	}
+	d.Time = time.Unix(sec, int64(nsec)).UTC()
+	return d, dl, nil
 }
 
 // decodePostings walks the terms index and the postings file in lockstep,

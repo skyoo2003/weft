@@ -1,0 +1,293 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package engine
+
+import (
+	"encoding/binary"
+	"fmt"
+	"maps"
+	"slices"
+	"sort"
+)
+
+// This file is the half of format v2 that version 1 could not express: two
+// sections that let a DocID or a Key reach its document without reading the
+// documents in front of it.
+//
+// Both are the same shape — a fixed-width table of absolute file offsets, then
+// the variable-length entries those offsets point at. Everything else in this
+// format is uvarint-packed and these two deliberately are not: a uvarint table
+// has to be walked from the front to reach entry i, which is precisely the cost
+// being removed.
+//
+// Offsets are absolute into the file, header included — the same convention the
+// terms index already uses for postings. One convention, two places.
+
+// docoffWidth is the byte width of one offset table entry.
+//
+// Eight rather than four. The milestone 4 corpus already writes a 656 MB docs
+// file, so a uint32 table sits one order of magnitude away from a corpus weft
+// is meant to hold — and raising the ceiling later is a format migration, the
+// one cost D-007 says this format does not get to pay a second time. At 8
+// bytes a 171,332-document table is 1.4 MB against a 626 MiB docs file.
+const docoffWidth = 8
+
+// ---------------------------------------------------------------------------
+// writing
+// ---------------------------------------------------------------------------
+
+// encodeDocOffsets writes the docoff section: one absolute offset per DocID, in
+// DocID order, so entry i sits at a computable position.
+func encodeDocOffsets(w *segWriter, offs []int) {
+	w.uvarint(uint64(len(offs)))
+	for _, off := range offs {
+		var b [docoffWidth]byte
+		binary.LittleEndian.PutUint64(b[:], uint64(off))
+		w.write(b[:])
+	}
+}
+
+// encodeKeys writes the keys section: keys in sorted order with an offset table
+// in front, so Resolve is a binary search rather than a map rebuilt by reading
+// every document.
+//
+// The offsets are computed rather than patched back in. Every entry's encoded
+// length is known from the key and the id alone, and the table's own size is
+// known from the count, so the section is written front to back with nothing
+// seeking backwards. That is not tidiness: milestone 3's merge cannot buffer
+// O(corpus) in order to patch, so a writer that needed to would have to be
+// rewritten one task later.
+func encodeKeys(w *segWriter, ix *Index) {
+	keys := slices.Sorted(maps.Keys(ix.byKey))
+	w.uvarint(uint64(len(keys)))
+
+	off := w.off() + len(keys)*docoffWidth
+	for _, k := range keys {
+		var b [docoffWidth]byte
+		binary.LittleEndian.PutUint64(b[:], uint64(off))
+		w.write(b[:])
+		off += keyEntryLen(k, ix.byKey[k])
+	}
+	for _, k := range keys {
+		w.str(k)
+		w.uvarint(uint64(ix.byKey[k]))
+	}
+}
+
+// keyEntryLen is the encoded size of one keys entry. It has to agree with what
+// encodeKeys writes below it; the decoder's offset check is what proves the two
+// still do.
+func keyEntryLen(key string, id DocID) int {
+	return uvarintLen(uint64(len(key))) + len(key) + uvarintLen(uint64(id))
+}
+
+// uvarintLen is the byte count binary.AppendUvarint produces for v.
+func uvarintLen(v uint64) int {
+	n := 1
+	for v >= 0x80 {
+		v >>= 7
+		n++
+	}
+	return n
+}
+
+// ---------------------------------------------------------------------------
+// reading
+// ---------------------------------------------------------------------------
+
+// docOffsets is the parsed docoff section. It holds the table bytes and never
+// decodes them up front: reading entry i is arithmetic, which is the point.
+type docOffsets struct {
+	name string
+	tab  []byte // exactly n*docoffWidth bytes
+	n    int
+}
+
+// parseDocOffsets reads the count and takes the table as a slice. It does not
+// look at a single offset — verifying them all here would read every byte of
+// the section, which is what lazy loading exists not to do. Each offset is
+// bounds-checked where it is used, and Scrub checks all of them.
+func parseDocOffsets(r *segReader) (docOffsets, error) {
+	n, err := r.intn("document count", maxDocCount)
+	if err != nil {
+		return docOffsets{}, err
+	}
+	if n > (len(r.b)-r.off)/docoffWidth {
+		return docOffsets{}, fmt.Errorf("%s: %d offsets do not fit in %d remaining bytes: %w",
+			r.name, n, len(r.b)-r.off, ErrCorrupt)
+	}
+	d := docOffsets{name: r.name, tab: r.b[r.off : r.off+n*docoffWidth], n: n}
+	r.off += n * docoffWidth
+	return d, r.done()
+}
+
+// at returns the absolute file offset of the record for id.
+//
+// The bool is false for an id the table does not cover, and for an offset too
+// large to be an int on this platform — the same uint64 comparison discipline
+// Index.Doc uses, for the same reason. It is not a bounds check against the
+// docs file: this section does not know how long that file is, so the caller
+// checks the offset against the payload it is about to read.
+func (d docOffsets) at(id DocID) (int, bool) {
+	if uint64(id) >= uint64(d.n) {
+		return 0, false
+	}
+	off := binary.LittleEndian.Uint64(d.tab[int(id)*docoffWidth:])
+	if off > uint64(maxInt) {
+		return 0, false
+	}
+	return int(off), true
+}
+
+// keyTable is the parsed keys section: a sorted key list reachable by binary
+// search.
+type keyTable struct {
+	name string
+	b    []byte // the whole section payload
+	tab  []byte // exactly n*docoffWidth bytes
+	n    int
+}
+
+// parseKeyTable reads the count and takes the offset table, leaving the entries
+// themselves untouched. Same reasoning as parseDocOffsets: entries are read one
+// at a time, by whoever asks for one.
+func parseKeyTable(r *segReader) (keyTable, error) {
+	n, err := r.intn("key count", maxDocCount)
+	if err != nil {
+		return keyTable{}, err
+	}
+	if n > (len(r.b)-r.off)/docoffWidth {
+		return keyTable{}, fmt.Errorf("%s: %d offsets do not fit in %d remaining bytes: %w",
+			r.name, n, len(r.b)-r.off, ErrCorrupt)
+	}
+	return keyTable{name: r.name, b: r.b, tab: r.b[r.off : r.off+n*docoffWidth], n: n}, nil
+}
+
+// at decodes entry i. An out-of-range offset is ErrCorrupt rather than a panic:
+// these bytes come from disk, and index.go's promise that library code never
+// panics does not exempt a hostile file.
+func (k keyTable) at(i int) (string, DocID, error) {
+	if i < 0 || i >= k.n {
+		return "", 0, fmt.Errorf("%s: key %d of %d: %w", k.name, i, k.n, ErrCorrupt)
+	}
+	off := binary.LittleEndian.Uint64(k.tab[i*docoffWidth:])
+	// Offsets are absolute into the file; the payload starts segHeaderLen in.
+	if off < segHeaderLen || off-segHeaderLen > uint64(len(k.b)) {
+		return "", 0, fmt.Errorf("%s: key %d sits at offset %d, outside the section: %w", k.name, i, off, ErrCorrupt)
+	}
+	r := &segReader{name: k.name, b: k.b, off: int(off - segHeaderLen)}
+	key, err := r.str("key")
+	if err != nil {
+		return "", 0, err
+	}
+	if key == "" {
+		return "", 0, fmt.Errorf("%s: key %d is empty, which Add refuses: %w", k.name, i, ErrCorrupt)
+	}
+	id, err := r.intn("key document id", maxDocCount-1)
+	if err != nil {
+		return "", 0, err
+	}
+	return key, DocID(id), nil
+}
+
+// verifySeekSections re-derives both sections from the documents they index and
+// refuses a disagreement.
+//
+// This is D-001's rule applied to two new places: a structure written now and
+// read later rots silently, so the decoder checks it on every Open rather than
+// waiting for a test run — or, worse, for the milestone that first trusts it.
+// A keys section that disagreed with docs would not fail loudly; it would
+// resolve a Key to the wrong document and rank a plausible-looking wrong
+// answer.
+//
+// It reads every entry, which is O(index) and exactly what milestone 3's lazy
+// Open cannot afford. That is why it is one function: moving verification into
+// Scrub is then a call site moving, not a rule being dropped.
+func verifySeekSections(docoffR, keysR, docsR *segReader, ix *Index) error {
+	offs, err := parseDocOffsets(docoffR)
+	if err != nil {
+		return err
+	}
+	if offs.n != len(ix.docs) {
+		return fmt.Errorf("%s indexes %d documents, %s holds %d: %w",
+			offs.name, offs.n, docsR.name, len(ix.docs), ErrCorrupt)
+	}
+	for id := range ix.docs {
+		off, ok := offs.at(DocID(id))
+		if !ok {
+			return fmt.Errorf("%s: offset %d is unusable on this platform: %w", offs.name, id, ErrCorrupt)
+		}
+		if off < segHeaderLen || off-segHeaderLen > len(docsR.b) {
+			return fmt.Errorf("%s: document %d sits at offset %d, outside %s: %w",
+				offs.name, id, off, docsR.name, ErrCorrupt)
+		}
+		r := &segReader{name: docsR.name, b: docsR.b, off: off - segHeaderLen}
+		d, _, err := decodeDocRecord(r, id)
+		if err != nil {
+			return err
+		}
+		// Key equality is the whole check. Landing one byte early or late
+		// almost always fails to decode at all, and the case that does not —
+		// an offset pointing at a different real record — is exactly what
+		// comparing the key catches.
+		if d.Key != ix.docs[id].Key {
+			return fmt.Errorf("%s: document %d points at %q, which is document %q: %w",
+				offs.name, id, d.Key, ix.docs[id].Key, ErrCorrupt)
+		}
+	}
+
+	kt, err := parseKeyTable(keysR)
+	if err != nil {
+		return err
+	}
+	if kt.n != len(ix.byKey) {
+		return fmt.Errorf("%s indexes %d keys, the corpus has %d: %w", kt.name, kt.n, len(ix.byKey), ErrCorrupt)
+	}
+	prev := ""
+	for i := range kt.n {
+		key, id, err := kt.at(i)
+		if err != nil {
+			return err
+		}
+		// Sorted order is not cosmetic: lookup is a binary search, so an
+		// unsorted table does not fail, it answers wrongly.
+		if i > 0 && key <= prev {
+			return fmt.Errorf("%s: key %q out of order after %q: %w", kt.name, key, prev, ErrCorrupt)
+		}
+		prev = key
+		if want, ok := ix.byKey[key]; !ok || want != id {
+			return fmt.Errorf("%s: key %q maps to document %d, the corpus says %d (present: %v): %w",
+				kt.name, key, id, want, ok, ErrCorrupt)
+		}
+	}
+	return nil
+}
+
+// lookup binary-searches the table. The error is separate from the bool: a key
+// that is not in the corpus is an ordinary answer — it is how a dangling Link
+// is detected — while an entry that will not decode is damage.
+func (k keyTable) lookup(key string) (DocID, bool, error) {
+	var err error
+	i := sort.Search(k.n, func(i int) bool {
+		if err != nil {
+			return false
+		}
+		var got string
+		got, _, err = k.at(i)
+		return got >= key
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	if i >= k.n {
+		return 0, false, nil
+	}
+	got, id, err := k.at(i)
+	if err != nil {
+		return 0, false, err
+	}
+	if got != key {
+		return 0, false, nil
+	}
+	return id, true, nil
+}

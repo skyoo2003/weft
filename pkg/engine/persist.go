@@ -39,6 +39,13 @@ const (
 	docsFile     = "docs"
 	postingsFile = "postings"
 	termsFile    = "terms"
+
+	// Format v2's seek structures. docoff maps a DocID to its record's offset
+	// in docs; keys maps a sorted Key to its DocID. Both exist so a lazy reader
+	// can reach one document without decoding the ones in front of it, which
+	// v1's layout made impossible rather than merely slow.
+	docoffFile = "docoff"
+	keysFile   = "keys"
 )
 
 // segDirName names the directory of one segment generation.
@@ -209,7 +216,7 @@ func Open(dir string) (*Index, error) {
 			return nil, fmt.Errorf("open %s: %w", segs[0], err)
 		}
 	}
-	metaR, docsR, postR, termsR := rs[0], rs[1], rs[2], rs[3]
+	metaR, docsR, postR, termsR, docoffR, keysR := rs[0], rs[1], rs[2], rs[3], rs[4], rs[5]
 
 	docCount, totalLen, vecDim, err := decodeMeta(metaR)
 	if err != nil {
@@ -217,6 +224,17 @@ func Open(dir string) (*Index, error) {
 	}
 	ix, err := decodeDocs(docsR)
 	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", segs[0], err)
+	}
+	// The seek sections are checked against the documents they claim to index.
+	// Nothing in this eager path reads them afterwards — Open still decodes
+	// every record — so without this they would be write-only until milestone
+	// 3's lazy reader arrives and discovers they have been wrong all along.
+	// That is D-001's rot problem in a new place, and it gets D-001's answer:
+	// the decoder re-derives what the section records and refuses a
+	// disagreement. Milestone 3 moves the cost into Scrub, not out of
+	// existence.
+	if err := verifySeekSections(docoffR, keysR, docsR, ix); err != nil {
 		return nil, fmt.Errorf("open %s: %w", segs[0], err)
 	}
 	// meta is the statistics snapshot BM25 trusts, so it does not get to
