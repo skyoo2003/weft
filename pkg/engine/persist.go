@@ -51,6 +51,38 @@ const (
 // segDirName names the directory of one segment generation.
 func segDirName(gen uint64) string { return fmt.Sprintf("%s%06d", segPrefix, gen) }
 
+// writeManifest publishes gen and its segment list, atomically.
+//
+// The temp file is created exclusively, so a leftover from a crashed writer has
+// to be cleared rather than truncated open — and removing a symlink removes the
+// link, never its target. The rename is the commit point, for a merge exactly as
+// for a commit.
+func writeManifest(root *os.Root, gen uint64, segs []segInfo) error {
+	tmp := manifestName + ".tmp"
+	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("clearing stale %s: %w", tmp, err)
+	}
+	w, err := newSegWriter(root, tmp, kindManifest)
+	if err != nil {
+		return err
+	}
+	w.uvarint(gen)
+	w.uvarint(uint64(len(segs)))
+	for _, s := range segs {
+		w.str(s.name)
+		w.uvarint(uint64(s.base))
+		w.uvarint(uint64(s.count))
+	}
+	if err := w.close(); err != nil {
+		return fmt.Errorf("%s: %w", manifestName, err)
+	}
+	if err := root.Rename(tmp, manifestName); err != nil {
+		return fmt.Errorf("publishing manifest: %w", err)
+	}
+	syncDir(root)
+	return nil
+}
+
 // segInfo is one entry in the manifest's segment list: where the segment's
 // files are, and which slice of the index's DocID space it owns.
 type segInfo struct {
@@ -158,7 +190,7 @@ func (ix *Index) Commit(dir string) error {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
 	defer segRoot.Close()
-	if err := ix.writeSegment(segRoot); err != nil {
+	if err := writeSegment(segRoot, &pendingSource{ix: ix}); err != nil {
 		return fmt.Errorf("commit %s: %w", seg, err)
 	}
 	// The segment directory's entries need to reach disk before the manifest
@@ -169,32 +201,10 @@ func (ix *Index) Commit(dir string) error {
 	syncDir(segRoot)
 	syncDir(root)
 
-	// The temp manifest is created exclusively, so a leftover from a crashed
-	// commit has to be cleared here rather than truncated open. Removing a
-	// symlink removes the link, never its target.
-	tmp := manifestName + ".tmp"
-	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("commit %s: clearing stale %s: %w", dir, tmp, err)
-	}
-	w, err := newSegWriter(root, tmp, kindManifest)
-	if err != nil {
+	published := append(slices.Clone(live), segInfo{name: seg, base: ix.base, count: len(ix.docs)})
+	if err := writeManifest(root, gen+1, published); err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
-	published := append(slices.Clone(live), segInfo{name: seg, base: ix.base, count: len(ix.docs)})
-	w.uvarint(gen + 1)
-	w.uvarint(uint64(len(published)))
-	for _, s := range published {
-		w.str(s.name)
-		w.uvarint(uint64(s.base))
-		w.uvarint(uint64(s.count))
-	}
-	if err := w.close(); err != nil {
-		return fmt.Errorf("commit %s: %s: %w", dir, manifestName, err)
-	}
-	if err := root.Rename(tmp, manifestName); err != nil {
-		return fmt.Errorf("commit %s: publishing manifest: %w", dir, err)
-	}
-	syncDir(root)
 
 	// The commit is durable. Adopt what was just written so a second Commit
 	// does not write these documents again, and so reads of them go through the
@@ -204,6 +214,7 @@ func (ix *Index) Commit(dir string) error {
 	if err := ix.adopt(root, published[len(published)-1]); err != nil {
 		return fmt.Errorf("commit %s: %w", seg, err)
 	}
+	ix.dir = dir
 
 	// The previous generation is unreachable now. Pruning it is best-effort:
 	// the commit above is already durable, and a leftover directory nothing
@@ -285,6 +296,7 @@ func Open(dir string) (*Index, error) {
 			ix.vecDim = s.vecDim
 		}
 	}
+	ix.dir = dir
 	return ix, nil
 }
 
@@ -447,7 +459,7 @@ func readManifest(root *os.Root) (gen uint64, segs []segInfo, err error) {
 	// that does not tile [0, total) contiguously and in order would give two
 	// segments overlapping ids, and Index.segFor would answer with whichever it
 	// walked into first — a wrong document, not an error.
-	next := uint64(0)
+	nextBase := uint64(0)
 	for range n {
 		name, err := r.str("segment name")
 		if err != nil {
@@ -464,14 +476,14 @@ func readManifest(root *os.Root) (gen uint64, segs []segInfo, err error) {
 		if err != nil {
 			return 0, nil, err
 		}
-		if base != next {
+		if base != nextBase {
 			return 0, nil, fmt.Errorf("%s: segment %q starts at document %d, the one before it ended at %d: %w",
-				manifestName, name, base, next, ErrCorrupt)
+				manifestName, name, base, nextBase, ErrCorrupt)
 		}
 		if base > uint64(maxDocCount)-uint64(count) {
 			return 0, nil, fmt.Errorf("%s: segment %q runs past the document ceiling: %w", manifestName, name, ErrCorrupt)
 		}
-		next = base + uint64(count)
+		nextBase = base + uint64(count)
 		segs = append(segs, segInfo{name: name, base: DocID(base), count: count})
 	}
 	if err := r.done(); err != nil {
@@ -480,13 +492,26 @@ func readManifest(root *os.Root) (gen uint64, segs []segInfo, err error) {
 	if len(segs) == 0 {
 		return 0, nil, fmt.Errorf("%s: generation %d names no segments; a commit always publishes one: %w", manifestName, gen, ErrCorrupt)
 	}
-	// The newest segment is named for the generation that wrote it, which is
-	// what Commit needs: it clears the directory it is about to write, so a
-	// manifest whose generation and newest name disagree could aim that
-	// RemoveAll at a segment that is still published.
-	if want := segDirName(gen); segs[len(segs)-1].name != want {
-		return 0, nil, fmt.Errorf("%s: generation %d ends with %q, not %s: %w",
-			manifestName, gen, segs[len(segs)-1].name, want, ErrCorrupt)
+	// Some published segment is named for the generation that published it, and
+	// none is named for the next one. That is what Commit and Merge both need:
+	// each clears seg-<gen+1> before writing it, so a manifest that already
+	// named it would have that RemoveAll aimed at live data.
+	//
+	// Milestone 2 could say something stronger — the *last* segment is named for
+	// gen — because a commit published exactly one. A merge publishes its result
+	// at the front of the list, since it replaces the oldest run, so the
+	// generation's own segment is no longer always last.
+	written, next := segDirName(gen), segDirName(gen+1)
+	found := false
+	for _, s := range segs {
+		if s.name == next {
+			return 0, nil, fmt.Errorf("%s: generation %d already names %s, which the next write clears: %w",
+				manifestName, gen, next, ErrCorrupt)
+		}
+		found = found || s.name == written
+	}
+	if !found {
+		return 0, nil, fmt.Errorf("%s: generation %d names no segment called %s: %w", manifestName, gen, written, ErrCorrupt)
 	}
 	seen := make(map[string]struct{}, len(segs))
 	for _, s := range segs {

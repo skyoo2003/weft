@@ -68,6 +68,11 @@ type Index struct {
 
 	vecDim int // width of the first non-empty vector added; 0 until one is
 
+	// dir is the directory the committed segments live in, set by Open and by a
+	// successful Commit. Merge needs it: it publishes a new manifest, and an
+	// index that was never written anywhere has nothing to merge.
+	dir string
+
 	// segs are the committed segments: mapped, immutable, sorted by base, and
 	// covering [0, base) between them. Reads route here when the answer is not
 	// pending, and nothing about that routing shows up in the six read methods'
@@ -326,7 +331,7 @@ func (ix *Index) Close() error {
 	// than "this index is finished" and would have Len report a corpus whose
 	// front half is gone.
 	ix.docs, ix.byKey, ix.postings, ix.docLen = nil, nil, nil, nil
-	ix.base, ix.totalLen = 0, 0
+	ix.base, ix.totalLen, ix.dir = 0, 0, ""
 	return first
 }
 

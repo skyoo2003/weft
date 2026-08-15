@@ -73,7 +73,7 @@ func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	orphan := New()
 	addAll(t, orphan, []Document{{Key: "ghost", Text: "the corpus that never landed"}})
 	orphanRoot := makeSegDir(t, dir, segDirName(2))
-	if err := orphan.writeSegment(orphanRoot); err != nil {
+	if err := writeSegment(orphanRoot, &pendingSource{ix: orphan}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -335,7 +335,7 @@ func TestFirstCommitOverwritesItsOwnDebris(t *testing.T) {
 	dir := t.TempDir()
 	orphan := New()
 	addAll(t, orphan, []Document{{Key: "ghost", Text: "the corpus that never landed"}})
-	if err := orphan.writeSegment(makeSegDir(t, dir, segDirName(1))); err != nil {
+	if err := writeSegment(makeSegDir(t, dir, segDirName(1)), &pendingSource{ix: orphan}); err != nil {
 		t.Fatal(err)
 	}
 

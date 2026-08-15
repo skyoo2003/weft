@@ -10,10 +10,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io/fs"
-	"maps"
 	"math"
 	"os"
-	"slices"
 	"time"
 )
 
@@ -301,7 +299,7 @@ func (w *segWriter) close() error {
 // one lock, so the statistics in meta and the documents they describe cannot
 // come from different moments — the atomicity FINDINGS section 4.4 asked for,
 // statistics snapshot included.
-func (ix *Index) writeSegment(segRoot *os.Root) error {
+func writeSegment(segRoot *os.Root, src segSource) error {
 	ws := make([]*segWriter, len(segSections))
 	for i, s := range segSections {
 		w, err := newSegWriter(segRoot, s.name, s.kind)
@@ -315,20 +313,21 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 	}
 	meta, docs, post, terms, docoff, keys := ws[0], ws[1], ws[2], ws[3], ws[4], ws[5]
 
-	// No locking here: Commit holds the write lock for its whole duration and
-	// sync.RWMutex is not reentrant, so taking a read lock inside would deadlock
-	// against the caller that already holds the write one. An earlier version
-	// locked here because Commit did not.
+	// No locking here: Commit and Merge both hold the write lock for their whole
+	// duration and sync.RWMutex is not reentrant, so taking a read lock inside
+	// would deadlock against the caller that already holds the write one. An
+	// earlier version locked here because Commit did not.
 	func() {
-		meta.uvarint(uint64(len(ix.docs)))
-		meta.uvarint(uint64(ix.totalLen))
-		meta.uvarint(uint64(ix.vecDim))
+		totalLen, vecDim := src.totals()
+		meta.uvarint(uint64(src.count()))
+		meta.uvarint(uint64(totalLen))
+		meta.uvarint(uint64(vecDim))
 		// docoff records where each record landed, so it is written from what
 		// encodeDocs returns rather than by predicting record sizes twice.
-		offs, lens, docKeys := encodeDocs(docs, ix)
+		offs, lens, docKeys := encodeDocs(docs, src)
 		encodeDocOffsets(docoff, offs, lens)
 		encodeKeys(keys, docKeys)
-		encodePostings(post, terms, ix)
+		encodePostings(post, terms, src)
 	}()
 
 	for i, w := range ws {
@@ -368,12 +367,13 @@ func (ix *Index) writeSegment(segRoot *os.Root) error {
 // says where the segment sits in the index — so a segment's bytes do not depend
 // on what was committed before it, which is what lets an old generation survive
 // a new one untouched.
-func encodeDocs(w *segWriter, ix *Index) (offs, lens []int, keys []string) {
-	n := len(ix.docs)
+func encodeDocs(w *segWriter, src segSource) (offs, lens []int, keys []string) {
+	n := src.count()
 	w.uvarint(uint64(n))
 	offs, lens, keys = make([]int, n), make([]int, n), make([]string, n)
-	for i, d := range ix.docs {
-		lens[i] = ix.docLen[i]
+	for i := range n {
+		d := src.doc(i)
+		lens[i] = src.docLen(i)
 		keys[i] = d.Key
 		offs[i] = w.off()
 		w.beginUnit(uint64(i))
@@ -396,9 +396,6 @@ func encodeDocs(w *segWriter, ix *Index) (offs, lens []int, keys []string) {
 	}
 	return offs, lens, keys
 }
-
-// localOf turns an index-wide DocID into the pending segment's local one.
-func localOf(ix *Index, id DocID) int { return int(uint64(id) - uint64(ix.base)) }
 
 // encodePostings writes the postings file and the terms index side by side.
 // Requires ix.mu to be held.
@@ -424,8 +421,8 @@ func localOf(ix *Index, id DocID) int { return int(uint64(id) - uint64(ix.base))
 // Each block carries maxDocID, maxTF and minDocLen (D-001): segment-local,
 // immutable, and together the block's true BM25 score ceiling under whatever
 // the collection statistics are at query time.
-func encodePostings(post, terms *segWriter, ix *Index) {
-	keys := slices.Sorted(maps.Keys(ix.postings))
+func encodePostings(post, terms *segWriter, src segSource) {
+	keys := src.termList()
 	post.uvarint(uint64(len(keys)))
 	terms.uvarint(uint64(len(keys)))
 
@@ -437,7 +434,7 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 		terms.uvarint(uint64(post.off()))
 		terms.endUnit()
 
-		pl := ix.postings[t]
+		pl := src.postings(t)
 		post.uvarint(uint64((len(pl) + blockSize - 1) / blockSize))
 
 		for start := 0; start < len(pl); start += blockSize {
@@ -445,19 +442,19 @@ func encodePostings(post, terms *segWriter, ix *Index) {
 			maxTF, minDL := 0, maxInt
 			for _, p := range blk {
 				maxTF = max(maxTF, p.Freq)
-				minDL = min(minDL, ix.docLen[localOf(ix, p.Doc)])
+				minDL = min(minDL, src.docLen(int(p.Doc)))
 			}
 			// A block's own file offset seeds its checksum: blocks are
 			// independently decodable by design (D-001), so nothing else stops
 			// one being served in place of another term's.
 			post.beginUnit(uint64(post.off()))
 			post.uvarint(uint64(len(blk)))
-			post.uvarint(uint64(blk[len(blk)-1].Doc) - uint64(ix.base)) // maxDocID, segment-local
+			post.uvarint(uint64(blk[len(blk)-1].Doc)) // maxDocID
 			post.uvarint(uint64(maxTF))
 			post.uvarint(uint64(minDL))
 			prev := uint64(0)
 			for i, p := range blk {
-				id := uint64(p.Doc) - uint64(ix.base)
+				id := uint64(p.Doc)
 				if i == 0 {
 					post.uvarint(id)
 				} else {

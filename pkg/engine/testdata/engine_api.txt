@@ -12,6 +12,7 @@ method Index.Doc(DocID) (Document, bool)
 method Index.DocLen(DocID) int
 method Index.Len() int
 method Index.Lookup(string) []Posting
+method Index.Merge() error
 method Index.Resolve(string) (DocID, bool)
 method Index.Stats() (int, float64)
 package engine
