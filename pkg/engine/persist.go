@@ -421,43 +421,205 @@ func Scrub(dir string) error {
 	// duplicate cannot arrive through the API and can arrive by copying a
 	// segment directory in. A copied directory is what this function is for.
 	//
-	// This holds one entry per key, which is the vocabulary of keys rather than
-	// the corpus, and small beside the segment loadSegment already materializes.
-	keys := make(map[string]string, 0)
+	// One entry per document, which is the largest thing a scrub keeps and is
+	// the size of the document count rather than of the corpus. Each segment's
+	// walk fills it and the next one reads it, so a key two segments claim is
+	// caught where a per-segment check cannot see it.
+	found := make(map[string]scrubbedKey)
 	vecDim := 0
 	for _, seg := range segs {
-		ix, err := loadSegment(root, seg.name, true)
+		width, err := scrubSegment(root, seg, found)
 		if err != nil {
 			return fmt.Errorf("scrub %s: %w", seg.name, err)
 		}
-		// The manifest's count and meta's are written by the same commit and
-		// read by different paths, and every base after this segment was
-		// computed from the manifest's. Open compares the two; without the same
-		// comparison here, Scrub reports success for a directory Open refuses,
-		// which is backwards for the check a caller runs before trusting one.
-		if len(ix.docs) != seg.count {
-			return fmt.Errorf("scrub %s: the manifest says %d documents, the segment holds %d: %w",
-				seg.name, seg.count, len(ix.docs), ErrCorrupt)
-		}
-		// The same one-width-per-index rule Open now applies. loadSegment
-		// establishes each segment's width from its own documents; nothing
-		// compared one segment's against the next's.
-		if ix.vecDim != 0 {
-			if vecDim != 0 && ix.vecDim != vecDim {
+		// The same one-width-per-index rule Open applies. Each segment's width
+		// comes from its own documents; nothing compared one segment's against
+		// the next's.
+		if width != 0 {
+			if vecDim != 0 && width != vecDim {
 				return fmt.Errorf("scrub %s: vectors are %d wide, an earlier segment's are %d: %w",
-					seg.name, ix.vecDim, vecDim, ErrCorrupt)
+					seg.name, width, vecDim, ErrCorrupt)
 			}
-			vecDim = ix.vecDim
-		}
-		for key := range ix.byKey {
-			if prev, dup := keys[key]; dup {
-				return fmt.Errorf("scrub %s: key %q is also held by %s: %w",
-					seg.name, key, prev, ErrCorrupt)
-			}
-			keys[key] = seg.name
+			vecDim = width
 		}
 	}
 	return nil
+}
+
+// scrubbedKey is where a key was found: the segment holding it, and the
+// segment-local id of the record whose first field carries it.
+type scrubbedKey struct {
+	seg string
+	id  DocID
+}
+
+// scrubSegment verifies every byte of one segment without holding it, and
+// returns the vector width its documents establish.
+//
+// This is what loading a segment used to be, minus the segment. The eager path
+// decoded every document, vector, link and posting onto the Go heap in order to
+// check them — and the index a caller scrubs is the one that is mapped rather
+// than loaded because it does not fit, so "is this index intact" could be
+// answered by the process dying. Every unit here is checkable on its own, so
+// each is decoded, checked and dropped.
+//
+// What outlives a document is its key and its token count: the keys because
+// uniqueness is an index-wide rule and the caller carries the map from one
+// segment to the next, the lengths because the postings are checked against them
+// and the postings file is read after the documents. Both are the size of the
+// document count.
+func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (int, error) {
+	segRoot, err := root.OpenRoot(info.name)
+	if err != nil {
+		// Same reasoning as openSection: the manifest named it, so a segment
+		// that is missing — or is a plain file standing where its directory
+		// belongs, or a symlink the root refuses to follow out of the index
+		// directory, both foreign layouts and not an index of ours — is damage
+		// rather than an index that was never written. A directory that is
+		// genuinely there and still will not open is the filesystem refusing us,
+		// not corruption, and reports as itself. Lstat, not Stat, for the reason
+		// openSection gives: Stat follows the link in question.
+		fi, serr := root.Lstat(info.name)
+		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.IsDir()) {
+			return 0, fmt.Errorf("the manifest names this segment but no directory stands there: %w", ErrCorrupt)
+		}
+		return 0, err
+	}
+	defer segRoot.Close()
+
+	rs := make([]*segReader, len(segSections))
+	// Every mapping is released before this returns, and nothing outliving the
+	// call points into one: a key is a string the decoder copied, a token count
+	// is an int.
+	maps := make([][]byte, 0, len(segSections))
+	defer func() {
+		for _, b := range maps {
+			unmapFile(b) //nolint:errcheck,gosec // nothing left to do about it here
+		}
+	}()
+	for i, s := range segSections {
+		// Every frame checksum. That is the one check whose cost is the size of
+		// its section, and therefore the single difference between what Open
+		// reads and what this does: damage in bytes no decoder reaches is
+		// visible here and nowhere else.
+		r, b, err := openSection(segRoot, s.name, s.kind, true)
+		if err != nil {
+			return 0, err
+		}
+		maps = append(maps, b)
+		rs[i] = r
+	}
+	metaR, docsR, postR, termsR, docoffR, keysR := rs[0], rs[1], rs[2], rs[3], rs[4], rs[5]
+
+	docCount, totalLen, vecDim, err := decodeMeta(metaR)
+	if err != nil {
+		return 0, err
+	}
+	offs, err := parseDocOffsets(docoffR)
+	if err != nil {
+		return 0, err
+	}
+
+	docLen, sumLen, width, err := scrubDocs(docsR, offs, info.name, found)
+	if err != nil {
+		return 0, err
+	}
+	// The manifest's count and meta's are written by the same commit and read by
+	// different paths, and every base after this segment was computed from the
+	// manifest's. Open compares the two; without the same comparison here, Scrub
+	// reports success for a directory Open refuses, which is backwards for the
+	// check a caller runs before trusting one.
+	if len(docLen) != info.count {
+		return 0, fmt.Errorf("the manifest says %d documents, the segment holds %d: %w",
+			info.count, len(docLen), ErrCorrupt)
+	}
+	// meta is the statistics snapshot BM25 trusts, so it does not get to
+	// disagree with the documents it describes.
+	if docCount != len(docLen) || totalLen != sumLen || vecDim != width {
+		return 0, fmt.Errorf("meta says %d docs/%d tokens/%d dims, documents hold %d/%d/%d: %w",
+			docCount, totalLen, vecDim, len(docLen), sumLen, width, ErrCorrupt)
+	}
+	if err := verifyKeyTable(keysR, info.name, len(docLen), found); err != nil {
+		return 0, err
+	}
+	if err := decodePostings(postR, termsR, docLen); err != nil {
+		return 0, err
+	}
+	return width, nil
+}
+
+// scrubDocs walks the docs section front to back, checking each record against
+// its own checksum, against the docoff entry pointing at it and against the
+// records before it. It returns what the rest of the segment is checked against:
+// the token counts, their sum, and the vector width.
+//
+// The invariants re-checked here are the ones the write path enforces — keys
+// unique and non-empty, vector components finite and uniformly wide — because
+// scorer/vector builds on ErrNonFiniteVector's promise by not re-checking
+// documents, and the decoder re-validating is what keeps that promise true for
+// restored corpora.
+func scrubDocs(docsR *segReader, offs docOffsets, seg string, found map[string]scrubbedKey) (docLen []int, totalLen, vecDim int, err error) {
+	n, err := docsR.intn("document count", maxDocCount)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if offs.n != n {
+		return nil, 0, 0, fmt.Errorf("%s indexes %d documents, %s holds %d: %w",
+			offs.name, offs.n, docsR.name, n, ErrCorrupt)
+	}
+
+	// One int per document. The count is bounded by maxDocCount and by what the
+	// docoff table physically holds — sixteen bytes an entry, checked above — so
+	// a hostile count cannot make this allocate more than the segment could back.
+	docLen = make([]int, n)
+	for i := range n {
+		// Where the record actually begins, absolute, the way docoff records it.
+		// The entry is compared against this rather than followed and decoded:
+		// the same question, since a record's checksum is seeded with its own id
+		// and only that record's bytes verify under it — and without the second
+		// full decode of the corpus that following every entry costs.
+		at := segHeaderLen + docsR.off
+		off, ok := offs.at(DocID(i))
+		if !ok {
+			return nil, 0, 0, fmt.Errorf("%s: offset %d is unusable on this platform: %w", offs.name, i, ErrCorrupt)
+		}
+		if off != at {
+			return nil, 0, 0, fmt.Errorf("%s: document %d is recorded at offset %d, its record begins at %d: %w",
+				offs.name, i, off, at, ErrCorrupt)
+		}
+		d, dl, err := decodeDocRecord(docsR, i)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		// The token count is written twice — in the record and in the table — so
+		// the two are compared. A copy nobody checks is what D-001 calls rot, and
+		// this one is the copy every BM25 score is computed from.
+		if got := offs.docLen(DocID(i)); got != dl {
+			return nil, 0, 0, fmt.Errorf("%s: document %d is %d tokens, its record says %d: %w",
+				offs.name, i, got, dl, ErrCorrupt)
+		}
+		if prev, dup := found[d.Key]; dup {
+			if prev.seg == seg {
+				return nil, 0, 0, fmt.Errorf("%s: documents %d and %d both hold key %q: %w",
+					docsR.name, prev.id, i, d.Key, ErrCorrupt)
+			}
+			return nil, 0, 0, fmt.Errorf("key %q is also held by %s: %w", d.Key, prev.seg, ErrCorrupt)
+		}
+		if dl > maxInt-totalLen {
+			return nil, 0, 0, fmt.Errorf("%s: document lengths overflow their sum: %w", docsR.name, ErrCorrupt)
+		}
+		if vn := len(d.Vector); vn > 0 {
+			if vecDim == 0 {
+				vecDim = vn
+			} else if vn != vecDim {
+				return nil, 0, 0, fmt.Errorf("%s: document %d vector is %d wide, corpus is %d: %w", docsR.name, i, vn, vecDim, ErrCorrupt)
+			}
+		}
+		found[d.Key] = scrubbedKey{seg: seg, id: DocID(i)}
+		docLen[i] = dl
+		totalLen += dl
+	}
+	return docLen, totalLen, vecDim, docsR.done()
 }
 
 // sameDir reports whether two paths name the same directory. Both must exist:
@@ -472,85 +634,6 @@ func sameDir(a, b string) (bool, error) {
 		return false, err
 	}
 	return os.SameFile(fa, fb), nil
-}
-
-// loadSegment reads one segment directory into an Index. frame says whether to
-// compute each section's whole-file checksum — the one check whose cost is the
-// size of the index, and therefore the single difference between what Open does
-// and what Scrub does.
-//
-// Both paths run every other check. A segment that loads here has had its
-// documents, postings, block metadata and both seek sections re-derived and
-// compared against what the file records; frame only adds the ability to notice
-// damage in bytes no decoder reads.
-func loadSegment(root *os.Root, seg string, frame bool) (*Index, error) {
-	segRoot, err := root.OpenRoot(seg)
-	if err != nil {
-		// Same reasoning as openSection: the manifest named it, so a segment
-		// that is missing — or is a plain file standing where its directory
-		// belongs, or a symlink the root refuses to follow out of the index
-		// directory, both foreign layouts and not an index of ours — is damage
-		// rather than an index that was never written. A directory that is
-		// genuinely there and still will not open is the filesystem refusing
-		// us, not corruption, and reports as itself. Lstat, not Stat, for the
-		// reason openSection gives: Stat follows the link in question.
-		fi, serr := root.Lstat(seg)
-		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.IsDir()) {
-			return nil, fmt.Errorf("the manifest names this segment but no directory stands there: %w", ErrCorrupt)
-		}
-		return nil, err
-	}
-	defer segRoot.Close()
-
-	rs := make([]*segReader, len(segSections))
-	// Every mapping is released before this returns. The decoders below copy
-	// what they keep — segReader.str allocates a string, vectors are built with
-	// make — so nothing in the returned Index points into a region that is
-	// about to be gone. That stops being true the moment the index reads
-	// lazily, and the mappings will have to outlive this function then.
-	maps := make([][]byte, 0, len(segSections))
-	defer func() {
-		for _, b := range maps {
-			unmapFile(b) //nolint:errcheck,gosec // nothing left to do about it here
-		}
-	}()
-	for i, s := range segSections {
-		r, b, err := openSection(segRoot, s.name, s.kind, frame)
-		if err != nil {
-			return nil, err
-		}
-		maps = append(maps, b)
-		rs[i] = r
-	}
-	metaR, docsR, postR, termsR, docoffR, keysR := rs[0], rs[1], rs[2], rs[3], rs[4], rs[5]
-
-	docCount, totalLen, vecDim, err := decodeMeta(metaR)
-	if err != nil {
-		return nil, err
-	}
-	ix, err := decodeDocs(docsR)
-	if err != nil {
-		return nil, err
-	}
-	// The seek sections are checked against the documents they claim to index.
-	// Nothing on this path reads them afterwards — the index is still decoded
-	// eagerly — so without this they would be write-only until the lazy reader
-	// arrives and discovers they have been wrong all along. That is D-001's rot
-	// problem in a new place, and it gets D-001's answer: re-derive what the
-	// section records and refuse a disagreement.
-	if err := verifySeekSections(docoffR, keysR, docsR, ix); err != nil {
-		return nil, err
-	}
-	// meta is the statistics snapshot BM25 trusts, so it does not get to
-	// disagree with the documents it describes.
-	if docCount != len(ix.docs) || totalLen != ix.totalLen || vecDim != ix.vecDim {
-		return nil, fmt.Errorf("meta says %d docs/%d tokens/%d dims, documents hold %d/%d/%d: %w",
-			docCount, totalLen, vecDim, len(ix.docs), ix.totalLen, ix.vecDim, ErrCorrupt)
-	}
-	if err := decodePostings(postR, termsR, ix); err != nil {
-		return nil, err
-	}
-	return ix, nil
 }
 
 // readManifest reads and decodes dir's manifest. Segment names come off disk,

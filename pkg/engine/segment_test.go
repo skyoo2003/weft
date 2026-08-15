@@ -770,15 +770,10 @@ func TestOtherVersionsAreRefusedNotMisread(t *testing.T) {
 // never a panic, never runaway allocation.
 // ---------------------------------------------------------------------------
 
-func fuzzHost() *Index {
-	host := New()
-	for i := range 3 {
-		host.docs = append(host.docs, Document{Key: fmt.Sprintf("k%d", i)})
-		host.docLen = append(host.docLen, 4)
-		host.totalLen += 4
-	}
-	return host
-}
+// fuzzDocLen stands in for a docs section that did not decode, so the postings
+// decoder still gets a plausible corpus to be checked against rather than an
+// empty one that refuses at the first posting.
+func fuzzDocLen() []int { return []int{4, 4, 4} }
 
 func FuzzSegmentDecoding(f *testing.F) {
 	ix := New()
@@ -801,18 +796,27 @@ func FuzzSegmentDecoding(f *testing.F) {
 		}
 		return b[segHeaderLen : len(b)-crc32.Size]
 	}
-	f.Add(payload(metaFile), payload(docsFile), payload(postingsFile), payload(termsFile))
-	f.Add([]byte{}, []byte{}, []byte{}, []byte{})
+	f.Add(payload(metaFile), payload(docsFile), payload(postingsFile), payload(termsFile), payload(docoffFile), payload(keysFile))
+	f.Add([]byte{}, []byte{}, []byte{}, []byte{}, []byte{}, []byte{})
 
-	f.Fuzz(func(t *testing.T, meta, docs, postings, terms []byte) {
+	// All six sections, in the order and the combination Scrub reads them: the
+	// docs walk is driven by a fuzzed offset table, and the keys section is
+	// checked against whatever that walk collected. Four of them used to be
+	// fuzzed and the two seek sections were reachable only through a real
+	// commit, which left the decoders that read arbitrary bytes for a living
+	// unfuzzed.
+	f.Fuzz(func(t *testing.T, meta, docs, postings, terms, docoff, keys []byte) {
 		// Errors are the expected outcome for almost every input; the
 		// assertion is the absence of panics.
-		_, _, _, _ = decodeMeta(&segReader{name: "meta", b: meta})
-		host := fuzzHost()
-		if ix, err := decodeDocs(&segReader{name: "docs", b: docs}); err == nil {
-			host = ix // decoded docs make the most interesting postings host
+		_, _, _, _ = decodeMeta(&segReader{name: metaFile, b: meta})
+		offs, _ := parseDocOffsets(&segReader{name: docoffFile, b: docoff})
+		found := map[string]scrubbedKey{}
+		docLen, _, _, err := scrubDocs(&segReader{name: docsFile, b: docs}, offs, "seg", found)
+		if err != nil {
+			docLen = fuzzDocLen()
 		}
-		_ = decodePostings(&segReader{name: "postings", b: postings}, &segReader{name: "terms", b: terms}, host)
+		_ = verifyKeyTable(&segReader{name: keysFile, b: keys}, "seg", len(docLen), found)
+		_ = decodePostings(&segReader{name: postingsFile, b: postings}, &segReader{name: termsFile, b: terms}, docLen)
 	})
 }
 

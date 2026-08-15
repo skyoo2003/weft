@@ -241,65 +241,29 @@ func (k keyTable) at(i int) (string, DocID, error) {
 	return key, DocID(id), nil
 }
 
-// verifySeekSections re-derives both sections from the documents they index and
+// verifyKeyTable re-derives the keys section from the documents it indexes and
 // refuses a disagreement.
 //
-// This is D-001's rule applied to two new places: a structure written now and
-// read later rots silently, so the decoder checks it on every Open rather than
-// waiting for a test run — or, worse, for the milestone that first trusts it.
-// A keys section that disagreed with docs would not fail loudly; it would
-// resolve a Key to the wrong document and rank a plausible-looking wrong
-// answer.
+// This is D-001's rule applied to a structure milestone 3 writes and nothing on
+// the verification path otherwise reads: a section written now and trusted later
+// rots silently, and a keys section that disagreed with docs would not fail
+// loudly — it would resolve a Key to the wrong document and rank a
+// plausible-looking wrong answer.
 //
-// It reads every entry, which is O(index) and exactly what milestone 3's lazy
-// Open cannot afford. That is why it is one function: moving verification into
-// Scrub is then a call site moving, not a rule being dropped.
-func verifySeekSections(docoffR, keysR, docsR *segReader, ix *Index) error {
-	offs, err := parseDocOffsets(docoffR)
-	if err != nil {
-		return err
-	}
-	if offs.n != len(ix.docs) {
-		return fmt.Errorf("%s indexes %d documents, %s holds %d: %w",
-			offs.name, offs.n, docsR.name, len(ix.docs), ErrCorrupt)
-	}
-	for id := range ix.docs {
-		off, ok := offs.at(DocID(id))
-		if !ok {
-			return fmt.Errorf("%s: offset %d is unusable on this platform: %w", offs.name, id, ErrCorrupt)
-		}
-		if off < segHeaderLen || off-segHeaderLen > len(docsR.b) {
-			return fmt.Errorf("%s: document %d sits at offset %d, outside %s: %w",
-				offs.name, id, off, docsR.name, ErrCorrupt)
-		}
-		r := &segReader{name: docsR.name, b: docsR.b, off: off - segHeaderLen}
-		d, dl, err := decodeDocRecord(r, id)
-		if err != nil {
-			return err
-		}
-		// The token count is written twice — in the record and in this table —
-		// so the two are compared. A copy nobody checks is what D-001 calls
-		// rot, and this one is the copy every BM25 score is computed from.
-		if got := offs.docLen(DocID(id)); got != dl {
-			return fmt.Errorf("%s: document %d is %d tokens, its record says %d: %w",
-				offs.name, id, got, dl, ErrCorrupt)
-		}
-		// Key equality is the whole check. Landing one byte early or late
-		// almost always fails to decode at all, and the case that does not —
-		// an offset pointing at a different real record — is exactly what
-		// comparing the key catches.
-		if d.Key != ix.docs[id].Key {
-			return fmt.Errorf("%s: document %d points at %q, which is document %q: %w",
-				offs.name, id, d.Key, ix.docs[id].Key, ErrCorrupt)
-		}
-	}
-
+// found is what the docs walk collected, one entry per key. It is read here
+// rather than rebuilt, because that map is the size of the document count and a
+// second one alongside it would double the only thing a scrub keeps. The docoff
+// half of this check lives in the walk itself for the same reason: comparing an
+// entry against where the record actually starts asks the same question as
+// following the entry and decoding that record a second time, at none of the
+// cost.
+func verifyKeyTable(keysR *segReader, seg string, n int, found map[string]scrubbedKey) error {
 	kt, err := parseKeyTable(keysR)
 	if err != nil {
 		return err
 	}
-	if kt.n != len(ix.byKey) {
-		return fmt.Errorf("%s indexes %d keys, the corpus has %d: %w", kt.name, kt.n, len(ix.byKey), ErrCorrupt)
+	if kt.n != n {
+		return fmt.Errorf("%s indexes %d keys, the segment holds %d documents: %w", kt.name, kt.n, n, ErrCorrupt)
 	}
 	prev := ""
 	for i := range kt.n {
@@ -313,9 +277,15 @@ func verifySeekSections(docoffR, keysR, docsR *segReader, ix *Index) error {
 			return fmt.Errorf("%s: key %q out of order after %q: %w", kt.name, key, prev, ErrCorrupt)
 		}
 		prev = key
-		if want, ok := ix.byKey[key]; !ok || want != id {
-			return fmt.Errorf("%s: key %q maps to document %d, the corpus says %d (present: %v): %w",
-				kt.name, key, id, want, ok, ErrCorrupt)
+		// The entry has to name the document whose own record carries this key,
+		// in this segment. A key held by another segment's documents is as wrong
+		// here as one held by none: kt.n entries, sorted and therefore distinct,
+		// each matching a distinct record, is what makes this table the bijection
+		// Resolve treats it as.
+		want, ok := found[key]
+		if !ok || want.seg != seg || want.id != id {
+			return fmt.Errorf("%s: key %q maps to document %d, which is not the document whose record carries it: %w",
+				kt.name, key, id, ErrCorrupt)
 		}
 	}
 	return nil

@@ -936,15 +936,17 @@ func TestMergeDoesNotBufferPostingLists(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	allocated := after.TotalAlloc - before.TotalAlloc
 
-	// The segment itself, once. Not a fraction of it, and the difference is
-	// stated rather than left to be inferred: a merge decodes every document in
-	// order to write it again, so the records it copies are a floor no amount of
-	// streaming removes. What must not be there is a *multiple* of the corpus,
-	// which is what holding posting lists adds — sixteen bytes for every two on
-	// disk, doubled again by the concatenation.
-	if int64(allocated) > onDisk {
-		t.Fatalf("Merge allocated %d bytes over a %d-byte segment — it is still holding posting lists rather than streaming them",
-			allocated, onDisk)
+	// Twice the segment, and the slack is named rather than left to be inferred.
+	// A merge decodes every document in order to write it again, so one copy of
+	// the records is a floor no amount of streaming removes, and on this corpus
+	// that floor is most of the segment by itself. What the bound is here to
+	// catch is a *multiple* of the corpus — the sixteen bytes a posting costs in
+	// memory against the two it costs on disk, doubled again by the
+	// concatenation — and that failure is nowhere near this line: holding the
+	// lists allocated 108 MB over a 4 MB segment when this was written.
+	if limit := onDisk * 2; int64(allocated) > limit {
+		t.Fatalf("Merge allocated %d bytes over a %d-byte segment, over the %d-byte limit — it is still holding posting lists rather than streaming them",
+			allocated, onDisk, limit)
 	}
 	t.Logf("segment %d bytes on disk, Merge allocated %d", onDisk, allocated)
 }
@@ -988,11 +990,13 @@ func TestScrubDoesNotMaterializeTheSegment(t *testing.T) {
 	allocated := after.TotalAlloc - before.TotalAlloc
 
 	// Same bound and same reason as the merge above: verifying a record means
-	// decoding it, so the records are a floor. A second decode of every one of
-	// them, or a posting list kept until the segment is finished, is not.
-	if int64(allocated) > onDisk {
-		t.Fatalf("Scrub allocated %d bytes verifying a %d-byte segment — it is still materializing the segment rather than walking it",
-			allocated, onDisk)
+	// decoding it, so one pass over the records is the floor. A second decode of
+	// every one of them, or a posting list held until the segment is finished,
+	// is not — and that failure is nowhere near this line either: materializing
+	// the segment allocated 60 MB over a 4 MB one when this was written.
+	if limit := onDisk * 2; int64(allocated) > limit {
+		t.Fatalf("Scrub allocated %d bytes verifying a %d-byte segment, over the %d-byte limit — it is still materializing the segment rather than walking it",
+			allocated, onDisk, limit)
 	}
 	t.Logf("segment %d bytes on disk, Scrub allocated %d", onDisk, allocated)
 }

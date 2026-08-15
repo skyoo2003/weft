@@ -41,20 +41,21 @@ type segSource interface {
 	doc(local int) Document
 	docLen(local int) int
 	termList() []string // sorted
-	postings(term string) []Posting
+	// postings hands term's postings to yield, ascending by segment-local
+	// DocID, and reports how many it handed over.
+	//
+	// Streamed rather than returned, because a term present in most of the
+	// corpus has a posting list the size of the corpus — and a merge reads
+	// segments that were mapped rather than loaded precisely because they do
+	// not fit. It is called twice per term: once to count, since the block
+	// count stands in front of the blocks on disk, and once to emit.
+	postings(term string, yield func(Posting)) int
 }
 
 // pendingSource is the in-memory half of an Index: everything added since the
 // last commit. Requires ix.mu.
-//
-// buf is reused across terms rather than allocated per term. The pending
-// postings carry index-wide ids and a segment records local ones, so every term
-// needs a translated copy — and allocating one per term put 9 MB back on a
-// commit that had just been measured down to 588 KB. encodePostings finishes
-// with each term before asking for the next, so one buffer is enough.
 type pendingSource struct {
-	ix  *Index
-	buf []Posting
+	ix *Index
 }
 
 func (p *pendingSource) count() int { return len(p.ix.docs) }
@@ -81,13 +82,17 @@ func (p *pendingSource) doc(local int) Document { return p.ix.docs[local] }
 func (p *pendingSource) docLen(local int) int   { return p.ix.docLen[local] }
 func (p *pendingSource) termList() []string     { return slices.Sorted(maps.Keys(p.ix.postings)) }
 
-func (p *pendingSource) postings(t string) []Posting {
+// postings translates as it yields. The pending postings carry index-wide ids
+// and a segment records local ones, so every term needs its ids shifted — which
+// used to mean a copy per term, 9 MB back on a commit measured down to 588 KB,
+// and then one reused buffer to take that 9 MB off again. Yielding the shifted
+// posting needs neither.
+func (p *pendingSource) postings(t string, yield func(Posting)) int {
 	pl := p.ix.postings[t]
-	p.buf = append(p.buf[:0], pl...)
-	for i := range p.buf {
-		p.buf[i].Doc -= p.ix.base
+	for _, e := range pl {
+		yield(Posting{Doc: e.Doc - p.ix.base, Freq: e.Freq})
 	}
-	return p.buf
+	return len(pl)
 }
 
 // mergedSource concatenates a run of adjacent segments.
@@ -187,8 +192,8 @@ func (m *mergedSource) termList() []string {
 	return slices.Sorted(maps.Keys(seen))
 }
 
-func (m *mergedSource) postings(t string) []Posting {
-	var out []Posting
+func (m *mergedSource) postings(t string, yield func(Posting)) int {
+	total := 0
 	for _, s := range m.segs {
 		// Each segment that claims the term is asked separately, and each one
 		// has to answer. Checking only that something came back would let a
@@ -203,21 +208,21 @@ func (m *mergedSource) postings(t string) []Posting {
 		if _, claimed := s.terms[t]; !claimed {
 			continue
 		}
-		pl := s.lookup(t)
-		if len(pl) == 0 {
+		n := s.scanPostings(t, func(e Posting) {
+			yield(Posting{Doc: e.Doc - m.base, Freq: e.Freq})
+		})
+		if n == 0 {
 			m.failf("merge: the segment at %d indexes term %q and its postings do not decode", s.base, t)
 			continue
 		}
-		for _, e := range pl {
-			out = append(out, Posting{Doc: e.Doc - m.base, Freq: e.Freq})
-		}
+		total += n
 	}
 	// termList only names terms some segment's index holds, so nothing at all
 	// coming back means no segment claimed a term every segment was asked about.
-	if len(out) == 0 {
+	if total == 0 {
 		m.failf("merge: term %q has postings in no segment being merged", t)
 	}
-	return out
+	return total
 }
 
 // Merge collapses the oldest segments into one until the index holds at most
