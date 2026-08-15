@@ -311,6 +311,10 @@ func (ix *Index) Close() error {
 	// front half is gone.
 	ix.docs, ix.byKey, ix.postings, ix.docLen = nil, nil, nil, nil
 	ix.base, ix.totalLen, ix.dir = 0, 0, ""
+	// vecDim goes with them. It is the width the corpus established, and keeping
+	// it past a Close that dropped that corpus would have a closed index refuse
+	// an Add for mismatching a vector it no longer holds.
+	ix.vecDim = 0
 	return first
 }
 

@@ -170,6 +170,19 @@ func (ix *Index) Commit(dir string) error {
 			dir, stored, ix.base, ErrCorrupt)
 	}
 
+	// Nothing pending: an empty generation would grow the manifest and the
+	// segment list without holding a document, and nothing bounds how often a
+	// caller may ask. Every point query walks that list, so the cost of a no-op
+	// Commit would land on every read after it.
+	//
+	// Checked after the agreement above, not before, so a Commit against the
+	// wrong directory still reports rather than quietly succeeding. And only
+	// when a generation already exists: the first Commit on an empty index is
+	// how an empty index gets written at all, which restore asks for.
+	if len(ix.docs) == 0 && gen > 0 {
+		return nil
+	}
+
 	// readManifest has already established that the newest live segment is
 	// named for gen and that gen+1 does not wrap, and refuseForeignEntries has
 	// done the same job for a directory with no manifest at all, so the
@@ -646,8 +659,9 @@ func readDir(root *os.Root, name string) ([]fs.DirEntry, error) {
 // commit means older generations are still live, and deleting one would take
 // the front of the corpus with it.
 //
-// Only Commit calls this, and only after its own rename: weft's single writer
-// is the one party that knows no other segment is being written right now.
+// Commit and Merge call this, and only after their own rename: weft's single
+// writer is the one party that knows no other segment is being written right
+// now.
 func prune(root *os.Root, keep []segInfo) {
 	root.Remove(manifestName + ".tmp") //nolint:errcheck,gosec // best-effort by design, see above
 	live := make(map[string]struct{}, len(keep))

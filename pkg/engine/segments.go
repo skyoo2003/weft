@@ -104,6 +104,14 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 	if s.keys, err = parseKeyTable(keysR); err != nil {
 		return nil, err
 	}
+	// And the same cross-check for the other seek table. Keys are unique and
+	// every document has one, so the table indexes exactly as many keys as meta
+	// counts documents — FORMAT.md section 5 refuses either seek table
+	// disagreeing with meta, and this is the keys half of that rule.
+	if s.keys.n != s.count {
+		return nil, fmt.Errorf("%s: meta says %d documents, %s indexes %d keys: %w",
+			metaR.name, s.count, keysFile, s.keys.n, ErrCorrupt)
+	}
 	if s.terms, err = decodeTermIndex(termsR); err != nil {
 		return nil, err
 	}
@@ -170,10 +178,45 @@ func (s *segment) docLen(id DocID) int {
 // index-wide, so a caller never sees a segment-local one.
 func (s *segment) resolve(key string) (DocID, bool) {
 	id, ok, err := s.keys.lookup(key)
-	if err != nil || !ok {
+	// The id comes off disk with nothing but the section's own extent behind it:
+	// a keys entry carries no seeded checksum, so unlike a document record it
+	// cannot prove which document it names. Ranging it against this segment's
+	// own count is the guard, at the point of use — the same placement and the
+	// same reason as lookup's guard on a term offset. Without it a damaged entry
+	// resolves a key past this segment's ids and into a neighbour's, and Doc
+	// answers with a real document that is not the one asked for.
+	if err != nil || !ok || uint64(id) >= uint64(s.count) {
+		return 0, false
+	}
+	// The range guard stops a damaged id leaving this segment. It does not stop
+	// one landing on the wrong document inside it, which is the same plausible
+	// wrong answer one segment further in. So the entry has to agree with the
+	// record it names — the record is the witness the entry itself does not
+	// carry. Its key is its first field, so asking costs one offset lookup and
+	// one string decode, against the log2(n) of exactly that which the binary
+	// search above has already paid.
+	if got, ok := s.keyAt(id); !ok || got != key {
 		return 0, false
 	}
 	return s.base + id, true
+}
+
+// keyAt decodes the key of the record for a segment-local id, and nothing else:
+// the key is the record's first field, so the text, the vector and the links
+// stay on disk.
+//
+// It does not verify the record's seeded checksum, which would mean reading the
+// whole record — the cost doc pays and this deliberately does not. Two
+// independently written structures agreeing on the key is the question being
+// asked, and the first field answers it.
+func (s *segment) keyAt(local DocID) (string, bool) {
+	off, ok := s.offs.at(local)
+	if !ok || off < segHeaderLen || off-segHeaderLen > len(s.docs) {
+		return "", false
+	}
+	r := &segReader{name: docsFile, b: s.docs, off: off - segHeaderLen}
+	got, err := r.str("document key")
+	return got, err == nil
 }
 
 // lookup decodes the postings for term, ascending by index-wide DocID, or nil
