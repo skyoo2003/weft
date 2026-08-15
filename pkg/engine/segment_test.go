@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -608,6 +609,68 @@ func TestUnsortedTermsAreRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "out of order") {
 		t.Fatalf("Open failed for the wrong reason: %v", err)
 	}
+}
+
+// TestCommitDoesNotBufferTheSegment pins the writer's memory cost against the
+// segment's size.
+//
+// segWriter accumulates a whole section and writes it on close, and its own
+// comment calls that fine "by construction — the section describes an index
+// that is itself entirely in memory". True for milestone 2 and false for the
+// task that needs it next: merging segments reads from disk and writes to disk,
+// and the corpus it moves is exactly what will not fit in memory. A writer that
+// doubles a section in RAM cannot serve it.
+//
+// TotalAlloc rather than HeapAlloc: it counts every byte allocated since the
+// process started and never goes down, so a buffer that is allocated and then
+// collected still shows up. HeapAlloc would let a GC between the two readings
+// hide the very allocation being measured.
+func TestCommitDoesNotBufferTheSegment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds an 8 MB corpus")
+	}
+	// 2,000 documents of roughly 4 KB. Distinct tokens per document, so the
+	// postings and terms sections are substantial too rather than one term
+	// repeated.
+	ix := New()
+	for i := range 2000 {
+		var sb strings.Builder
+		for j := range 400 {
+			fmt.Fprintf(&sb, "w%dx%d ", i%97, j)
+		}
+		if _, err := ix.Add(Document{Key: fmt.Sprintf("doc-%05d", i), Text: sb.String()}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+
+	dir := t.TempDir()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+
+	var onDisk int64
+	for _, s := range segSections {
+		fi, err := os.Stat(filepath.Join(dir, segDirName(1), s.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		onDisk += fi.Size()
+	}
+
+	// A quarter of the segment. Generous on purpose: the point is the
+	// difference between "proportional to the corpus" and "proportional to a
+	// buffer", not a tight bound on the latter. Buffering allocates at least
+	// the whole segment and, with append's doubling, closer to twice it.
+	if limit := onDisk / 4; int64(allocated) > limit {
+		t.Fatalf("Commit allocated %d bytes writing a %d-byte segment, over the %d-byte limit — the writer is holding sections rather than streaming them",
+			allocated, onDisk, limit)
+	}
+	t.Logf("segment %d bytes on disk, Commit allocated %d", onDisk, allocated)
 }
 
 // ---------------------------------------------------------------------------
