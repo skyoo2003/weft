@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"os"
@@ -104,7 +105,7 @@ func TestDocOffsetsLandOnRecordStarts(t *testing.T) {
 		// segHeaderLen bytes in. Landing anywhere but a record start makes the
 		// decode below fail or return the wrong document, which is the point.
 		r := &segReader{name: docsFile, b: docsR.b, off: off - segHeaderLen}
-		d, _, err := decodeDocRecord(r, 0)
+		d, _, err := decodeDocRecord(r, id)
 		if err != nil {
 			t.Fatalf("document %d at offset %d: %v", id, off, err)
 		}
@@ -162,6 +163,108 @@ func TestKeysSectionIsSortedAndAgreesWithDocs(t *testing.T) {
 	}
 	if _, ok, err := kt.lookup("zzz-absent"); err != nil || ok {
 		t.Errorf("lookup of an absent key returned %v, %v; want false, nil", ok, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-unit integrity: what is left once the frame checksum stops being read.
+// ---------------------------------------------------------------------------
+
+// flipAndRepairFrame flips one payload byte and rewrites the frame checksum, so
+// the file is damaged in a way only a per-unit check can notice.
+//
+// This is not a contrived attack, it is what every lazy read looks like. The
+// frame CRC covers the whole file, so verifying it means reading every byte —
+// the cost this milestone exists to remove. A reader that maps a segment and
+// touches one record has not checked the frame and never will, so a segment's
+// integrity has to be checkable one unit at a time or it is not checkable at
+// all.
+func flipAndRepairFrame(t *testing.T, path string, i int) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b[i] ^= 0xff
+	binary.LittleEndian.PutUint32(b[len(b)-crc32.Size:], crc32.Checksum(b[:len(b)-crc32.Size], segCRC))
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEveryByteFlipIsCaughtWithoutTheFrameCRC is TestEveryByteFlipIsCaught with
+// its cheapest defence taken away.
+//
+// That test passes today because the frame checksum catches everything, and it
+// will keep passing after the reader stops computing it — which makes it the
+// wrong instrument for milestone 3. This one repairs the frame first, so the
+// only thing left standing is whatever the section itself can prove about its
+// own contents.
+//
+// Three sections, and the reason each is here is the same: nothing else
+// re-derives their contents. decodePostings says outright that it never
+// re-tokenizes a document to check its postings, so a flipped byte of document
+// text is invisible; a term string is whatever the file says it is. keys and
+// docoff are left out only because verifySeekSections still rebuilds both from
+// docs on every Open — the very check task 2 has to move into Scrub, at which
+// point they join this sweep.
+func TestEveryByteFlipIsCaughtWithoutTheFrameCRC(t *testing.T) {
+	for _, name := range []string{docsFile, postingsFile, termsFile} {
+		t.Run(name, func(t *testing.T) {
+			dir, segDir := commitTiny(t)
+			path := filepath.Join(segDir, name)
+			orig, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Payload only. The header and the trailing checksum are the frame,
+			// and the frame is what this test is doing without.
+			for i := segHeaderLen; i < len(orig)-crc32.Size; i++ {
+				flipAndRepairFrame(t, path, i)
+				// Errorf, not Fatalf: how many positions slip through is the
+				// measurement, and stopping at the first one hides it.
+				if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+					t.Errorf("%s payload byte %d flipped, frame checksum repaired: got %v, want ErrCorrupt", name, i, err)
+				}
+				if err := os.WriteFile(path, orig, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// TestARecordDecodedUnderTheWrongIDIsRefused is the other half, and the half
+// that has nothing to do with damaged bytes.
+//
+// A document record does not say which document it is — its position in the
+// file did, and docoff is what turns a DocID into that position. So the moment
+// the offset table is trusted rather than re-derived, a single wrong offset
+// yields a perfectly healthy record decoded under someone else's id: not a
+// crash, not an error, a plausible wrong answer of exactly the kind
+// engine.Search's precondition already warns about.
+//
+// Position cannot be the only thing that names a record. The id has to be
+// bound into whatever the record carries to prove itself.
+func TestARecordDecodedUnderTheWrongIDIsRefused(t *testing.T) {
+	_, segDir, ix := commitSeeded(t)
+
+	offs, err := parseDocOffsets(section(t, segDir, docoffFile, kindDocoff))
+	if err != nil {
+		t.Fatalf("parseDocOffsets: %v", err)
+	}
+	docsR := section(t, segDir, docsFile, kindDocs)
+
+	const right, wrong = 2, 1
+	off, ok := offs.at(right)
+	if !ok {
+		t.Fatalf("docoff has no entry for document %d", right)
+	}
+	r := &segReader{name: docsFile, b: docsR.b, off: off - segHeaderLen}
+	d, _, err := decodeDocRecord(r, wrong)
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("document %d's record (%q) decoded as document %d returned %q, %v; want ErrCorrupt",
+			right, ix.docs[right].Key, wrong, d.Key, err)
 	}
 }
 
