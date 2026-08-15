@@ -1290,8 +1290,17 @@ func TestOpenSurvivesAConcurrentMerge(t *testing.T) {
 		t.Skip("races a writer for a few hundred opens")
 	}
 	dir := t.TempDir()
-	ix := commitEach(t, dir, 9)
+	ix := New()
 	defer ix.Close() //nolint:errcheck // teardown
+	// Nine segments carrying a corpus rather than a document each: a scrub of
+	// nine trivial segments finishes inside the window it is supposed to be
+	// caught in, so there is nothing for a merge to overtake.
+	for i := range 9 {
+		ubiquitousCorpus(t, ix, i*400, 400, 200)
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit %d: %v", i, err)
+		}
+	}
 
 	stop := make(chan struct{})
 	bad := make(chan error, 1)
@@ -1333,5 +1342,168 @@ func TestOpenSurvivesAConcurrentMerge(t *testing.T) {
 	case err := <-bad:
 		t.Fatalf("Open failed while a merge was running: %v", err)
 	default:
+	}
+}
+
+// TestANoOpCommitStillSweepsDebris covers the one exit from Commit that skips
+// the sweep.
+//
+// Open documents unnamed debris as costing disk "until the next Commit", and a
+// crash between writing a segment and publishing it is exactly what leaves some.
+// The reopened index has nothing pending, so the next Commit returns before it
+// reaches prune and the orphan — as large as the batch that was interrupted —
+// stays until some later commit happens to carry a document.
+func TestANoOpCommitStillSweepsDebris(t *testing.T) {
+	dir, _, ix := commitSeeded(t)
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// What a commit that died before its rename leaves behind: a complete
+	// segment directory no manifest names. Copied from the live one, so the
+	// bytes are weft's own and the sweep is refusing nothing.
+	debris := segDirName(2)
+	copyTree(t, filepath.Join(dir, segDirName(1)), filepath.Join(dir, debris))
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	if err := got.Commit(dir); err != nil {
+		t.Fatalf("Commit with nothing pending: %v", err)
+	}
+	if names := dirNames(t, dir); slices.Contains(names, debris) {
+		t.Errorf("a no-op Commit left %s standing: %v", debris, names)
+	}
+	// And it swept debris rather than the corpus.
+	if err := Scrub(dir); err != nil {
+		t.Fatalf("Scrub after the sweep: %v", err)
+	}
+	if got.Len() != 4 {
+		t.Errorf("Len = %d after a no-op Commit, want 4", got.Len())
+	}
+}
+
+// TestScrubSurvivesAConcurrentMerge is Open's window on the other whole-index
+// reader.
+//
+// Scrub reads the manifest and then loads what it names, and Merge publishes its
+// replacement before pruning what it replaced — so a scrub overtaken by a merge
+// reaches a segment directory that is no longer there. The directory is a valid
+// index the whole time. Reporting ErrCorrupt for it turns a scheduled integrity
+// check into a false alarm, which is worse than useless: the answer a caller
+// runs Scrub for is precisely "is this directory sound".
+//
+// A smoke test rather than a proof, for the same reason and in the same shape as
+// TestOpenSurvivesAConcurrentMerge — the window is not reachable from a single
+// goroutine.
+func TestScrubSurvivesAConcurrentMerge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("races a writer for a few hundred scrubs")
+	}
+	dir := t.TempDir()
+	ix := New()
+	defer ix.Close() //nolint:errcheck // teardown
+	// Nine segments carrying a corpus rather than a document each: a scrub of
+	// nine trivial segments finishes inside the window it is supposed to be
+	// caught in, so there is nothing for a merge to overtake.
+	for i := range 9 {
+		ubiquitousCorpus(t, ix, i*400, 400, 200)
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit %d: %v", i, err)
+		}
+	}
+
+	stop := make(chan struct{})
+	bad := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := Scrub(dir); err != nil {
+				select {
+				case bad <- err:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	for i := range 10 {
+		ubiquitousCorpus(t, ix, 3600+i, 1, 200)
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if err := ix.Merge(); err != nil {
+			t.Fatalf("Merge: %v", err)
+		}
+	}
+	close(stop)
+	<-done
+	select {
+	case err := <-bad:
+		t.Fatalf("Scrub reported a valid directory as damaged while a merge was running: %v", err)
+	default:
+	}
+}
+
+// TestCommitAndMergeSerialize is the one piece of Commit that used to run
+// outside the lock the rest of it holds.
+//
+// Commit's manifest snapshot decides two destructive things: which directory it
+// clears before writing, and which segments the manifest it publishes names. A
+// Merge admitted between that read and the lock makes both wrong — the clear
+// lands on the segment the merge just published as live, and the manifest that
+// follows names directories the merge already pruned. Neither is recoverable:
+// the flip is the commit point, so the damage is durable.
+//
+// Both are public mutators of the same index, so serializing them is not an
+// extra guarantee. It is the one the write lock was already supposed to give.
+func TestCommitAndMergeSerialize(t *testing.T) {
+	if testing.Short() {
+		t.Skip("races a commit against a merge a few hundred times")
+	}
+	dir := t.TempDir()
+	ix := commitEach(t, dir, 9)
+	defer ix.Close() //nolint:errcheck // teardown
+
+	// Nine segments and one over the ceiling on every round, so every merge
+	// publishes and prunes for real while a commit is trying to read the manifest
+	// it is replacing.
+	for i := range 60 {
+		if _, err := ix.Add(Document{Key: fmt.Sprintf("round-%03d", i), Text: "shared term0 and more shared"}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+		errc := make(chan error, 1)
+		go func() { errc <- ix.Merge() }()
+		cerr := ix.Commit(dir)
+		merr := <-errc
+		if cerr != nil {
+			t.Fatalf("round %d: Commit alongside Merge: %v", i, cerr)
+		}
+		if merr != nil {
+			t.Fatalf("round %d: Merge alongside Commit: %v", i, merr)
+		}
+		if err := Scrub(dir); err != nil {
+			t.Fatalf("round %d: the directory a Commit and a Merge both wrote: %v", i, err)
+		}
+	}
+
+	// Every document ever added is still reachable through a fresh open — a
+	// manifest naming pruned segments would have taken a generation with it.
+	want := ix.Len()
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	if got.Len() != want {
+		t.Errorf("Open recovered %d documents, want %d", got.Len(), want)
 	}
 }

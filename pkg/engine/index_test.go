@@ -444,3 +444,36 @@ func mustAdd(t *testing.T, ix *Index, d Document) DocID {
 	}
 	return id
 }
+
+// TestCorpusTokenTotalsDoNotWrap pins the one collection statistic assembled
+// from numbers each of which is separately legal.
+//
+// A segment's token total is ranged against maxInt when it is decoded, and that
+// is all a segment can be asked for: it knows nothing about the segments beside
+// it. Incremental commit is what makes the sum a different quantity from any of
+// its terms — eight segments of a few hundred million tokens each are ordinary,
+// and on a 32-bit build their sum is not an int.
+//
+// A wrapped total is negative, and a negative total is a negative average
+// length, which BM25 normalizes every score by. Nothing downstream can notice:
+// AvgDocLen is documented to return 0 for "no normalization" and anything else
+// is taken at face value.
+func TestCorpusTokenTotalsDoNotWrap(t *testing.T) {
+	// Two segments, each holding a total the decoder would accept on its own.
+	// Constructed rather than committed because the arithmetic is what is being
+	// tested, and a corpus of 2^63 tokens is not a fixture.
+	ix := &Index{segs: []*segment{
+		{count: 1, totalLen: maxInt},
+		{count: 1, totalLen: maxInt},
+	}}
+	got := ix.AvgDocLen()
+	if got <= 0 {
+		t.Fatalf("AvgDocLen = %v across two segments of maxInt tokens; BM25 divides by this", got)
+	}
+	if want := float64(maxInt); got != want {
+		t.Errorf("AvgDocLen = %v, want %v", got, want)
+	}
+	if _, avg := ix.Stats(); avg != got {
+		t.Errorf("Stats reported %v where AvgDocLen reported %v", avg, got)
+	}
+}

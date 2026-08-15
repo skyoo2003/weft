@@ -1000,3 +1000,118 @@ func TestScrubDoesNotMaterializeTheSegment(t *testing.T) {
 	}
 	t.Logf("segment %d bytes on disk, Scrub allocated %d", onDisk, allocated)
 }
+
+// ---------------------------------------------------------------------------
+// The two numbers a term's postings are decoded from that nothing seals.
+// ---------------------------------------------------------------------------
+
+// TestATruncatedBlockCountIsRefused covers the one field in a term's postings
+// entry that no unit checksum reaches.
+//
+// Every block seals itself, seeded with its own file offset, so a block that is
+// read verifies. The count standing in front of them is not inside any block, so
+// a flip that lowers it does not fail a checksum — it makes the decoder stop
+// early and hand back the surviving prefix as if it were the whole list. The
+// blocks it skipped are never touched, so their checksums protect nothing.
+//
+// That is a wrong answer rather than a missing one: the term's postings for
+// every document past the first block silently disappear from every query, and a
+// Merge reading through the same path would publish the truncation and prune the
+// segment that still held the rest.
+//
+// The terms index is what closes it. Entries are written in sorted order with
+// each term's postings laid out contiguously, so one term's entry ends exactly
+// where the next one begins — and the last ends at the payload's end. A count
+// that names too few blocks stops short of that boundary.
+func TestATruncatedBlockCountIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	ix := New()
+	// One term, 200 documents, so its postings need two blocks — the fewest that
+	// lets a lowered count still decode into a nonempty list.
+	for i := range 200 {
+		mustAdd(t, ix, Document{Key: fmt.Sprintf("doc-%03d", i), Text: "fusion"})
+	}
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The payload is the postings file's term count, then this term's block
+	// count, then the blocks. Both counts are one-byte uvarints on this corpus,
+	// so the damage is a single byte and every block the count still names
+	// verifies under its own checksum.
+	path := filepath.Join(dir, segDirName(1), postingsFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b[segHeaderLen] != 1 || b[segHeaderLen+1] != 2 {
+		t.Fatalf("this segment holds %d terms in %d blocks, the case needs 1 and 2", b[segHeaderLen], b[segHeaderLen+1])
+	}
+	b[segHeaderLen+1] = 1
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+
+	// Not 128 postings out of 200. A list that stops early is not a shorter
+	// posting list, it is a wrong one, and nil is the answer D-006 gives to
+	// damage on this path.
+	if pl := got.Lookup("fusion"); len(pl) != 0 {
+		t.Errorf("Lookup returned %d postings after the block count was cut from 2 to 1; the corpus holds 200", len(pl))
+	}
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with a truncated block count: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestAnImpossibleFrequencyIsRefused is the lazy path's half of a rule the eager
+// one already enforces.
+//
+// A term cannot occur in a document more often than that document has tokens.
+// decodePostings knows it because it reads every term and can track what is left
+// of each document's budget; decodeTermPostings reads one term and cannot — but
+// the per-document bound does not need the other terms, and docoff puts the
+// token count one arithmetic step away without decoding the record.
+//
+// Without it, a frequency the writer could never have produced reaches BM25 and
+// comes back as a plausible score. That is the failure D-001 names: a number
+// nobody re-derives, believed because it parsed.
+func TestAnImpossibleFrequencyIsRefused(t *testing.T) {
+	dir, segDir, ix := commitSeeded(t)
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Document 0 is "fusion ranking": two tokens, so "fusion" occurs once. This
+	// says three, in a block whose own metadata agrees with its contents and
+	// whose checksum is computed rather than corrupted — the lie is the
+	// frequency alone, which is what makes it reachable through Open.
+	rewriteSection(t, filepath.Join(segDir, postingsFile), kindPostings, func(w *segWriter) {
+		// cnt, maxDocID, maxTF, minDocLen, then delta and freq.
+		postingsPayload(w, 1, []uint64{1, 0, 3, 2, 0, 3})
+	})
+	// The entry sits one byte in, past the postings file's own term count.
+	rewriteSection(t, filepath.Join(segDir, termsFile), kindTerms, func(w *segWriter) {
+		termsPayload(w, 1, termEntry{term: "fusion", off: segHeaderLen + 1})
+	})
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+
+	if pl := got.Lookup("fusion"); len(pl) != 0 {
+		t.Errorf("Lookup returned %+v: a frequency of 3 in a document of 2 tokens", pl)
+	}
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with an impossible frequency: got %v, want ErrCorrupt", err)
+	}
+}
