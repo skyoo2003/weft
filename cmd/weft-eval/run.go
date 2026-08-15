@@ -223,9 +223,23 @@ func armsFor(ix *engine.Index, fuse engine.Fuser, overfetch int) map[string]eval
 // between runs is a table nobody can diff.
 var armOrder = []string{armTextBase, armVecBase, armTextGraph, armVecGraph, armVecGraphSeeds}
 
-func openIndex(dir string) (*engine.Index, error) {
+// openIndex opens the committed index under dir and, unless anySnapshot, checks that
+// it is the one docs/EVAL.md publishes numbers from.
+//
+// The snapshot check the callers run covers queries.jsonl and qrels/test.tsv, which
+// are the files *they* read. The index is a third input and nothing verified it: an
+// index built from another corpus revision that kept the same document keys satisfies
+// the qrels check too, and its different text, vectors and links then rank differently
+// under the published labels. See provenance.
+func openIndex(dir string, anySnapshot bool) (*engine.Index, error) {
+	path := filepath.Join(dir, indexDir)
+	if !anySnapshot {
+		if err := verifyProvenance(path); err != nil {
+			return nil, err
+		}
+	}
 	start := time.Now()
-	ix, err := engine.Open(filepath.Join(dir, indexDir))
+	ix, err := engine.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open index: %w (run `weft-eval build` first)", err)
 	}
@@ -236,6 +250,48 @@ func openIndex(dir string) (*engine.Index, error) {
 }
 
 // ---------------------------------------------------------------- run
+
+// checkIters rejects a resample count BootstrapCI would reject, at the only point
+// where rejecting it is free.
+//
+// eval.BootstrapCI already refuses iters <= 0, but it is called after every arm has
+// been evaluated: on the documented corpus that is 50 queries against 171,332
+// documents, with a brute-force vector scan per query, spent to arrive at a flag
+// error that was decidable before the index was opened. sweep is worse — it evaluates
+// three arms per grid cell — and the failure is silent until it is total, because
+// nothing prints until the table does.
+// deltaSign is the sign of an observed delta, which is the whole of what docs/EVAL.md
+// section 4 rule 2 reads.
+//
+// It used to be read off the confidence interval instead — a cell whose interval
+// spanned zero was recorded as signless, and sweep's flip count skipped it — which
+// folded rule 1's criterion into rule 2's and left neither stated. A grid going
+// +0.02, -0.02, +0.02 under intervals wide enough to span zero then established no
+// first sign, counted no flip, and printed "rule 2 holds" about deltas that had
+// flipped twice. Interval uncertainty is not discarded, it goes in its own column:
+// that is the separate thing rule 1 reads at the frozen point, and keeping the two
+// apart is the only way either can be checked against what section 4 wrote down
+// before the numbers existed.
+//
+// Exactly zero is not a direction: it establishes no sign and disagrees with none.
+// Reachable rather than theoretical — two arms that rank identically for every query
+// produce it, which is what a vanishing graph weight converges to.
+func deltaSign(d float64) int {
+	switch {
+	case d > 0:
+		return 1
+	case d < 0:
+		return -1
+	}
+	return 0
+}
+
+func checkIters(iters int) error {
+	if iters <= 0 {
+		return fmt.Errorf("-iters=%d: the bootstrap needs at least one resample (%w)", iters, eval.ErrNoIters)
+	}
+	return nil
+}
 
 func run(ctx context.Context, args []string) error {
 	var k, overfetch, iters int
@@ -248,6 +304,10 @@ func run(ctx context.Context, args []string) error {
 		fs.Float64Var(&rankConst, "rrfk", fusion.RRFk, "RRF rank constant")
 		snapshotFlag(fs, &anySnapshot)
 	})
+
+	if err := checkIters(iters); err != nil {
+		return err
+	}
 
 	// The judged inputs, before the index is opened. A qrels file cut at a row boundary
 	// reads as a clean prefix and lifts every arm by an unreported amount — see the
@@ -269,7 +329,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("-rrfk=%v: the RRF rank constant must be finite and non-negative", rankConst)
 	}
 
-	ix, err := openIndex(*data)
+	ix, err := openIndex(*data, anySnapshot)
 	if err != nil {
 		return err
 	}
@@ -373,13 +433,17 @@ func sweep(ctx context.Context, args []string) error {
 		snapshotFlag(fs, &anySnapshot)
 	})
 
+	if err := checkIters(iters); err != nil {
+		return err
+	}
+
 	if !anySnapshot {
 		if err := verifySnapshot(*data, queriesFile, qrelsFile); err != nil {
 			return err
 		}
 	}
 
-	ix, err := openIndex(*data)
+	ix, err := openIndex(*data, anySnapshot)
 	if err != nil {
 		return err
 	}
@@ -417,18 +481,9 @@ func sweep(ctx context.Context, args []string) error {
 		base, arm float64
 		iv        eval.Interval
 		sign      int
+		spansZero bool
 		flipped   bool
 	}
-	signOf := func(iv eval.Interval) int {
-		switch {
-		case iv.ContainsZero():
-			return 0
-		case iv.Delta > 0:
-			return 1
-		}
-		return -1
-	}
-
 	var bindingCells, textCells []cell
 	for _, rc := range rankConsts {
 		for _, of := range overfetches {
@@ -464,9 +519,9 @@ func sweep(ctx context.Context, args []string) error {
 				return err
 			}
 			bindingCells = append(bindingCells,
-				cell{rc, of, vecBase.NDCG, vecGraph.NDCG, ivBind, signOf(ivBind), false})
+				cell{rc, of, vecBase.NDCG, vecGraph.NDCG, ivBind, deltaSign(ivBind.Delta), ivBind.ContainsZero(), false})
 			textCells = append(textCells,
-				cell{rc, of, baseText.NDCG, textGraph.NDCG, ivText, signOf(ivText), false})
+				cell{rc, of, baseText.NDCG, textGraph.NDCG, ivText, deltaSign(ivText.Delta), ivText.ContainsZero(), false})
 		}
 	}
 
@@ -490,16 +545,35 @@ func sweep(ctx context.Context, args []string) error {
 	bindFirst, bindFlips := flips(bindingCells)
 	_, textFlips := flips(textCells)
 
+	// Cells whose interval spans zero, reported rather than folded into the sign. A
+	// sweep can be perfectly sign-stable and still rest on 28 intervals that each
+	// admit the opposite direction, and a reader who is told only "no flip" cannot
+	// tell that from a grid of narrow intervals.
+	spanning := func(cells []cell) int {
+		n := 0
+		for _, c := range cells {
+			if c.spansZero {
+				n++
+			}
+		}
+		return n
+	}
+	bindSpans := spanning(bindingCells)
+
 	printCells := func(title, base, arm string, cells []cell) {
 		fmt.Printf("\n%s: sign stability of %s - %s at nDCG@%d\n\n", title, arm, base, k)
-		fmt.Printf("  %8s %10s %10s %10s %22s %s\n", "RRFk", "overfetch", "base", "arm", "delta 95% CI", "sign")
+		fmt.Printf("  %8s %10s %10s %10s %9s %22s %s\n",
+			"RRFk", "overfetch", "base", "arm", "delta", "delta 95% CI", "sign")
 		for _, c := range cells {
-			label := map[int]string{1: "+", 0: "0 (CI spans zero)", -1: "-"}[c.sign]
+			label := map[int]string{1: "+", 0: "0 (delta is exactly zero)", -1: "-"}[c.sign]
+			if c.spansZero {
+				label += "  CI spans zero"
+			}
 			if c.flipped {
 				label += "  FLIP"
 			}
-			fmt.Printf("  %8v %10d %10.4f %10.4f   [%+.4f, %+.4f] %s\n",
-				c.rc, c.of, c.base, c.arm, c.iv.Lo, c.iv.Hi, label)
+			fmt.Printf("  %8v %10d %10.4f %10.4f %+9.4f   [%+.4f, %+.4f] %s\n",
+				c.rc, c.of, c.base, c.arm, c.iv.Delta, c.iv.Lo, c.iv.Hi, label)
 		}
 	}
 	printCells("BINDING", armVecBase, armVecGraph, bindingCells)
@@ -511,15 +585,24 @@ func sweep(ctx context.Context, args []string) error {
 	case bindFlips > 0:
 		fmt.Println("VERDICT INPUT: the sign is not stable. docs/EVAL.md section 4 rule 2 fails.")
 	case bindFirst == 0:
-		// No configuration established a sign at all. Reporting that as stability
-		// would read "rule 2 holds" off a table that established nothing — the same
-		// mistake as reading a wide interval as agreement.
-		fmt.Println("VERDICT INPUT: every interval spans zero, so no configuration established a")
+		// Every delta was exactly zero, so the grid established no direction to be
+		// stable in. Reporting that as stability would read "rule 2 holds" off a table
+		// that recorded no difference at all.
+		fmt.Println("VERDICT INPUT: every delta is exactly zero, so no configuration established a")
 		fmt.Println("sign. That is not stability; docs/EVAL.md section 4 rule 2 is undetermined.")
 	default:
 		fmt.Printf("VERDICT INPUT: no sign flip across the sweep on the pair rule 2 names (%s - %s).\n",
 			armVecGraph, armVecBase)
 		fmt.Println("docs/EVAL.md section 4 rule 2 holds.")
+		if bindSpans > 0 {
+			// Rule 2 is satisfied and says less than it appears to. Printed next to the
+			// verdict rather than left in the table, because "no sign flip" over cells
+			// that each admit the opposite direction is the reading this document keeps
+			// having to correct.
+			fmt.Printf("Note: %d of %d binding cells have an interval spanning zero, so the stable\n",
+				bindSpans, len(bindingCells))
+			fmt.Println("sign is not established by those cells. That is rule 1's criterion, not rule 2's.")
+		}
 	}
 	fmt.Println()
 	return nil
@@ -555,13 +638,17 @@ func weights(ctx context.Context, args []string) error {
 		snapshotFlag(fs, &anySnapshot)
 	})
 
+	if err := checkIters(iters); err != nil {
+		return err
+	}
+
 	if !anySnapshot {
 		if err := verifySnapshot(*data, queriesFile, qrelsFile); err != nil {
 			return err
 		}
 	}
 
-	ix, err := openIndex(*data)
+	ix, err := openIndex(*data, anySnapshot)
 	if err != nil {
 		return err
 	}
@@ -683,7 +770,7 @@ func diagnose(ctx context.Context, args []string) error {
 			"decided by DocID whatever the graph did", deep, k)
 	}
 
-	ix, err := openIndex(*data)
+	ix, err := openIndex(*data, anySnapshot)
 	if err != nil {
 		return err
 	}

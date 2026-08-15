@@ -25,6 +25,14 @@ var (
 	ErrBadRecord    = errors.New("eval: malformed record")
 	ErrMissingID    = errors.New("eval: record has no id")
 
+	// ErrDuplicateDoc reports a corpus that names the same document twice. Refused
+	// at the read rather than downstream, because every consumer reaches a different
+	// wrong answer from it and the cheapest of them is expensive: prepare puts the
+	// key in its fetch list twice, asks Semantic Scholar about it twice, and writes
+	// two cache records under one key — which build rejects, after the hours of
+	// rate-limited fetching that produced them.
+	ErrDuplicateDoc = errors.New("eval: duplicate corpus document id")
+
 	// ErrNoJoinColumn reports a CORD-19 release whose header carries none of the
 	// identifier columns we can join to Semantic Scholar on. The plan calls this
 	// out specifically: these columns differ between releases, so the join has to
@@ -53,6 +61,13 @@ type CorpusDoc struct {
 // Streaming rather than returning a slice: trec-covid is 171K documents and the
 // caller's next move is to put each one into an index, so materialising the whole
 // corpus first would hold two copies of it. An error from fn aborts the read.
+//
+// The ids are held even so, and only the ids: a repeated one is refused here the way
+// ReadQueries refuses a repeated query id. It is the same class of fault and it is
+// the more expensive one — nothing downstream is in a position to say which line the
+// duplicate came from, and prepare's response to seeing the key twice is to spend a
+// second rate-limited fetch on it. A set of 171K keys is a few megabytes beside the
+// documents themselves, which is what the streaming above is protecting.
 func ReadCorpus(path string, fn func(CorpusDoc) error) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -61,6 +76,7 @@ func ReadCorpus(path string, fn func(CorpusDoc) error) error {
 	defer f.Close()
 
 	n := 0
+	seen := make(map[string]struct{})
 	s := scanLines(f)
 	for line := 1; s.Scan(); line++ {
 		raw := s.Bytes()
@@ -78,6 +94,10 @@ func ReadCorpus(path string, fn func(CorpusDoc) error) error {
 		if rec.ID == "" {
 			return fmt.Errorf("%s line %d: %w", path, line, ErrMissingID)
 		}
+		if _, dup := seen[rec.ID]; dup {
+			return fmt.Errorf("%s line %d: %q: %w", path, line, rec.ID, ErrDuplicateDoc)
+		}
+		seen[rec.ID] = struct{}{}
 		if err := fn(CorpusDoc{ID: rec.ID, Title: rec.Title, Text: rec.Text}); err != nil {
 			return fmt.Errorf("%s line %d: doc %q: %w", path, line, rec.ID, err)
 		}

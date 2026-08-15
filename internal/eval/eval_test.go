@@ -222,6 +222,20 @@ func TestEvaluateRejectsMisconfiguration(t *testing.T) {
 			want: ErrForeignQrelDoc,
 		},
 		{
+			// The same mispairing at grade 0, which this check used to wave through on
+			// the grounds that idealDCG discards the document anyway. It does — and the
+			// document is still one an assessor saw because a system retrieved it, so in
+			// the corpus these judgments belong to it occupies a slot above the cut that
+			// something else occupies here. The arithmetic is unmoved; the ranking is
+			// not, and the pairing is as wrong as in the case above.
+			name: "a judged-nonrelevant document from another snapshot is caught too",
+			arm:  Arm{Name: "a", Scorers: []engine.Scorer{ts}, Fuse: fusion.Fuse},
+			qs: []Query{{ID: "q1", Query: engine.Query{Text: "alpha"},
+				Qrels: map[string]int{"d0": 1, "d9": 0}}},
+			k:    3,
+			want: ErrForeignQrelDoc,
+		},
+		{
 			name: "nil fuser is engine's error, not a second copy of the check",
 			arm:  Arm{Name: "a", Scorers: []engine.Scorer{ts}},
 			qs:   okQueries,
@@ -249,23 +263,27 @@ func TestEvaluateRejectsMisconfiguration(t *testing.T) {
 	}
 }
 
-// TestEvaluateAllowsAbsentNonRelevantJudgments draws the line the qrels check is
-// on. A judged-nonrelevant document is dropped by idealDCG before it can occupy an
-// ideal slot, so its absence from the index changes no number — rejecting it would
-// fail a run whose measurement is correct, which is the mirror of the mistake the
-// check exists to prevent.
-func TestEvaluateAllowsAbsentNonRelevantJudgments(t *testing.T) {
+// TestEvaluateScoresAJudgedNonRelevantDocumentItHolds is what is left of the line the
+// qrels check used to draw, now that the check refuses an absent grade-0 key rather
+// than waving it through (see the table case above, and checkQrels).
+//
+// The remaining claim is the arithmetic one, and it was always the true half: a
+// judged-nonrelevant document *present* in the index is dropped by idealDCG and
+// contributes no gain, so holding it changes no number. That is why the old check
+// looked safe. What it did not cover is the document being absent, which is a
+// statement about the pairing rather than about the sum.
+func TestEvaluateScoresAJudgedNonRelevantDocumentItHolds(t *testing.T) {
 	ix := testIndex(t)
 	arm := Arm{Name: "a", Scorers: []engine.Scorer{text.New(ix)}, Fuse: fusion.Fuse}
 	qs := []Query{{ID: "q1", Query: engine.Query{Text: "alpha"},
-		Qrels: map[string]int{"d0": 1, "absent": 0}}}
+		Qrels: map[string]int{"d0": 1, "d1": 0}}}
 
 	run, err := Evaluate(context.Background(), ix, qs, arm, 3)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
 	if run.PerQuery["q1"] != 1.0 {
-		t.Errorf("PerQuery[q1] = %v, want 1.0: d0 ranks first and the absent grade-0 key is not scored",
+		t.Errorf("PerQuery[q1] = %v, want 1.0: d0 ranks first and the grade-0 judgment adds no gain",
 			run.PerQuery["q1"])
 	}
 }

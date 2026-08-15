@@ -78,6 +78,11 @@ func TestReadCorpusRejectsBadData(t *testing.T) {
 		{"no id", `{"title": "t", "text": "x"}` + "\n", ErrMissingID},
 		{"empty file", "", ErrEmptyDataset},
 		{"only blank lines", "\n\n  \n", ErrEmptyDataset},
+		// Nothing downstream can say which line the second one came from, and
+		// prepare's response to seeing the key twice is a second rate-limited fetch
+		// and a second cache record under one key — which build then rejects, after
+		// the hours that produced it.
+		{"the same id twice", `{"_id":"a","text":"x"}` + "\n" + `{"_id":"a","text":"y"}` + "\n", ErrDuplicateDoc},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

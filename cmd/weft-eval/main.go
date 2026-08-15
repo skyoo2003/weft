@@ -145,8 +145,10 @@ func prepare(ctx context.Context, args []string) error {
 	// 1. Corpus ids. Reading these first means a missing or truncated corpus fails
 	// before an hours-long fetch rather than during it.
 	var uids []string
+	inCorpus := map[string]bool{}
 	if err := eval.ReadCorpus(corpusPath, func(d eval.CorpusDoc) error {
 		uids = append(uids, d.ID)
+		inCorpus[d.ID] = true
 		return nil
 	}); err != nil {
 		return err
@@ -154,8 +156,10 @@ func prepare(ctx context.Context, args []string) error {
 	log.Printf("corpus: %d documents", len(uids))
 
 	// 2. Resume. The output is append-only JSONL, so what is already in it is
-	// exactly what does not need refetching.
-	cache, err := scanS2Cache(outPath)
+	// exactly what does not need refetching. The corpus goes in because one of the
+	// tallies is evidence about *this* corpus and the file may hold another one's —
+	// see s2Cache.joined.
+	cache, err := scanS2Cache(outPath, inCorpus)
 	if err != nil {
 		return err
 	}
@@ -403,10 +407,20 @@ type s2Cache struct {
 	// models tallies the embedding model behind every cached vector.
 	models map[string]int
 
-	// joined counts records carrying a CorpusId. It is the only evidence in the file
-	// that the metadata join has ever worked, which is what separates "every joinable
-	// document is already cached" from "this metadata release does not match this
-	// corpus" — see the ErrEmptyDataset guard in prepare.
+	// joined counts records carrying a CorpusId whose key belongs to the corpus the
+	// scan was given. It is the only evidence in the file that the metadata join has
+	// ever worked, which is what separates "every joinable document is already cached"
+	// from "this metadata release does not match this corpus" — see the ErrEmptyDataset
+	// guard in prepare.
+	//
+	// Scoped to the corpus rather than counted over the whole file, because the guard
+	// asks about this corpus and an unscoped count answers about some other one. An
+	// s2.jsonl kept from an earlier dataset satisfies it with records whose keys the
+	// current corpus has never heard of: none of the current keys match the metadata,
+	// the guard sees what looks like prior evidence of a join and stands down, and
+	// every current document is written as a tombstone. build reads that as complete
+	// coverage and publishes vector and graph arms over an index holding neither —
+	// the docs/EVAL.md section 4.1 failure, rebuilt out of the check meant to stop it.
 	joined int
 
 	// good is the byte offset just past the last record that decoded cleanly.
@@ -424,7 +438,12 @@ type s2Cache struct {
 // over what it already holds, and a fact a resumed run cannot see is a fact nothing
 // checks — see eval.S2Record.Model. Records with no vector are not counted in
 // models: they belong to no embedding space.
-func scanS2Cache(path string) (s2Cache, error) {
+//
+// inCorpus is the key set of the corpus this cache is being scanned for, and only
+// the joined tally consults it — keys, models and the offset describe the file
+// whatever corpus it came from. A nil set is "no corpus to speak of", which leaves
+// joined at zero rather than counting evidence about a corpus nobody named.
+func scanS2Cache(path string, inCorpus map[string]bool) (s2Cache, error) {
 	c := s2Cache{keys: map[string]bool{}, models: map[string]int{}}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -455,7 +474,7 @@ func scanS2Cache(path string) (s2Cache, error) {
 		if rec.Key != "" {
 			c.keys[rec.Key] = true
 		}
-		if rec.CorpusID != "" {
+		if rec.CorpusID != "" && inCorpus[rec.Key] {
 			c.joined++
 		}
 		if len(rec.Vector) > 0 {
@@ -758,6 +777,19 @@ func build(ctx context.Context, args []string) error {
 	}
 	log.Printf("reopened in %s: %d documents, avgdl %.1f — matches",
 		time.Since(start).Round(time.Millisecond), rdocs, ravg)
+
+	// What this index is, written into it. Hashed here rather than taken from the
+	// snapshot table even when the check above passed, so the record describes the
+	// file that was read instead of the one that was expected — and so an
+	// -any-snapshot build says which corpus it used rather than saying nothing. The
+	// read costs about a second against a build measured in minutes.
+	corpusSHA, err := sha256File(corpusPath)
+	if err != nil {
+		return err
+	}
+	if err := writeProvenance(dir, provenance{Corpus: corpusSHA, Partial: partial}); err != nil {
+		return err
+	}
 	return nil
 }
 

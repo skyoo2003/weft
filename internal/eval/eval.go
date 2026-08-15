@@ -206,20 +206,32 @@ func Evaluate(ctx context.Context, ix *engine.Index, qs []Query, a Arm, k int) (
 // index does not hold — a qrels file and an index built from different corpus
 // snapshots, which is one `-data` flag away at every call site.
 //
-// Only positive grades are checked. idealDCG drops everything at or below 0 before
-// sorting, so a judged-nonrelevant document that is absent from the index changes
-// no number and refusing it would fail runs that measure correctly.
+// Every judged key is checked, whatever its grade.
+//
+// It used to skip the nonrelevant ones, reasoning that idealDCG drops everything at
+// or below 0 before sorting, so a missing one changes no number. That is true of the
+// arithmetic and false of the ranking. A judged-nonrelevant document is one the
+// assessors saw because some system retrieved it, so it is retrievable here too —
+// and a retrieved nonrelevant document takes a slot above the cut and pushes a
+// relevant one below it. An index missing it scores differently, usually higher, and
+// the run completes either way. It is also the same evidence of a mispaired qrels
+// file and index as a missing relevant document is, and this is the cheapest place
+// either can be seen.
+//
+// Measured before tightening rather than assumed safe: all 66,336 of trec-covid's
+// judgments, including the 41,663 at grade 0, name documents in the BEIR corpus. So
+// the stricter check refuses no run that was measuring correctly.
 func checkQrels(ix *engine.Index, qs []Query) error {
 	for _, q := range qs {
-		missing, first := 0, ""
+		missing, relevant, first := 0, 0, ""
 		for key, grade := range q.Qrels {
-			if grade <= 0 {
-				continue
-			}
 			if _, ok := ix.Resolve(key); ok {
 				continue
 			}
 			missing++
+			if grade > 0 {
+				relevant++
+			}
 			// Map iteration is randomised, so the smallest key is named rather than
 			// whichever came up first: an error that changes between identical runs is an
 			// error nobody can act on.
@@ -228,9 +240,11 @@ func checkQrels(ix *engine.Index, qs []Query) error {
 			}
 		}
 		if missing > 0 {
-			return fmt.Errorf("query %s: %d of its %d judgments are relevant documents this index "+
-				"does not hold (%q is one), so they stay in the ideal ranking that no arm can reach: %w",
-				q.ID, missing, len(q.Qrels), first, ErrForeignQrelDoc)
+			return fmt.Errorf("query %s: %d of its %d judgments name documents this index does not "+
+				"hold (%q is one, %d of the %d are relevant): the relevant ones stay in the ideal "+
+				"ranking where no arm can reach them, and the rest are documents that would have "+
+				"taken slots in the ranking this index produces: %w",
+				q.ID, missing, len(q.Qrels), first, relevant, missing, ErrForeignQrelDoc)
 		}
 	}
 	return nil

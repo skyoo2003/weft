@@ -127,7 +127,7 @@ func TestScanS2CacheKeepsTheRecordSeparator(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 
-	cache, err := scanS2Cache(path)
+	cache, err := scanS2Cache(path, nil)
 	if err != nil {
 		t.Fatalf("scanS2Cache: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestScanS2CacheKeepsTheRecordSeparator(t *testing.T) {
 func TestScanS2CacheDropsOnlyTheTruncatedRecord(t *testing.T) {
 	path := writeCache(t, `{"key":"a"}`+"\n"+`{"key":"b"}`+"\n"+`{"key":"c","ref`)
 
-	cache, err := scanS2Cache(path)
+	cache, err := scanS2Cache(path, nil)
 	if err != nil {
 		t.Fatalf("scanS2Cache: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestScanS2CacheDropsOnlyTheTruncatedRecord(t *testing.T) {
 	if err := linesParse(t, path); err != nil {
 		t.Errorf("after resume the cache is no longer one record per line: %v", err)
 	}
-	again, err := scanS2Cache(path)
+	again, err := scanS2Cache(path, nil)
 	if err != nil {
 		t.Fatalf("scanS2Cache after resume: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestScanS2CacheRefusesDamageInTheMiddle(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 
-	cache, err := scanS2Cache(path)
+	cache, err := scanS2Cache(path, nil)
 	if err == nil {
 		t.Fatalf("scanS2Cache accepted a damaged cache and offered to truncate %d of %d bytes, "+
 			"which drops keys d and e", before.Size()-cache.good, before.Size())
@@ -222,7 +222,7 @@ func TestScanS2CacheRefusesDamageInTheMiddle(t *testing.T) {
 	// A complete but unparseable final line is damage too, not an interrupted write:
 	// an interrupted write cannot have produced the newline that terminates it.
 	tail := writeCache(t, `{"key":"a"}`+"\n"+`{"key":"b`+"\n")
-	if _, err := scanS2Cache(tail); err == nil {
+	if _, err := scanS2Cache(tail, nil); err == nil {
 		t.Error("scanS2Cache accepted a terminated line that does not parse")
 	}
 }
@@ -341,7 +341,7 @@ func TestPrepareRefusesAJoinWithNoEvidenceItCanWork(t *testing.T) {
 	if err := prepare(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
 		t.Fatalf("prepare with prior evidence of a working join: %v", err)
 	}
-	cache, err := scanS2Cache(filepath.Join(dir, s2File))
+	cache, err := scanS2Cache(filepath.Join(dir, s2File), nil)
 	if err != nil {
 		t.Fatalf("scanS2Cache: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestScanS2CacheTalliesTheModelsAlreadyCached(t *testing.T) {
 		"",
 	}, "\n"))
 
-	cache, err := scanS2Cache(path)
+	cache, err := scanS2Cache(path, nil)
 	if err != nil {
 		t.Fatalf("scanS2Cache: %v", err)
 	}
@@ -697,5 +697,175 @@ func TestLoadQueriesRejectsVectorsFromAnOlderQuerySet(t *testing.T) {
 	}
 	if len(qs) != 1 || len(qs[0].Query.Vector) != 2 {
 		t.Fatalf("loaded %+v, want one query carrying its vector", qs)
+	}
+}
+
+// TestPrepareRefusesJoinEvidenceAboutAnotherCorpus is the guard above reached by the
+// route that used to walk past it.
+//
+// The evidence that a join can work is a cached record carrying a CorpusId. Counted
+// over the whole file, an s2.jsonl kept from an earlier dataset supplies it with keys
+// this corpus has never heard of — so zero of the current keys match the metadata, the
+// guard sees what looks like a working join, and every current document is written as
+// a tombstone. build then reads complete coverage and publishes vector and graph arms
+// over an index holding neither, which is the failure the guard exists to prevent,
+// rebuilt out of the guard.
+func TestPrepareRefusesJoinEvidenceAboutAnotherCorpus(t *testing.T) {
+	const metadata = "cord_uid,doi,pmcid,pubmed_id,s2_id\nx,,,,999\n" // no row for a or b
+	dir := evalDir(t, map[string]string{
+		corpusFile:   twoDocCorpus,
+		metadataFile: metadata,
+		// z is not in this corpus. Under the old unscoped count it was still evidence.
+		s2File: `{"key":"z","corpus_id":"100"}` + "\n",
+	})
+
+	if err := prepare(context.Background(), []string{"-data", dir, "-any-snapshot"}); err == nil {
+		t.Fatal("prepare accepted a join whose only evidence is a record about another corpus; " +
+			"it would tombstone a and b and let build publish empty vector and graph arms")
+	}
+
+	// And the counter itself, so the failure above cannot be satisfied by some other
+	// check happening to fire first.
+	cache, err := scanS2Cache(filepath.Join(dir, s2File), map[string]bool{"a": true, "b": true})
+	if err != nil {
+		t.Fatalf("scanS2Cache: %v", err)
+	}
+	if cache.joined != 0 {
+		t.Errorf("joined = %d, want 0: z carries a CorpusId but is not a document of this corpus",
+			cache.joined)
+	}
+	if !cache.keys["z"] {
+		t.Error("z was dropped from keys; scoping applies to the join tally, not to what the file holds")
+	}
+}
+
+// TestBuildRecordsWhatItBuiltFrom pins the index's own account of its provenance.
+//
+// run, sweep and weights verify queries.jsonl and qrels/test.tsv — the files they read
+// — and the index is a third input nothing checked. An index built from another corpus
+// revision that kept the same document keys satisfies the qrels check too, so its
+// different text, vectors and links rank differently under the labels docs/EVAL.md
+// publishes.
+func TestBuildRecordsWhatItBuiltFrom(t *testing.T) {
+	dir := evalDir(t, map[string]string{
+		corpusFile: twoDocCorpus,
+		s2File:     `{"key":"a","corpus_id":"1"}` + "\n" + `{"key":"b","corpus_id":"2"}` + "\n",
+	})
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, indexDir, provenanceFile))
+	if err != nil {
+		t.Fatalf("read provenance: %v", err)
+	}
+	var p provenance
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("parse provenance: %v", err)
+	}
+	want, err := sha256File(filepath.Join(dir, corpusFile))
+	if err != nil {
+		t.Fatalf("hash corpus: %v", err)
+	}
+	if p.Corpus != want {
+		t.Errorf("provenance records corpus %q, the corpus it read hashes to %q", p.Corpus, want)
+	}
+	if p.Partial {
+		t.Error("a full build recorded itself as partial")
+	}
+
+	// The index still opens. provenance.json sits in the directory pkg/engine owns,
+	// and engine refuses to commit over entries it did not write — so a name it does
+	// not ignore would break the next build rather than this read.
+	if _, err := engine.Open(filepath.Join(dir, indexDir)); err != nil {
+		t.Errorf("open after writing provenance: %v", err)
+	}
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Errorf("rebuild over an index carrying provenance: %v", err)
+	}
+}
+
+// TestVerifyProvenanceRefusesAnIndexItCannotPublish covers the three answers that are
+// not "this is the published index": a corpus that is not the pinned one, a build that
+// did not cover the corpus, and an index too old to say either way.
+func TestVerifyProvenanceRefusesAnIndexItCannotPublish(t *testing.T) {
+	_, wantSHA, ok := pinned(corpusFile)
+	if !ok {
+		t.Fatal("corpus.jsonl is not in the pinned snapshot table")
+	}
+
+	write := func(t *testing.T, p provenance) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := writeProvenance(dir, p); err != nil {
+			t.Fatalf("writeProvenance: %v", err)
+		}
+		return dir
+	}
+
+	t.Run("a corpus that is not the pinned one", func(t *testing.T) {
+		dir := write(t, provenance{Corpus: "0000000000000000000000000000000000000000000000000000000000000000"})
+		if err := verifyProvenance(dir); err == nil {
+			t.Error("accepted an index built from another corpus; the queries and qrels beside " +
+				"it are the pinned ones, so nothing else would have noticed")
+		}
+	})
+	t.Run("a partial build", func(t *testing.T) {
+		dir := write(t, provenance{Corpus: wantSHA, Partial: true})
+		if err := verifyProvenance(dir); err == nil {
+			t.Error("accepted an index whose vector and graph arms measure a partly text-only corpus")
+		}
+	})
+	t.Run("an index that cannot say", func(t *testing.T) {
+		if err := verifyProvenance(t.TempDir()); err == nil {
+			t.Error("accepted an index with no provenance at all, which is the one most likely stale")
+		}
+	})
+	t.Run("the published index", func(t *testing.T) {
+		dir := write(t, provenance{Corpus: wantSHA})
+		if err := verifyProvenance(dir); err != nil {
+			t.Errorf("refused the pinned corpus: %v", err)
+		}
+	})
+}
+
+// TestDeltaSignReadsTheDeltaAlone pins rule 2 to what section 4 wrote down. The sign
+// used to come from the interval, which made a cell whose delta had flipped invisible
+// to the flip count whenever its interval happened to span zero.
+func TestDeltaSignReadsTheDeltaAlone(t *testing.T) {
+	// The magnitudes are tiny on purpose: at this size the paired interval over 50
+	// queries spans zero every time, and the sign is still the sign.
+	for _, tc := range []struct {
+		d    float64
+		want int
+	}{
+		{+1e-9, 1}, {-1e-9, -1}, {0, 0}, {+0.5, 1}, {-0.5, -1},
+	} {
+		if got := deltaSign(tc.d); got != tc.want {
+			t.Errorf("deltaSign(%v) = %d, want %d", tc.d, got, tc.want)
+		}
+	}
+}
+
+// TestRunRejectsTheResampleCountBeforeItMeasuresAnything: eval.BootstrapCI refuses
+// iters <= 0, but it is reached after every arm has been evaluated — on the documented
+// corpus, 50 queries against 171,332 documents with a brute-force vector scan each,
+// spent to arrive at a flag error decidable before the index was opened.
+//
+// The empty directory is the assertion. If the check moved back below the index open,
+// this would fail on a missing file instead.
+func TestRunRejectsTheResampleCountBeforeItMeasuresAnything(t *testing.T) {
+	for _, cmd := range []struct {
+		name string
+		fn   func(context.Context, []string) error
+	}{
+		{"run", run}, {"sweep", sweep}, {"weights", weights},
+	} {
+		t.Run(cmd.name, func(t *testing.T) {
+			err := cmd.fn(context.Background(), []string{"-data", t.TempDir(), "-any-snapshot", "-iters=0"})
+			if !errors.Is(err, eval.ErrNoIters) {
+				t.Errorf("error = %v, want ErrNoIters: the count is decidable before any arm runs", err)
+			}
+		})
 	}
 }
