@@ -190,14 +190,30 @@ func (m *mergedSource) termList() []string {
 func (m *mergedSource) postings(t string) []Posting {
 	var out []Posting
 	for _, s := range m.segs {
-		for _, e := range s.lookup(t) {
+		// Each segment that claims the term is asked separately, and each one
+		// has to answer. Checking only that something came back would let a
+		// term held by nine segments lose one segment's list and still look
+		// whole: the merge would publish a replacement missing those documents'
+		// postings, prune the segment that could have supplied them, and leave
+		// an index Scrub cannot tell from a smaller corpus.
+		//
+		// A term in s.terms always has at least one posting when the file is
+		// intact — encodePostings writes no empty entries — so nil here is
+		// damage, which is exactly what lookup returns it for.
+		if _, claimed := s.terms[t]; !claimed {
+			continue
+		}
+		pl := s.lookup(t)
+		if len(pl) == 0 {
+			m.failf("merge: the segment at %d indexes term %q and its postings do not decode", s.base, t)
+			continue
+		}
+		for _, e := range pl {
 			out = append(out, Posting{Doc: e.Doc - m.base, Freq: e.Freq})
 		}
 	}
-	// termList only names terms some segment's index holds, so every term asked
-	// for here has postings somewhere. None coming back means the one segment
-	// that had them would not decode them, and encodePostings would write a term
-	// with zero blocks — which the decoder refuses outright.
+	// termList only names terms some segment's index holds, so nothing at all
+	// coming back means no segment claimed a term every segment was asked about.
 	if len(out) == 0 {
 		m.failf("merge: term %q has postings in no segment being merged", t)
 	}

@@ -247,7 +247,10 @@ func (ix *Index) Commit(dir string) error {
 	if err := ix.adopt(root, published[len(published)-1]); err != nil {
 		return fmt.Errorf("commit %s: %w", seg, err)
 	}
-	ix.dir = dir
+	// Absolute, for the reason openIndex gives.
+	if ix.dir, err = filepath.Abs(dir); err != nil {
+		return fmt.Errorf("commit %s: %w", dir, err)
+	}
 
 	// The previous generation is unreachable now. Pruning it is best-effort:
 	// the commit above is already durable, and a leftover directory nothing
@@ -266,6 +269,12 @@ func (ix *Index) adopt(root *os.Root, info segInfo) error {
 	}
 	ix.segs = append(ix.segs, s)
 	ix.base = DocID(uint64(info.base) + uint64(info.count))
+	// Cleared, not just reslept to zero: the backing array survives, and every
+	// Document still in it keeps its text, vector and links reachable. Reads have
+	// moved to the mapping by now, so leaving them would hold the corpus twice —
+	// once in the page cache where this milestone put it and once on the Go heap
+	// it was put there to stay off.
+	clear(ix.docs)
 	ix.docs = ix.docs[:0]
 	ix.docLen = ix.docLen[:0]
 	ix.totalLen = 0
@@ -325,11 +334,28 @@ func Open(dir string) (*Index, error) {
 		// stay dense across the join and an Add after an Open cannot collide
 		// with a document already on disk.
 		ix.base = DocID(uint64(s.base) + uint64(s.count))
+		// One width per index, not per segment. Add enforces it while a corpus
+		// is being built and nothing re-checked it while one is being assembled,
+		// so a copied or doctored manifest could join two embedding spaces into
+		// an index that opens cleanly and then aborts on whichever vector query
+		// reaches across the join.
 		if s.vecDim != 0 {
+			if ix.vecDim != 0 && s.vecDim != ix.vecDim {
+				ix.Close() //nolint:errcheck // already returning an error
+				return nil, fmt.Errorf("open %s: vectors are %d wide, the segments before it hold %d: %w",
+					info.name, s.vecDim, ix.vecDim, ErrCorrupt)
+			}
 			ix.vecDim = s.vecDim
 		}
 	}
-	ix.dir = dir
+	// Absolute, because this is remembered and used later: Merge reopens it and
+	// Commit stats it, and a relative path stops naming this index the moment the
+	// process changes directory. The mappings would still be valid, so the
+	// failure would be caused by nothing but the deferred resolution.
+	if ix.dir, err = filepath.Abs(dir); err != nil {
+		ix.Close() //nolint:errcheck // already returning an error
+		return nil, err
+	}
 	return ix, nil
 }
 
@@ -371,6 +397,7 @@ func Scrub(dir string) error {
 	// This holds one entry per key, which is the vocabulary of keys rather than
 	// the corpus, and small beside the segment loadSegment already materializes.
 	keys := make(map[string]string, 0)
+	vecDim := 0
 	for _, seg := range segs {
 		ix, err := loadSegment(root, seg.name, true)
 		if err != nil {
@@ -384,6 +411,16 @@ func Scrub(dir string) error {
 		if len(ix.docs) != seg.count {
 			return fmt.Errorf("scrub %s: the manifest says %d documents, the segment holds %d: %w",
 				seg.name, seg.count, len(ix.docs), ErrCorrupt)
+		}
+		// The same one-width-per-index rule Open now applies. loadSegment
+		// establishes each segment's width from its own documents; nothing
+		// compared one segment's against the next's.
+		if ix.vecDim != 0 {
+			if vecDim != 0 && ix.vecDim != vecDim {
+				return fmt.Errorf("scrub %s: vectors are %d wide, an earlier segment's are %d: %w",
+					seg.name, ix.vecDim, vecDim, ErrCorrupt)
+			}
+			vecDim = ix.vecDim
 		}
 		for key := range ix.byKey {
 			if prev, dup := keys[key]; dup {
