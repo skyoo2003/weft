@@ -1115,3 +1115,102 @@ func TestAnImpossibleFrequencyIsRefused(t *testing.T) {
 		t.Fatalf("Scrub with an impossible frequency: got %v, want ErrCorrupt", err)
 	}
 }
+
+// TestADamagedRecordCannotAllocateTheCorpus is the cost of deciding a record is
+// damaged.
+//
+// A record's seeded checksum is the thing that says whether its fields are
+// real, and it cannot be read before the fields are: the checksum stands at the
+// end of the record, and where the record ends is what decoding it establishes.
+// So every length inside is acted on before anything has vouched for it, and a
+// length is bounded only by whatever the decoder can see. On the lazy path that
+// was the rest of the docs section — the corpus. One damaged vector width, or
+// one damaged text length, therefore asks for an allocation the size of the
+// index before the checksum gets the chance to refuse it, and the process dies
+// instead of Doc returning false.
+//
+// docoff is what closes it, and it is already read: the next document's offset
+// is where this record ends, so the reader is handed the record rather than the
+// section, and every length inside is bounded by the record's own size.
+func TestADamagedRecordCannotAllocateTheCorpus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a corpus of a few megabytes")
+	}
+	const docs = 2000
+	dir := t.TempDir()
+	func() {
+		ix := bulkCorpus(t, docs)
+		defer ix.Close() //nolint:errcheck // teardown
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+	}()
+	segDir := filepath.Join(dir, segDirName(1))
+
+	// Where the writer put the first two records. The crafted record has to
+	// start where the table says record 0 starts and end before record 1, which
+	// is what makes it reachable through the lazy path at all.
+	offs, err := parseDocOffsets(section(t, segDir, docoffFile, kindDocoff))
+	if err != nil {
+		t.Fatal(err)
+	}
+	off0, _ := offs.at(0)
+	off1, _ := offs.at(1)
+	path := filepath.Join(segDir, docsFile)
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A vector of a million components: four megabytes, and legal as far as the
+	// old bound could tell, because a few megabytes of docs section still stood
+	// behind it. The record is framed and checksummed exactly as the writer
+	// frames one — the width is the only lie, which is what keeps this a test of
+	// the bound rather than of the checksum.
+	const width = 1 << 20
+	rewriteSection(t, path, kindDocs, func(w *segWriter) {
+		w.uvarint(uint64(docs)) // the same count, so record 0 still starts at off0
+		if w.off() != off0 {
+			t.Fatalf("record 0 starts at %d, the table says %d", w.off(), off0)
+		}
+		w.beginUnit(0)
+		w.str("doc-00000")
+		w.str("")
+		w.uvarint(1) // token count
+		w.uvarint(width)
+		w.endUnit()
+		if w.off() > off1 {
+			t.Fatalf("the crafted record runs to %d, past record 1 at %d", w.off(), off1)
+		}
+		// The rest of the section stays: "what is left to read" is the quantity
+		// the old bound used, so removing it would remove the case.
+		pad := make([]byte, 4096)
+		for w.off() < int(fi.Size())-4 {
+			w.write(pad[:min(len(pad), int(fi.Size())-4-w.off())])
+		}
+	})
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if d, ok := got.Doc(0); ok {
+		t.Errorf("Doc(0) returned %q from a record claiming a %d-wide vector", d.Key, width)
+	}
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+
+	// Refusing a record must cost the record. Four megabytes is what the width
+	// asks for and the whole complaint; 64 KB is well above what decoding one
+	// short record needs and well below it.
+	if limit := uint64(64 << 10); allocated > limit {
+		t.Errorf("refusing one damaged record allocated %d bytes, over the %d-byte limit — the width is still bounded by the section rather than the record",
+			allocated, limit)
+	}
+	t.Logf("refusing the record allocated %d bytes", allocated)
+}
