@@ -307,11 +307,38 @@ func Open(dir string) (*Index, error) {
 	}
 	defer root.Close()
 
-	_, segs, err := readManifest(root)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", dir, err)
+	// A segment the manifest names and nobody can open is the one failure that
+	// can mean the directory is fine and this reader is simply late: Merge
+	// publishes its replacement before it prunes, so the manifest on disk now
+	// names segments that are all there. Re-read it and try again.
+	//
+	// Bounded, because a merge finishes. A manifest that keeps naming a segment
+	// nothing can open is damage, and has to be reported as damage rather than
+	// spun on.
+	for attempt := 0; ; attempt++ {
+		_, segs, err := readManifest(root)
+		if err != nil {
+			return nil, fmt.Errorf("open %s: %w", dir, err)
+		}
+		ix, err := mapGeneration(root, dir, segs)
+		if err == nil {
+			return ix, nil
+		}
+		if !errors.Is(err, errSegmentGone) || attempt+1 == openAttempts {
+			return nil, err
+		}
 	}
+}
+
+// openAttempts is how many times Open re-reads the manifest before calling a
+// vanished segment damage. Two retries covers a reader overtaken by a merge and
+// then by a second one; a third would be a directory nobody is merging.
+const openAttempts = 3
+
+// mapGeneration maps every segment one manifest names, in order.
+func mapGeneration(root *os.Root, dir string, segs []segInfo) (*Index, error) {
 	ix := New()
+	var err error
 	for _, info := range segs {
 		s, err := openSegment(root, info.name, info.base)
 		if err != nil {

@@ -4,6 +4,7 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"math"
 	"os"
@@ -1212,5 +1213,125 @@ func TestOpenStoresAnAbsoluteDirectory(t *testing.T) {
 	defer fresh.Close() //nolint:errcheck // teardown
 	if !filepath.IsAbs(fresh.dir) {
 		t.Errorf("Commit remembered %q", fresh.dir)
+	}
+}
+
+// TestOpenRereadsAManifestAMergeReplaced is the window between reading the
+// manifest and mapping what it names, reproduced without racing for it.
+//
+// Merge publishes its replacement and then prunes the segments it replaced, so a
+// reader holding the pre-merge list maps names that are no longer there.
+// Mappings already taken survive the unlink; only this window does not, and
+// nothing is wrong with the directory while it is open.
+//
+// The retry itself cannot be driven from outside — Open re-reads the manifest
+// from disk, so a test cannot hand it a stale one. What is pinned here instead
+// is both ends of it: the window produces errSegmentGone and nothing else, and
+// a segment that stays missing is still reported rather than spun on.
+func TestOpenRereadsAManifestAMergeReplaced(t *testing.T) {
+	dir := t.TempDir()
+	ix := commitEach(t, dir, 9)
+	defer ix.Close() //nolint:errcheck // teardown
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	// What a reader that got here before the merge is holding.
+	_, stale, err := readManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ix.Merge(); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	if _, err := mapGeneration(root, dir, stale); !errors.Is(err, errSegmentGone) {
+		t.Fatalf("mapping the manifest a merge replaced: got %v, want errSegmentGone", err)
+	}
+	// And it is still ErrCorrupt to every caller that only asks what kind of
+	// failure this is, so telling it apart cost no caller anything.
+	if !errors.Is(errSegmentGone, ErrCorrupt) {
+		t.Error("errSegmentGone stopped reporting as ErrCorrupt")
+	}
+
+	// The directory itself was valid throughout.
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open after the merge that made that list stale: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	if got.Len() != 9 {
+		t.Errorf("Open recovered %d documents, want 9", got.Len())
+	}
+
+	// A segment that is gone for good is damage, and bounded retries are what
+	// keep it from becoming a spin.
+	if err := os.RemoveAll(filepath.Join(dir, segDirName(10))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open with a segment that stays missing: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestOpenSurvivesAConcurrentMerge is the same window reached the way a caller
+// reaches it: a reader looping against a writer that commits, merges and prunes.
+// It is a smoke test rather than a proof — the window is microseconds wide — and
+// it is here because the failure it looks for is one no single-threaded test can
+// produce.
+//
+// Nine segments is one over the merge threshold, so each round merges and prunes
+// for real while the reader hammers the same directory.
+func TestOpenSurvivesAConcurrentMerge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("races a writer for a few hundred opens")
+	}
+	dir := t.TempDir()
+	ix := commitEach(t, dir, 9)
+	defer ix.Close() //nolint:errcheck // teardown
+
+	stop := make(chan struct{})
+	bad := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			got, err := Open(dir)
+			if err != nil {
+				select {
+				case bad <- err:
+				default:
+				}
+				return
+			}
+			got.Close() //nolint:errcheck // the reader only cares that it opened
+		}
+	}()
+
+	for i := range 30 {
+		if _, err := ix.Add(Document{Key: fmt.Sprintf("round-%03d", i), Text: "shared term0 and more shared"}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if err := ix.Merge(); err != nil {
+			t.Fatalf("Merge: %v", err)
+		}
+	}
+	close(stop)
+	<-done
+	select {
+	case err := <-bad:
+		t.Fatalf("Open failed while a merge was running: %v", err)
+	default:
 	}
 }

@@ -9,6 +9,16 @@ import (
 	"os"
 )
 
+// errSegmentGone is a manifest naming a segment directory that is not there.
+//
+// It is ErrCorrupt to every caller that only asks what kind of failure this is.
+// Open tells it apart because it is the one failure that can mean nothing is
+// wrong: Merge publishes its replacement and then prunes what it replaced, so a
+// reader that read the manifest before the flip and reaches the mapping after
+// the prune is holding a list that was true when it read it. Mappings already
+// taken survive the unlink; only this window does not.
+var errSegmentGone = fmt.Errorf("the manifest names this segment but no directory stands there: %w", ErrCorrupt)
+
 // segment is one immutable on-disk segment, mapped and answering point queries.
 //
 // It is what an Index reads when the answer is not in the pending in-memory
@@ -57,7 +67,10 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 		// us, and reports as itself. Lstat, not Stat: Stat follows the link in
 		// question.
 		fi, serr := root.Lstat(name)
-		if errors.Is(err, fs.ErrNotExist) || (serr == nil && !fi.IsDir()) {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, errSegmentGone
+		}
+		if serr == nil && !fi.IsDir() {
 			return nil, fmt.Errorf("the manifest names this segment but no directory stands there: %w", ErrCorrupt)
 		}
 		return nil, err
