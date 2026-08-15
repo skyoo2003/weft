@@ -80,6 +80,51 @@ from `formatVersion`. `TestOtherVersionsAreRefusedNotMisread` patched to
 version 2, which is now current; it patches `formatVersion + 1`. Recorded here
 because "the test changed" and "the test got weaker" look alike in a diff.
 
+### Task 1d — per-unit checksums
+
+**Summary.** The frame checksum covers a whole file, so computing it costs a
+full read — the cost this milestone removes. A reader that maps a segment and
+touches one record never computes it, so integrity has to be checkable one unit
+at a time or it is not checkable at all.
+
+**RED** — commit `eab4750`. The sweep measured rather than merely failed:
+
+```
+$ go test ./pkg/engine/ -run 'TestEveryByteFlipIsCaughtWithoutTheFrameCRC|TestARecordDecodedUnderTheWrongIDIsRefused'
+--- FAIL: TestEveryByteFlipIsCaughtWithoutTheFrameCRC/docs
+    docs payload byte 10 flipped, frame checksum repaired: got <nil>, want ErrCorrupt
+    docs payload byte 11 flipped, frame checksum repaired: got <nil>, want ErrCorrupt
+    docs payload byte 12 flipped, frame checksum repaired: got <nil>, want ErrCorrupt
+    docs payload byte 26 flipped, frame checksum repaired: got <nil>, want ErrCorrupt
+--- FAIL: TestEveryByteFlipIsCaughtWithoutTheFrameCRC/terms
+    terms payload byte 8 flipped, frame checksum repaired: got <nil>, want ErrCorrupt
+--- FAIL: TestARecordDecodedUnderTheWrongIDIsRefused
+    document 2's record ("charlie") decoded as document 1 returned "charlie", <nil>; want ErrCorrupt
+```
+
+Bytes 10–12 and 26 are the two documents' text; terms byte 8 is the term
+string. **The plan's guess was half wrong.** It named postings blocks and docs
+records as the unprotected pair; postings survived 0 of its flips, because
+every field in a block is cross-checked against the block's contents. The
+unprotected pair is `docs` and `terms`.
+
+Postings still got the checksum, for a reason this test cannot show while
+`Open` is eager: it decodes every block, so every invariant is re-derived. The
+lazy reader skips blocks, and a skipped block's invariants are re-derived by
+nobody.
+
+**GREEN** — commit `b431d1e`. All positions caught, wrong-id read refused,
+`make all`/`arch`/`deps` green, `FuzzSegmentDecoding` 6,119,898 execs no panic,
+`pkg/scorer` and `pkg/fusion` diff still 0 lines.
+
+**The cost, and a trap it sprang.** 17 of the 20 handcrafted lying-file
+payloads had to start carrying correct unit checksums. Computing them rather
+than letting them fail is not politeness: a lie that *also* fails its checksum
+still reports `ErrCorrupt`, so the case still passes while testing the checksum
+instead of the rule it is named for. `TestUnsortedTermsAreRefused` did exactly
+that — passed green, never reached the ordering check. It now asserts the
+reason in the error message, not just the sentinel.
+
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
@@ -94,6 +139,10 @@ because "the test changed" and "the test got weaker" look alike in a diff.
 | 8 | A `docoff` or `keys` section disagreeing with `docs` is refused at `Open` rather than answering wrongly later | `seek.go:verifySeekSections`, exercised by every `Open` in the suite | unit | PASS | `go test ./...` |
 | 9 | Neither the frame parser nor the decoders panic on arbitrary bytes, including the two new section kinds | `segment_test.go:FuzzParseSection` | fuzz | PASS | 5,466,890 execs |
 | 10 | The storage change costs the scorers and the fuser nothing | `git diff --stat main -- pkg/scorer pkg/fusion` | architecture | PASS | empty output |
+| 11 | Any byte flip in `docs`, `postings` or `terms` is caught **with the frame checksum repaired** — the state every lazy read is in | `formatv2_test.go:TestEveryByteFlipIsCaughtWithoutTheFrameCRC` | unit | PASS | `go test ./pkg/engine/` |
+| 12 | A healthy record decoded under another document's id is refused, so a damaged offset table cannot produce a plausible wrong answer | `formatv2_test.go:TestARecordDecodedUnderTheWrongIDIsRefused` | unit | PASS | same |
+| 13 | Unsorted terms are refused **for being unsorted**, asserted on the reason rather than the sentinel | `segment_test.go:TestUnsortedTermsAreRefused` | unit | PASS | same |
+| 14 | The 20-case lying-file matrix still trips the rule each case names, not the new checksum | `segment_test.go:TestLyingFilesAreRefused` | unit | PASS | same |
 
 ## Coverage and known gaps
 
@@ -104,8 +153,13 @@ corruption matrices are — so no percentage is claimed here. What *is* claimed:
   every `Open`, which is O(index) and precisely what task 2 has to move into
   `Scrub`. It is written as one function so that move is a call site changing,
   not a rule being dropped.
-- **No per-unit CRC yet** (task 1d). The frame CRC covers the whole file, so a
-  lazy reader would have to checksum everything or nothing. This blocks task 2.
+- **Per-unit checksums cover `docs`, `postings` and `terms` only.** `docoff`
+  and `keys` have none, because `verifySeekSections` still re-derives both from
+  `docs` on every `Open` — the check task 2 has to move. When it moves, those
+  two join the sweep, and a damaged `docoff` entry is already caught by the
+  id-seeded record checksum rather than by trusting the table.
+- **`meta` has no per-unit checksum and needs none**: it is 19 bytes, always
+  read in full, and `Open` cross-checks every field against the documents.
 - **`segWriter` still buffers whole sections** (task 1e). Its own comment calls
   that fine "by construction — the section describes an index that is itself
   entirely in memory"; task 5's merge is what breaks that premise.
@@ -125,6 +179,9 @@ Checkpoint commits on `m3-scale`, oldest first:
 |---|---|---|
 | `70dd1f5` | RED | The four format v2 tests fail to compile, each on a symbol they newly reference |
 | `89846d4` | GREEN | Same tests pass; `make all`/`arch`/`deps` green; 5.4M fuzz execs no panic; `pkg/scorer` and `pkg/fusion` diff 0 lines |
+| `6108a01` | docs | This file |
+| `eab4750` | RED | Five payload positions survive a flip once the frame checksum is repaired; a record decodes under the wrong id with no error |
+| `b431d1e` | GREEN | Those positions all caught, wrong-id read refused; `make all`/`arch`/`deps` green; 6.1M fuzz execs no panic; scorer/fusion diff still 0 |
 
 If these are squashed, this table and the two blocks above are the surviving
 record.
