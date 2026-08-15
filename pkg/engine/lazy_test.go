@@ -684,3 +684,59 @@ func TestADamagedRecordIsNeverServed(t *testing.T) {
 		t.Fatalf("Scrub with a damaged document record: got %v, want ErrCorrupt", err)
 	}
 }
+
+// A term's offset is the one value the lazy path takes on trust.
+//
+// The eager decoder does check it: decodePostings walks the postings file in
+// step with the terms file and refuses a term whose recorded offset is not
+// where that walk currently sits. decodeTermIndex performs no walk — not
+// walking is what makes Open lazy — so the check has nowhere to live there,
+// and it has to happen where the offset is used instead.
+//
+// A checksum does not substitute for it. CRC32C is an integrity code, not a
+// signature: whoever changes the bytes recomputes it, and this package's
+// premise is that it parses files it did not write. So the offset arrives
+// arbitrary, and an offset below the frame header indexes a slice negatively —
+// which is a panic, in a package whose documented promise is that library code
+// never panics.
+//
+// segment.doc guards the offset it takes from docoff. This is the same guard,
+// on the sibling that did not have one.
+func TestALyingTermOffsetIsNeverFollowed(t *testing.T) {
+	tests := []struct {
+		name string
+		off  uint64
+	}{
+		{"before the frame header", 0},
+		{"past the payload", 1 << 20},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, segDir, _ := commitSeeded(t)
+			// Framed and checksummed exactly as the real writer frames it. Only
+			// the offset lies, which is what makes this reachable through Open
+			// rather than caught by it.
+			rewriteSection(t, filepath.Join(segDir, termsFile), kindTerms, func(w *segWriter) {
+				termsPayload(w, 1, termEntry{term: "fusion", off: tc.off})
+			})
+
+			ix, err := Open(dir)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer ix.Close() //nolint:errcheck // teardown
+
+			// No postings, and no panic. Corruption reports as absence here for
+			// the reason D-006 gives: Lookup has no error to return, and giving
+			// it one would move every scorer.
+			if pl := ix.Lookup("fusion"); len(pl) != 0 {
+				t.Errorf("Lookup followed an offset of %d and returned %d postings", tc.off, len(pl))
+			}
+
+			// Detectable, and detected — on the path that reads everything.
+			if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("Scrub with a lying term offset: got %v, want ErrCorrupt", err)
+			}
+		})
+	}
+}
