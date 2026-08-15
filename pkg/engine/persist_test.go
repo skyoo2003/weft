@@ -12,6 +12,45 @@ import (
 	"testing"
 )
 
+// copyTree copies one flat segment directory to a new name, which is how a test
+// builds a directory that the API refuses to produce: two segments holding the
+// same key. Scrub is documented as what a caller runs before trusting a copied
+// directory, so a copied directory is what it has to be tested on.
+func copyTree(t *testing.T, from, to string) {
+	t.Helper()
+	if err := os.Mkdir(to, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ents, err := os.ReadDir(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		b, err := os.ReadFile(filepath.Join(from, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(to, e.Name()), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// republish writes a manifest naming segs, replacing whatever the directory
+// published before. It is how a test reaches the states a writer cannot reach
+// but a damaged or spliced directory can.
+func republish(t *testing.T, dir string, gen uint64, segs []segInfo) {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := writeManifest(root, gen, segs); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // dirNames lists dir's entries, sorted, for asserting exactly what a commit
 // leaves behind.
 func dirNames(t *testing.T, dir string) []string {
@@ -791,5 +830,187 @@ func TestCommitDuringReads(t *testing.T) {
 	<-done
 	if _, err := Open(dir); err != nil {
 		t.Fatalf("Open: %v", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Reproducers for the PR #10 review. Each is a state a caller can reach — or a
+// directory a caller can be handed — where the answer served is wrong rather
+// than absent.
+// --------------------------------------------------------------------------
+
+// TestCommitAfterAVectorlessBatchStaysScrubbable is incremental ingestion of a
+// corpus whose vectors do not arrive with every batch.
+//
+// ix.vecDim is the width the corpus established and Add enforces it, so it
+// deliberately outlives a commit. What must not outlive one is its appearance in
+// the next segment's meta: a batch holding no vectors writes documents that
+// decode with width zero, and meta claiming the corpus width makes Scrub reject
+// a segment the writer itself produced.
+func TestCommitAfterAVectorlessBatchStaysScrubbable(t *testing.T) {
+	dir := t.TempDir()
+	ix := New()
+	addAll(t, ix, []Document{{Key: "with", Text: "a vector", Vector: []float32{1, 0, 0, 1}}})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("first Commit: %v", err)
+	}
+	addAll(t, ix, []Document{{Key: "without", Text: "no vector at all"}})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("second Commit: %v", err)
+	}
+	if err := Scrub(dir); err != nil {
+		t.Fatalf("Scrub after a batch that carried no vectors: %v", err)
+	}
+	// And the width is still enforced, so narrowing what meta records did not
+	// narrow what the corpus accepts.
+	if _, err := ix.Add(Document{Key: "wrong", Text: "x", Vector: []float32{1, 2}}); !errors.Is(err, ErrDimMismatch) {
+		t.Errorf("Add of a 2-wide vector into a 4-wide corpus: got %v, want ErrDimMismatch", err)
+	}
+}
+
+// TestOpenRefusesDamagedMeta is the one section whose cost argument does not
+// apply.
+//
+// Open skips frame checksums because computing them is the size of the index.
+// meta is three uvarints, read in full on every Open, and every BM25 score in
+// the index is normalized by the number in it. Nothing else can catch a change
+// to it: no unit seals meta, and the value is simply believed downstream.
+func TestOpenRefusesDamagedMeta(t *testing.T) {
+	dir := t.TempDir()
+	ix := New()
+	addAll(t, ix, []Document{{Key: "one", Text: "a b c"}})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// meta is uvarint(count), uvarint(totalLen), uvarint(vecDim): 01 03 00 for
+	// this corpus. Doubling the token count still decodes, so only the frame
+	// checksum stands between it and every score in the index.
+	path := filepath.Join(dir, segDirName(1), metaFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b[segHeaderLen] != 1 || b[segHeaderLen+1] != 3 {
+		t.Fatalf("meta payload is %v, this test is patching the wrong byte", b[segHeaderLen:segHeaderLen+3])
+	}
+	b[segHeaderLen+1] = 6
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Open(dir)
+	if err == nil {
+		defer got.Close() //nolint:errcheck // teardown
+		_, avg := got.Stats()
+		t.Fatalf("Open accepted damaged meta; every query now normalizes by an average length of %v", avg)
+	}
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open with damaged meta: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestScrubRefusesAManifestCountThatDisagreesWithMeta closes a gap between the
+// two verification paths.
+//
+// Open compares the manifest's count against meta's, because every later
+// segment's base was computed from the manifest's number. Scrub loads each
+// segment and throws the result away without making that comparison — so it
+// reports success for a directory Open then refuses, which is the exact opposite
+// of what a caller runs it for.
+func TestScrubRefusesAManifestCountThatDisagreesWithMeta(t *testing.T) {
+	dir := t.TempDir()
+	ix := New()
+	addAll(t, ix, []Document{{Key: "one", Text: "a b c"}})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// The same segment, republished under a manifest claiming it holds two.
+	republish(t, dir, 1, []segInfo{{name: segDirName(1), base: 0, count: 2}})
+
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open with a manifest count meta contradicts: got %v, want ErrCorrupt", err)
+	}
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub passed a directory Open refuses: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestScrubRefusesAKeyHeldByTwoSegments is the invariant Add enforces and
+// nothing re-checks after the fact.
+//
+// Keys are unique across the whole index — Resolve rests on it, and it is why
+// the first segment to answer is treated as the only one that can. Add refuses a
+// duplicate against the segments, so this state is unreachable through the API
+// and perfectly reachable by copying a segment directory in. Scrub is documented
+// as what a caller runs before trusting a copied directory.
+func TestScrubRefusesAKeyHeldByTwoSegments(t *testing.T) {
+	one, two := t.TempDir(), t.TempDir()
+	a := New()
+	addAll(t, a, []Document{{Key: "dup", Text: "the first corpus"}})
+	if err := a.Commit(one); err != nil {
+		t.Fatalf("Commit a: %v", err)
+	}
+	b := New()
+	addAll(t, b, []Document{{Key: "dup", Text: "the second corpus"}})
+	if err := b.Commit(two); err != nil {
+		t.Fatalf("Commit b: %v", err)
+	}
+
+	copyTree(t, filepath.Join(two, segDirName(1)), filepath.Join(one, segDirName(2)))
+	republish(t, one, 2, []segInfo{
+		{name: segDirName(1), base: 0, count: 1},
+		{name: segDirName(2), base: 1, count: 1},
+	})
+
+	if err := Scrub(one); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with %q in two segments: got %v, want ErrCorrupt", "dup", err)
+	}
+}
+
+// TestCommitRefusesADirectoryItDidNotOpen is what a document count cannot tell
+// apart.
+//
+// Commit checks that the destination holds as many documents as this index has
+// committed, because the pending ids are numbered from that. Two unrelated
+// directories of the same size pass that check identically, and the commit then
+// joins this index's new documents to the other directory's history: the live
+// object keeps answering from the segments it opened, a reopen answers from the
+// ones on disk, and a later merge writes the disagreement down.
+func TestCommitRefusesADirectoryItDidNotOpen(t *testing.T) {
+	one, two := t.TempDir(), t.TempDir()
+	a := New()
+	addAll(t, a, []Document{{Key: "a-one", Text: "the first corpus"}})
+	if err := a.Commit(one); err != nil {
+		t.Fatalf("Commit a: %v", err)
+	}
+	b := New()
+	addAll(t, b, []Document{{Key: "b-one", Text: "the second corpus"}})
+	if err := b.Commit(two); err != nil {
+		t.Fatalf("Commit b: %v", err)
+	}
+
+	ix, err := Open(one)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ix.Close() //nolint:errcheck // teardown
+	if _, err := ix.Add(Document{Key: "later", Text: "added to the first corpus"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Same document count, unrelated history.
+	if err := ix.Commit(two); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Commit into a directory this index was not opened from: got %v, want ErrCorrupt", err)
+	}
+	// And the directory it did open is still where it can commit.
+	if err := ix.Commit(one); err != nil {
+		t.Fatalf("Commit into its own directory: %v", err)
 	}
 }
