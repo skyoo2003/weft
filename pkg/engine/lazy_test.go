@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -1232,5 +1233,132 @@ func requireLazyMapping(t *testing.T) {
 	t.Helper()
 	if !mapsLazily {
 		t.Skip("this platform reads sections into the heap; see mmap_other.go")
+	}
+}
+
+// TestADamagedKeyEntryCannotAllocateTheKeysFile is the record bound's sibling on
+// the other seek table.
+//
+// A keys entry carries no checksum at all — the section's frame is the only
+// thing behind it, and Open skips that — so a key length is a number acted on
+// with nothing whatever vouching for it. Bounded by the rest of the section, one
+// flipped byte makes Resolve ask for a string the size of the keys file, and a
+// binary search visits log2(n) entries on the way to answering.
+//
+// The offset table bounds it, exactly as docoff bounds a document record: the
+// next entry's offset is where this one stops.
+func TestADamagedKeyEntryCannotAllocateTheKeysFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds an 8 MB keys section")
+	}
+	dir, segDir, ix := commitSeeded(t)
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Four entries, eight bytes apart, each claiming a four-megabyte key that is
+	// not there — whichever the binary search visits is the damaged one, so the
+	// case does not rest on which. The section is padded past that length so the
+	// old bound, which was whatever remained of it, would have accepted the
+	// claim.
+	const claimed = 1 << 22
+	const section = 8 << 20
+	const spacing = 8
+	rewriteSection(t, filepath.Join(segDir, keysFile), kindKeys, func(w *segWriter) {
+		w.uvarint(4)
+		first := w.off() + 4*docoffWidth
+		for i := range 4 {
+			clear(w.scratch[:docoffWidth])
+			binary.LittleEndian.PutUint64(w.scratch[:8], uint64(first+i*spacing))
+			w.write(w.scratch[:docoffWidth])
+		}
+		for range 4 {
+			at := w.off()
+			w.uvarint(claimed)
+			for w.off() < at+spacing {
+				w.write([]byte{0})
+			}
+		}
+		pad := make([]byte, 4096)
+		for w.off() < section {
+			w.write(pad[:min(len(pad), section-w.off())])
+		}
+	})
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if id, ok := got.Resolve("alpha"); ok {
+		t.Errorf("Resolve returned %d from a keys table whose entries decode to nothing", id)
+	}
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+
+	if limit := uint64(64 << 10); allocated > limit {
+		t.Errorf("refusing a damaged key entry allocated %d bytes, over the %d-byte limit — the length is still bounded by the section rather than the entry",
+			allocated, limit)
+	}
+	t.Logf("refusing the entry allocated %d bytes", allocated)
+}
+
+// TestLookupRefusesAPartialAnswer is the merge's rule applied where a query
+// reads.
+//
+// Merge already refuses to publish a term whose postings one contributing
+// segment could not decode, because a list missing a segment's worth of
+// documents is not a shorter list, it is a wrong one. A query has the same
+// problem and had the opposite answer: Lookup concatenated whatever came back,
+// so a damaged posting block in one segment silently dropped its documents from
+// every ranking while the other segments made the result look whole.
+//
+// The terms index is what makes the difference visible: it says which segments
+// claim the term, so a segment that claims one and cannot decode it is damage
+// rather than a segment that simply does not hold it.
+func TestLookupRefusesAPartialAnswer(t *testing.T) {
+	dir := t.TempDir()
+	ix := New()
+	// One term in two segments, so a damaged one still leaves a plausible
+	// nonempty answer behind.
+	mustAdd(t, ix, Document{Key: "one", Text: "fusion"})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	mustAdd(t, ix, Document{Key: "two", Text: "fusion"})
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A byte inside the second segment's only posting block, where nothing but
+	// the block's own checksum can see it.
+	path := filepath.Join(dir, segDirName(2), postingsFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b[len(b)-8] ^= 0xff
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+
+	if pl := got.Lookup("fusion"); len(pl) != 0 {
+		t.Errorf("Lookup returned %+v with one of the two segments holding the term unreadable", pl)
+	}
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with a damaged posting block: got %v, want ErrCorrupt", err)
 	}
 }

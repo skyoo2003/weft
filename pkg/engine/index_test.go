@@ -477,3 +477,26 @@ func TestCorpusTokenTotalsDoNotWrap(t *testing.T) {
 		t.Errorf("Stats reported %v where AvgDocLen reported %v", avg, got)
 	}
 }
+
+// TestAddStopsAtThePlatformCeiling pins Add's ceiling to the decoder's.
+//
+// maxDocCount is what every reader ranges a document count against, and it is
+// the narrower of DocID's width and the platform's int. Add compared against
+// DocID's width alone, so on a 32-bit build the two disagree: an index of maxInt
+// documents accepted another, Len and Stats overflowed, and the Commit that
+// followed published a manifest no reopen would accept — a writer call that
+// succeeds and leaves an index that cannot be read back.
+//
+// The two constants are equal on a 64-bit build, so this distinguishes nothing
+// there. It is the assertion that is right on both.
+func TestAddStopsAtThePlatformCeiling(t *testing.T) {
+	// A base rather than documents: the ceiling is about the collection size,
+	// and maxDocCount of them is not a fixture.
+	ix := &Index{base: DocID(maxDocCount)}
+	if _, err := ix.Add(Document{Key: "one", Text: "a"}); err == nil {
+		t.Fatal("Add accepted a document past the count every decoder refuses")
+	}
+	if ix.Len() != maxDocCount {
+		t.Errorf("a refused Add left the index at %d documents, want %d", ix.Len(), maxDocCount)
+	}
+}
