@@ -156,6 +156,26 @@ func (ix *Index) Commit(dir string) error {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 
+	// The destination has to be the directory this index's committed segments
+	// came from. The count comparison below cannot tell two unrelated
+	// directories of the same size apart, and committing into the wrong one
+	// joins this index's pending documents to that directory's history: the live
+	// object keeps answering from the segments it opened, a reopen answers from
+	// the ones on disk, and the next Merge writes the disagreement down.
+	//
+	// By identity rather than by string, because the same directory reached
+	// through two paths is still the same directory. An index with nothing
+	// committed has no directory yet and may pick any.
+	if ix.dir != "" {
+		same, err := sameDir(ix.dir, dir)
+		if err != nil {
+			return fmt.Errorf("commit %s: %w", dir, err)
+		}
+		if !same {
+			return fmt.Errorf("commit %s: this index holds the segments of %s: %w", dir, ix.dir, ErrCorrupt)
+		}
+	}
+
 	// The manifest is the authority on what is already stored, and the index in
 	// memory has to agree with it — otherwise the segment written below would
 	// be given a base the directory does not expect, and the ids of everything
@@ -342,12 +362,52 @@ func Scrub(dir string) error {
 	if err != nil {
 		return fmt.Errorf("scrub %s: %w", dir, err)
 	}
+	// Keys are unique across the whole index and not merely inside a segment.
+	// Resolve rests on that — it is why the first segment to answer is treated
+	// as the only one that can — and Add enforces it against the segments, so a
+	// duplicate cannot arrive through the API and can arrive by copying a
+	// segment directory in. A copied directory is what this function is for.
+	//
+	// This holds one entry per key, which is the vocabulary of keys rather than
+	// the corpus, and small beside the segment loadSegment already materializes.
+	keys := make(map[string]string, 0)
 	for _, seg := range segs {
-		if _, err := loadSegment(root, seg.name, true); err != nil {
+		ix, err := loadSegment(root, seg.name, true)
+		if err != nil {
 			return fmt.Errorf("scrub %s: %w", seg.name, err)
+		}
+		// The manifest's count and meta's are written by the same commit and
+		// read by different paths, and every base after this segment was
+		// computed from the manifest's. Open compares the two; without the same
+		// comparison here, Scrub reports success for a directory Open refuses,
+		// which is backwards for the check a caller runs before trusting one.
+		if len(ix.docs) != seg.count {
+			return fmt.Errorf("scrub %s: the manifest says %d documents, the segment holds %d: %w",
+				seg.name, seg.count, len(ix.docs), ErrCorrupt)
+		}
+		for key := range ix.byKey {
+			if prev, dup := keys[key]; dup {
+				return fmt.Errorf("scrub %s: key %q is also held by %s: %w",
+					seg.name, key, prev, ErrCorrupt)
+			}
+			keys[key] = seg.name
 		}
 	}
 	return nil
+}
+
+// sameDir reports whether two paths name the same directory. Both must exist:
+// Commit creates its destination before asking.
+func sameDir(a, b string) (bool, error) {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false, err
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(fa, fb), nil
 }
 
 // loadSegment reads one segment directory into an Index. frame says whether to

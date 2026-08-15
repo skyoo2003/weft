@@ -135,9 +135,15 @@ type docOffsets struct {
 }
 
 // parseDocOffsets reads the count and takes the table as a slice. It does not
-// look at a single offset — verifying them all here would read every byte of
-// the section, which is what lazy loading exists not to do. Each offset is
-// bounds-checked where it is used, and Scrub checks all of them.
+// look at a single offset: an offset is only verified by decoding the document
+// it points at, which is the size of the corpus and therefore Scrub's. Each one
+// is bounds-checked where it is used instead.
+//
+// The section's own frame checksum is a different cost, and Open does pay that
+// one — sixteen bytes a document, scanned once, against a docs file three orders
+// larger. It is what stands between a flipped token count and every BM25 score
+// computed from it, because the record's own copy of that count is reachable
+// only through the decode this table exists to avoid. See segSection.eager.
 func parseDocOffsets(r *segReader) (docOffsets, error) {
 	n, err := r.intn("document count", maxDocCount)
 	if err != nil {

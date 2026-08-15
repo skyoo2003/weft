@@ -92,6 +92,24 @@ const maxDocCount = int(min(uint64(maxInt), math.MaxUint32))
 type segSection struct {
 	name string
 	kind byte
+	// eager is whether a lazy Open verifies this section's frame checksum.
+	//
+	// Open skips frame checksums because one costs the size of its section, and
+	// for docs, postings, terms and keys that is the size of the index. meta and
+	// docoff are the two it is not: meta is three uvarints, and docoff is a
+	// fixed sixteen bytes a document — the same order as the terms index Open
+	// already decodes in full, and a scan rather than a map build.
+	//
+	// Cost is only half of it. Both hold numbers nothing downstream can
+	// contradict. No unit seals either, neither carries a copy of itself to
+	// compare against, and between them they hold every value BM25 normalizes
+	// by: meta's corpus token total and docoff's per-document one. Damage there
+	// is not an absence a caller can see, it is a plausible score.
+	//
+	// What stays lazy is verifySeekSections, which re-derives each offset by
+	// decoding the document it points at. That one is the size of the corpus,
+	// and it is Scrub's. Scrub verifies all six frames besides.
+	eager bool
 }
 
 // segSections are the files a segment directory holds, in write order, and the
@@ -101,12 +119,12 @@ type segSection struct {
 // and keys through exactly that one edit, which is the claim this list was
 // written to make good on.
 var segSections = []segSection{
-	{metaFile, kindMeta},
-	{docsFile, kindDocs},
-	{postingsFile, kindPostings},
-	{termsFile, kindTerms},
-	{docoffFile, kindDocoff},
-	{keysFile, kindKeys},
+	{metaFile, kindMeta, true},
+	{docsFile, kindDocs, false},
+	{postingsFile, kindPostings, false},
+	{termsFile, kindTerms, false},
+	{docoffFile, kindDocoff, true},
+	{keysFile, kindKeys, false},
 }
 
 // ---------------------------------------------------------------------------

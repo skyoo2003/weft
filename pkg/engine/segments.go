@@ -76,7 +76,7 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 
 	rs := make([]*segReader, len(segSections))
 	for i, sec := range segSections {
-		r, b, err := openSection(segRoot, sec.name, sec.kind, false)
+		r, b, err := openSection(segRoot, sec.name, sec.kind, sec.eager)
 		if err != nil {
 			return nil, err
 		}

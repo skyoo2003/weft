@@ -59,7 +59,23 @@ type pendingSource struct {
 
 func (p *pendingSource) count() int { return len(p.ix.docs) }
 func (p *pendingSource) totals() (totalLen, vecDim int) {
-	return p.ix.totalLen, p.ix.vecDim
+	// The width this segment holds, not the width the corpus established.
+	//
+	// ix.vecDim outlives a commit on purpose — it is what Add enforces so one
+	// corpus cannot end up holding two embedding spaces — but adopt clears
+	// everything else a generation owns, and a batch that carried no vectors
+	// writes documents that decode with width zero. meta claiming the corpus
+	// width then makes Scrub reject a segment weft itself just wrote, which is
+	// what routine incremental ingestion looks like when vectors arrive in some
+	// batches and not others. Add allows exactly one non-zero width, so the
+	// first vector found is this segment's.
+	for _, d := range p.ix.docs {
+		if len(d.Vector) != 0 {
+			vecDim = len(d.Vector)
+			break
+		}
+	}
+	return p.ix.totalLen, vecDim
 }
 func (p *pendingSource) doc(local int) Document { return p.ix.docs[local] }
 func (p *pendingSource) docLen(local int) int   { return p.ix.docLen[local] }
