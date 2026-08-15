@@ -263,10 +263,16 @@ is what [D-001](DECISIONS.md) is about.
 
 ```text
 key count       uvarint
-  offset        uint64 LE ×n   absolute file offset of each entry, in key order
-  key           string          the entries themselves, ascending
-  document id   uvarint         segment-local
+  offset        uint64 LE      absolute file offset of the entry, in key order
+  (reserved)    8 bytes        written zero; the table shares docoff's 16-byte width
+  key           string         the entries themselves, ascending
+  document id   uvarint        segment-local
 ```
+
+The reserved half is padding, not a field: the table reuses `docoff`'s entry width
+and has no token count to put beside the offset. Eight bytes a document, kept
+because the width is on disk — narrowing it belongs to a version bump, not to a
+reader that would then disagree with every v2 index already written.
 
 The offset table makes `Resolve` a binary search rather than a map rebuilt by
 reading every document. Ascending order is what the search rests on, so an unsorted
