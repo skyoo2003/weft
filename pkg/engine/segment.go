@@ -246,10 +246,12 @@ func (w *segWriter) str(s string) {
 // plausible wrong answer. Binding the id in means the record proves which
 // document it is, and position stops being the only witness. Postings blocks
 // take their own file offset for the same reason, terms entries their index.
+// The seed goes through scratch rather than a local array for the reason the
+// varint encoders give: a local escapes, and this runs once per record, once
+// per block and once per terms entry.
 func (w *segWriter) beginUnit(seed uint64) {
-	var b [8]byte
-	binary.LittleEndian.PutUint64(b[:], seed)
-	w.unit, w.inUnit = crc32.Update(0, segCRC, b[:]), true
+	binary.LittleEndian.PutUint64(w.scratch[:8], seed)
+	w.unit, w.inUnit = crc32.Update(0, segCRC, w.scratch[:8]), true
 }
 
 // endUnit seals the unit with its checksum. The checksum bytes are outside the
@@ -274,9 +276,8 @@ func (w *segWriter) off() int { return w.n }
 // through write, because it cannot cover itself.
 func (w *segWriter) close() error {
 	if w.err == nil {
-		var b [4]byte
-		binary.LittleEndian.PutUint32(b[:], w.crc)
-		_, w.err = w.w.Write(b[:])
+		binary.LittleEndian.PutUint32(w.scratch[:4], w.crc)
+		_, w.err = w.w.Write(w.scratch[:4])
 	}
 	if w.err == nil {
 		w.err = w.w.Flush()
@@ -292,13 +293,17 @@ func (w *segWriter) close() error {
 	return cerr
 }
 
-// writeSegment lays the index down as one segment: meta, docs, postings and
-// the terms index, each its own framed file in segDir.
+// writeSegment lays src down as one segment: every entry in segSections — meta,
+// docs, postings, terms, docoff and keys — its own framed file in segRoot.
 //
-// Requires ix.mu, held for writing by Commit. Everything is encoded under that
-// one lock, so the statistics in meta and the documents they describe cannot
-// come from different moments — the atomicity FINDINGS section 4.4 asked for,
-// statistics snapshot included.
+// Whatever lock src needs is the caller's to hold, and both callers hold ix.mu
+// for writing across the whole encode: the statistics in meta and the documents
+// they describe cannot then come from different moments, which is the atomicity
+// FINDINGS section 4.4 asked for, statistics snapshot included.
+//
+// A source that cannot read something reports it on itself rather than here —
+// see mergedSource.err — because a section file half-written is still a file
+// this function has to close.
 func writeSegment(segRoot *os.Root, src segSource) error {
 	ws := make([]*segWriter, len(segSections))
 	for i, s := range segSections {
@@ -341,9 +346,12 @@ func writeSegment(segRoot *os.Root, src segSource) error {
 	return nil
 }
 
-// encodeDocs lays documents out in DocID order — the position in the file is
-// the DocID, so the id is never written and cannot disagree with itself.
-// Requires ix.mu to be held.
+// encodeDocs lays src's documents out in segment-local id order — the position
+// in the file is the id, so the id is never written and cannot disagree with
+// itself. Ids inside a segment count from zero and the manifest is what says
+// where the segment sits in the index, so a segment's bytes do not depend on
+// what was committed before it — which is what lets an old generation survive a
+// new one untouched.
 //
 // Links are stored as the caller's Keys, not DocIDs (FINDINGS section 4.2):
 // lazy resolution is what keeps forward references and dangling edges free,
@@ -358,15 +366,13 @@ func writeSegment(segRoot *os.Root, src segSource) error {
 // reads. The zero Time needs no presence flag: its own Unix seconds decode
 // back to a Time that IsZero again, so "no timestamp", which recency treats
 // as "no opinion", survives the trip by arithmetic rather than by convention.
-// The returned offsets are absolute file positions, one per DocID, in DocID
-// order — what the docoff section records. They are collected here rather than
+//
+// The returned offsets are absolute file positions, one per id, in id order —
+// what the docoff section records. They are collected here rather than
 // recomputed because a second implementation predicting record sizes would be
-// a second thing to keep in step with this one.
-// Only the pending segment is written: everything added since the last commit.
-// Ids inside a segment are local, starting at zero, and the manifest is what
-// says where the segment sits in the index — so a segment's bytes do not depend
-// on what was committed before it, which is what lets an old generation survive
-// a new one untouched.
+// a second thing to keep in step with this one. The lengths and keys ride back
+// for the same reason: docoff and keys need them, and asking src again would
+// decode the corpus twice.
 func encodeDocs(w *segWriter, src segSource) (offs, lens []int, keys []string) {
 	n := src.count()
 	w.uvarint(uint64(n))
@@ -382,9 +388,11 @@ func encodeDocs(w *segWriter, src segSource) (offs, lens []int, keys []string) {
 		w.uvarint(uint64(lens[i]))
 		w.uvarint(uint64(len(d.Vector)))
 		for _, c := range d.Vector {
-			var b [4]byte
-			binary.LittleEndian.PutUint32(b[:], math.Float32bits(c))
-			w.write(b[:])
+			// scratch, not a local: a local escapes — see the varint encoders —
+			// and this is the innermost loop in the whole writer. On the
+			// milestone 4 corpus it runs 148,232 × 768 times per commit.
+			binary.LittleEndian.PutUint32(w.scratch[:4], math.Float32bits(c))
+			w.write(w.scratch[:4])
 		}
 		w.uvarint(uint64(len(d.Links)))
 		for _, l := range d.Links {
@@ -482,6 +490,12 @@ type segReader struct {
 	name string
 	b    []byte
 	off  int
+
+	// scratch backs the unit checksum's seed, for the reason segWriter.scratch
+	// exists: crc32.Update takes a []byte and a local array escapes, which is a
+	// heap allocation per record decoded — and scorer/vector decodes every
+	// record in the corpus on every query.
+	scratch [8]byte
 }
 
 func (r *segReader) uvarint(what string) (uint64, error) {
@@ -550,9 +564,8 @@ func (r *segReader) u32(what string) (uint32, error) {
 // document to check its postings, so a flipped byte of document text is
 // invisible to every rule in this file.
 func (r *segReader) unit(what string, start int, seed uint64) error {
-	var b [8]byte
-	binary.LittleEndian.PutUint64(b[:], seed)
-	want := crc32.Update(crc32.Update(0, segCRC, b[:]), segCRC, r.b[start:r.off])
+	binary.LittleEndian.PutUint64(r.scratch[:], seed)
+	want := crc32.Update(crc32.Update(0, segCRC, r.scratch[:]), segCRC, r.b[start:r.off])
 	got, err := r.u32(what + " checksum")
 	if err != nil {
 		return err
@@ -870,27 +883,6 @@ func decodeDocRecord(r *segReader, i int) (Document, int, error) {
 	return d, dl, nil
 }
 
-// decodePostings walks the terms index and the postings file in lockstep,
-// filling host.postings. The terms index leads: it holds the term strings and
-// the absolute offset each entry must sit at, so a wrong offset is caught
-// today rather than discovered by milestone 3's first seek.
-//
-// The D-001 block metadata is re-derived from each block's contents and
-// compared against what the block records. Unread fields rot silently — D-001
-// requires tests to catch that, and the decoder checking on every Open means
-// the rot cannot even wait for a test run.
-//
-// What is deliberately not checked is that a term matches the text of the
-// documents it names: nothing here re-tokenizes Text to compare per-document
-// term frequencies. A doctored file can therefore file a document's postings
-// under a token its text does not contain, and text search will return it for
-// that token. That is accepted, for the same reason encodeDocs stores docLen
-// rather than recomputing it — a segment records what was indexed, not what
-// this build's tokenizer would index today, and a reader demanding the two
-// agree would refuse every segment written before a tokenizer change. The
-// invariants below are the ones the scorers actually rest on; term-to-text
-// correspondence is not one of them, and buying it would cost a full
-// re-tokenization of the corpus on every Open.
 // decodeTermIndex reads the whole terms section into a term -> postings offset
 // map, verifying each entry's checksum and the sorted order as it goes.
 //
@@ -1030,6 +1022,27 @@ func decodeTermPostings(post *segReader, term string, docCount int) ([]Posting, 
 	return pl, nil
 }
 
+// decodePostings walks the terms index and the postings file in lockstep,
+// filling host.postings. The terms index leads: it holds the term strings and
+// the absolute offset each entry must sit at, so a wrong offset is caught here
+// rather than at the point of use, which is where the lazy path has to catch it.
+//
+// The D-001 block metadata is re-derived from each block's contents and
+// compared against what the block records. Unread fields rot silently — D-001
+// requires tests to catch that, and the decoder checking means the rot cannot
+// even wait for a test run.
+//
+// What is deliberately not checked is that a term matches the text of the
+// documents it names: nothing here re-tokenizes Text to compare per-document
+// term frequencies. A doctored file can therefore file a document's postings
+// under a token its text does not contain, and text search will return it for
+// that token. That is accepted, for the same reason encodeDocs stores docLen
+// rather than recomputing it — a segment records what was indexed, not what
+// this build's tokenizer would index today, and a reader demanding the two
+// agree would refuse every segment written before a tokenizer change. The
+// invariants below are the ones the scorers actually rest on; term-to-text
+// correspondence is not one of them, and buying it would cost a full
+// re-tokenization of the corpus.
 func decodePostings(post, terms *segReader, host *Index) error {
 	pn, err := post.intn("term count", len(post.b))
 	if err != nil {

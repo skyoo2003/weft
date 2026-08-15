@@ -40,6 +40,12 @@ import (
 // The record still carries its own length as well. The two agreeing is checked
 // where every other derived value is checked — a copy nobody compares is the
 // rot D-001 is about.
+//
+// The keys table uses this width too, and needs only the offset half: its upper
+// eight bytes are written zero. That is eight bytes a document of padding, and
+// it stays because the width is on disk — narrowing the keys table to eight is a
+// format change, so it belongs to whatever bumps the version next rather than to
+// a reader that would then disagree with every v2 index already written.
 const docoffWidth = 16
 
 // docoffLenAt is the offset of the token count within a docoff entry.
@@ -54,10 +60,11 @@ const docoffLenAt = 8
 func encodeDocOffsets(w *segWriter, offs, docLen []int) {
 	w.uvarint(uint64(len(offs)))
 	for i, off := range offs {
-		var b [docoffWidth]byte
-		binary.LittleEndian.PutUint64(b[:], uint64(off))
-		binary.LittleEndian.PutUint64(b[docoffLenAt:], uint64(docLen[i]))
-		w.write(b[:])
+		// scratch, not a local, for the reason segWriter.scratch exists: a local
+		// handed to write escapes, once per document.
+		binary.LittleEndian.PutUint64(w.scratch[:docoffLenAt], uint64(off))
+		binary.LittleEndian.PutUint64(w.scratch[docoffLenAt:docoffWidth], uint64(docLen[i]))
+		w.write(w.scratch[:docoffWidth])
 	}
 }
 
@@ -84,9 +91,12 @@ func encodeKeys(w *segWriter, docKeys []string) {
 	w.uvarint(uint64(len(order)))
 	off := w.off() + len(order)*docoffWidth
 	for _, id := range order {
-		var b [docoffWidth]byte
-		binary.LittleEndian.PutUint64(b[:], uint64(off))
-		w.write(b[:])
+		// Same width as a docoff entry, and only the first eight bytes carry
+		// anything: the rest is the token count docoff needs beside an offset
+		// and this table does not. See the note on docoffWidth.
+		clear(w.scratch[:docoffWidth])
+		binary.LittleEndian.PutUint64(w.scratch[:docoffLenAt], uint64(off))
+		w.write(w.scratch[:docoffWidth])
 		off += keyEntryLen(docKeys[id], DocID(id))
 	}
 	for _, id := range order {
