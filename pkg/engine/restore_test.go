@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // This file is the milestone 2 pass/fail line, the way architecture_test.go
 // is milestone 1's. One assertion, from the plan: an index restored from disk
 // is indistinguishable from the index that was committed — same four scorers,

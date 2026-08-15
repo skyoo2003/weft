@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package recency ranks documents by how recent Document.Time is.
 //
 // This package is not a feature. It is the milestone 1 measurement: it was

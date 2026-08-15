@@ -15,7 +15,7 @@ The graph scorer converts hop distance from a seed into `1/(1+hops)`. **A datase
 ## 2. Candidates assessed
 
 | Dataset | Verdict | Reason |
-|---|---|---|
+| --- | --- | --- |
 | NFCorpus | ❌ | Labels derived from link distance — see below |
 | SCIDOCS | ❌ | BEIR classifies its task as "Citation-Prediction"; labels are citations, co-citations, co-views |
 | Cora, CiteSeer, PubMed, WikiCS | ❌ | Clean link graphs but no queries and no qrels. Node-classification benchmarks, so there is nothing to compute nDCG@10 over |
@@ -29,7 +29,7 @@ The graph scorer converts hop distance from a seed into `1/(1+hops)`. **A datase
 3,633 documents and 323 queries make it the first candidate anyone reaches for, because it fits an in-memory engine exactly. Its label construction:
 
 | Grade | Rule |
-|---|---|
+| --- | --- |
 | Highest | the NutritionFacts article (query) **links directly** to the medical document |
 | Middle | the query links another article which links the document (**two hops**) |
 | Lowest | connected through the site's tag and topic system |
@@ -43,7 +43,7 @@ That is very nearly the function the graph scorer computes, and all 169,756 judg
 Join on document id. **The point is that labels and graph come from different places.**
 
 | Axis | Source | Independence |
-|---|---|---|
+| --- | --- | --- |
 | Labels | TREC-COVID qrels — biomedical experts and NIST assessors | not produced by looking at links ✓ |
 | Graph | Semantic Scholar `citations` dataset (monthly snapshots, Datasets API) | played no part in label generation ✓ |
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package engine holds the types every scorer shares and the in-memory index
 // they read from.
 //

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package fusion combines any number of candidate streams into one ranking.
 //
 // This package imports engine for the Candidate type and nothing else. It has

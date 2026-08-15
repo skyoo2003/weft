@@ -1,0 +1,6 @@
+kind: On-disk format
+body: Version 1, described in docs/FORMAT.md. Nothing to migrate from — this is the
+  first tag.
+time: 2026-08-15T00:00:01.000000000+09:00
+custom:
+  Issue: 9

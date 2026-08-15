@@ -11,7 +11,7 @@ is replaceable, a file on a user's disk demands a migration.
 
 ## 1. Directory layout
 
-```
+```text
 dir/
   MANIFEST              the only entry point; one atomic rename publishes a commit
   seg-000007/           one generation, immutable once the manifest names it
@@ -36,7 +36,7 @@ a reader that swept would delete a live writer's work.
 Every file, the manifest included, wears the same frame:
 
 | Field | Bytes | Notes |
-|---|---|---|
+| --- | --- | --- |
 | magic | 4 | `weft` |
 | format version | uvarint | `1`; one byte until version 128 |
 | kind | 1 | see below |
@@ -70,7 +70,7 @@ this constant is part of the format, not an implementation convenience.
 
 ### MANIFEST
 
-```
+```text
 generation      uvarint     strictly increasing; the segment directory is named from it
 segment count   uvarint     always 1 in version 1
 segment name    string ×n   e.g. "seg-000007"
@@ -82,7 +82,7 @@ manifest naming `seg-../../etc` is refused rather than followed.
 
 ### meta
 
-```
+```text
 document count  uvarint     ≤ 2³²−1, the DocID ceiling
 total length    uvarint     Σ document token counts
 vector width    uvarint     0 when no document carries a vector
@@ -95,7 +95,7 @@ intact ([FINDINGS §4.4](FINDINGS.md)). `Open` cross-checks all three against th
 
 ### docs
 
-```
+```text
 document count  uvarint
 per document:
   key           string      unique, non-empty
@@ -127,7 +127,7 @@ Four decisions here are load-bearing:
 
 ### postings
 
-```
+```text
 term count      uvarint
 per term (in the terms index's order):
   block count   uvarint
@@ -161,7 +161,7 @@ measurement — marked `ponytail:` in the source.
 
 ### terms
 
-```
+```text
 term count      uvarint
 per term:
   term          string       strictly ascending
@@ -180,7 +180,7 @@ Bytes from disk are a trust boundary. Every failure is an error wrapping
 plausible but breaks an invariant a scorer relies on.
 
 | Rejected | Why it matters |
-|---|---|
+| --- | --- |
 | Checksum mismatch, truncation, trailing bytes | Damage, or a file this encoder did not write |
 | Wrong magic, wrong kind, unknown version | Foreign file, misplaced file, future format |
 | Version 1 written in more than one byte | `binary.Uvarint` decodes `0x81 0x00` as 1 too. The header would be seven bytes while `segHeaderLen`, and every offset the terms index records against it, still says six |
@@ -312,7 +312,7 @@ Two things that follows from, and one it does not:
 ## 8. Known limits
 
 | Limit | Value | Where it goes |
-|---|---|---|
+| --- | --- | --- |
 | Documents per index | 2³²−1 | `DocID` is uint32; `Add` refuses past it |
 | Segments per generation | 1 | Milestone 3 |
 | Commit cost | O(corpus) — the whole corpus is rewritten | Milestone 3 |

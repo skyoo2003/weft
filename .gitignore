@@ -14,9 +14,17 @@ coverage.*
 go.work
 go.work.sum
 
+# Build output of the release and docs pipelines. Both are regenerated from
+# tracked inputs (.goreleaser.yaml, site/), so neither belongs in the history.
+/dist/
+/site/public/
+/site/resources/
+/site/.hugo_build.lock
+
 # Local tooling, editor, and OS noise
 .claude/
 .DS_Store
 *.swp
 .idea/
 .vscode/
+.changelog.expected

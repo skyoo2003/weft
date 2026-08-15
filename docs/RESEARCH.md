@@ -10,7 +10,7 @@ Two questions were asked, matching the two unverified claims in the PRD's Eviden
 
 The PRD assumed it; milestone 1 was told to verify it by reading code. **Verified, with one correction.**
 
-**Closed, structurally.** bleve's RRF/RSF path (v2.5.4+) fuses exactly `1 FTS stream + len(req.KNN)` vector streams. The stream count is open — but only across kNN sub-queries; the stream _kind_ is fixed at text-plus-vectors:
+**Closed, structurally.** bleve's RRF/RSF path (v2.5.4+) fuses exactly `1 FTS stream + len(req.KNN)` vector streams. The stream count is open — but only across kNN sub-queries; the stream *kind* is fixed at text-plus-vectors:
 
 - `rescorer.go:95` — `rescore(ftsHits, knnHits)`: fusion inputs are exactly two collections.
 - `fusion/rrf.go:30` — "applies Reciprocal Rank Fusion across the primary FTS results and each KNN sub-query." Weights are indexed `weights[0]` = FTS, `weights[i+1]` = kNN query i.
@@ -21,8 +21,8 @@ So a graph, recency or popularity signal cannot join bleve's rank fusion as a fi
 
 **The correction: "requires forking bleve" is overstated.** Two escape hatches exist without touching internals:
 
-1. v2.6.0 shipped `CustomScoreQuery` (PR #2289) — a per-hit Go callback with doc-values access. It can fold a third signal into the FTS stream's scores _before_ fusion. The signal reshapes stream 0's ranks; it does not get its own stream, weight, or rank list.
-2. The `fusion` package is exported and operates on public `DocumentMatch` fields. An application can run its own retrievals, populate `ScoreBreakdown` with arbitrary signals, and call N-way RRF itself — outside the engine pipeline, so pagination, facets and collection are then the app's problem. That is fusion as a _formula_, not fusion as an _architecture_; it is also roughly the position weft's `Fuse` starts from, minus the shared index and scorer contract.
+1. v2.6.0 shipped `CustomScoreQuery` (PR #2289) — a per-hit Go callback with doc-values access. It can fold a third signal into the FTS stream's scores *before* fusion. The signal reshapes stream 0's ranks; it does not get its own stream, weight, or rank list.
+2. The `fusion` package is exported and operates on public `DocumentMatch` fields. An application can run its own retrievals, populate `ScoreBreakdown` with arbitrary signals, and call N-way RRF itself — outside the engine pipeline, so pagination, facets and collection are then the app's problem. That is fusion as a *formula*, not fusion as an *architecture*; it is also roughly the position weft's `Fuse` starts from, minus the shared index and scorer contract.
 
 **Demand evidence inside bleve's own tracker:** #77 "Custom scoring" (2014, open), #396 "custom scoring function" (2016, open ~9 years), **#620 "Boosting by freshness" (2017, open — exactly weft's recency scorer)**, #1330 "how to change hit score" (2020, open, redirected to #396). The maintainers shipping `custom_score` in 2025 is supply responding to that demand — and also bleve actively closing its own gap.
 
@@ -32,9 +32,9 @@ So a graph, recency or popularity signal cannot join bleve's rank fusion as a fi
 
 **Against — and this shapes positioning more than the "for" column.**
 
-- Most demand saturates at _two signals plus weights_. OpenSearch #1152 closed at per-retriever weights; nobody in that thread asked for arbitrary signals.
+- Most demand saturates at *two signals plus weights*. OpenSearch #1152 closed at per-retriever weights; nobody in that thread asked for arbitrary signals.
 - Workaround culture is entrenched and mostly tolerated: sort-by-signal-then-score (bleve's documented pattern), `tweak_score` closures (tantivy), `ORDER BY bm25(...) * decay` (SQLite), ranking rules (meilisearch). The tantivy #815 author called native support merely "interesting to discuss".
-- RRF's own pitch is anti-tuning ("stop worrying about boosting"); part of the market actively wants _fewer_ ranking knobs, not more.
+- RRF's own pitch is anti-tuning ("stop worrying about boosting"); part of the market actively wants *fewer* ranking knobs, not more.
 - Teams that genuinely need many signals tend to jump past hand fusion to LTR/rerankers (OpenSearch LTR, Metarank, cross-encoders).
 - bleve #396 accumulated modest engagement over nine years — persistent, not burning.
 
@@ -54,7 +54,7 @@ So a graph, recency or popularity signal cannot join bleve's rank fusion as a fi
 
 ## 4. What this changes for weft
 
-1. **The architecture bet survives, sharpened.** Honest positioning: _"Lucene-Expressions-class open ranking, in Go, with fusion-native signals"_ — a language-and-design gap, not a capability-first invention. The PRD's Problem statement ("fusion is always the special case") is now backed by bleve's actual source, not assumption.
+1. **The architecture bet survives, sharpened.** Honest positioning: *"Lucene-Expressions-class open ranking, in Go, with fusion-native signals"* — a language-and-design gap, not a capability-first invention. The PRD's Problem statement ("fusion is always the special case") is now backed by bleve's actual source, not assumption.
 2. **New competitive risk, worth tracking:** bleve is moving (v2.5.4 fusion, v2.6.0 custom_score, within ~a year). If bleve ever exposes fusion streams as an interface, weft's differentiator thins to from-scratch purity. Watch bleve releases at each weft milestone.
 3. **Demand realism:** the buyer for "N pluggable signals" is narrower than the buyer for "hybrid search" — it is exactly the PRD's stated primary user (infrastructure contributors extending ranking in-process), and that population's revealed alternative today is middleware-side merging. Milestone 6 docs should speak to the person currently hand-rolling RRF in app code.
 4. **Interviews remain undone.** This round was desk research. The PRD risk row stays open with its mitigation updated; the next research round should be conversations, not archaeology.

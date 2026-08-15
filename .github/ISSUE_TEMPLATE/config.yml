@@ -4,9 +4,14 @@
 blank_issues_enabled: true
 
 contact_links:
+  # Straight to the private report form rather than to SECURITY.md: someone who
+  # has picked this link has already decided what they are reporting, and the
+  # policy is one click away from the form. The line that sent them to a mailbox
+  # is gone — SECURITY.md keeps the address as a fallback, but offering it here
+  # made the weaker of the two routes the default.
   - name: Reporting a vulnerability
-    url: https://github.com/skyoo2003/weft/blob/main/SECURITY.md
-    about: Not here. Email the maintainer, and please do not open a public issue.
+    url: https://github.com/skyoo2003/weft/security/advisories/new
+    about: Not here. Report it privately on the Security tab; SECURITY.md has the policy and an email fallback.
 
   - name: Known limitations
     url: https://github.com/skyoo2003/weft/blob/main/README.md#limitations

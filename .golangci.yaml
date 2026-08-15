@@ -1,0 +1,154 @@
+version: "2"
+
+# What this adds over `go vet`, which the gate already runs: unchecked errors,
+# the gosec rules that matter to a package that parses files it did not write,
+# and staticcheck. It is a CI tool, not a module requirement — `go.mod` stays
+# empty and TestNoExternalDependencies stays the judge of that.
+#
+# Every exclusion below names the thing that makes the finding wrong here. An
+# exclusion without one is a finding nobody read.
+
+run:
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - errcheck
+    - exhaustive
+    - funlen
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - gocyclo
+    - goprintffuncname
+    - gosec
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - noctx
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - whitespace
+  settings:
+    errcheck:
+      # A deferred Close on a handle opened for reading has nothing to report
+      # that the read itself did not already report. Where a dropped error is
+      # load-bearing rather than empty — prune, syncDir — the call carries a
+      # nolint naming the sentence above it that explains why.
+      exclude-functions:
+        - (*os.Root).Close
+        - (*os.File).Close
+    funlen:
+      lines: 100
+      statements: 50
+    gosec:
+      excludes:
+        # G104 asks errcheck's question with a different vocabulary: it does not
+        # read `//nolint:errcheck`, and it cannot be told that a deferred Close
+        # on a read handle has nothing to report. errcheck is enabled above and
+        # configured for exactly that, so this would be a second judge of one
+        # question, disagreeing with the first by construction.
+        - G104
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    gocritic:
+      disabled-checks:
+        - dupImport
+        - ifElseChain
+        - octalLiteral
+        - sprintfQuotedString
+        - whyNoLint
+        - wrapperFunc
+        # Document is 104 bytes and Index.Add takes it by value on purpose: the
+        # signature is in pkg/engine/testdata/engine_api.txt, and a pointer
+        # would hand callers a way to mutate an indexed document after the fact.
+        - hugeParam
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+    gocyclo:
+      # 20 rather than the usual 15: a scorer's Candidates is a fold over the
+      # whole corpus with a guard per document, so it clears 15 while staying
+      # one readable loop.
+      min-complexity: 20
+    lll:
+      line-length: 160
+    misspell:
+      # No locale. This repository spells "neighbour" and "cancelled", and
+      # pinning a locale would turn misspell — which is here to catch typos —
+      # into a rewriter of prose that is not wrong.
+      ignore-rules:
+        - weft
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+    rules:
+      # Test files are allowed the shapes that make a test readable: an ignored
+      # error on a cleanup call, a constant repeated across table rows, and a
+      # long table row.
+      - linters:
+          - errcheck
+          - gosec
+          - goconst
+          - funlen
+          - gocyclo
+          - lll
+        path: _test\.go$
+
+      # G115 flags every uint64 -> int in the decoder. Each one is already
+      # bounded: segReader.intn compares against the limit in uint64 before
+      # converting, and str checks the length against what is left of the
+      # buffer. Those checks are what these files are about, so the finding is
+      # backwards here — it fires precisely where the guard is.
+      - linters:
+          - gosec
+        text: "G115"
+        path: pkg/engine/(segment|index)\.go$
+
+      # decodeDocs and decodePostings are branchy and long because every branch
+      # is a corruption check on a file weft did not write. Splitting them to
+      # reach a number would scatter the checks away from the reads they guard.
+      - linters:
+          - gocyclo
+          - funlen
+        path: pkg/engine/segment\.go$
+
+      # cmd/weft is a demo whose corpus is a literal table. Wrapping those rows
+      # or lifting their keys into constants makes the data harder to read,
+      # which is the only thing that file is for.
+      - linters:
+          - lll
+          - goconst
+        path: cmd/weft/main\.go$
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/skyoo2003/weft)
+    goimports:
+      local-prefixes:
+        - github.com/skyoo2003/weft
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$

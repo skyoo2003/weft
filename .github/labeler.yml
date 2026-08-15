@@ -1,0 +1,44 @@
+# Paths to labels. These are area labels, not a triage decision: `priority:`
+# stays hand-applied because CONTRIBUTING says it means the maintainer read the
+# thing, which a path glob cannot do.
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**'
+
+'area: engine':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'pkg/engine/**'
+
+'area: fusion':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'pkg/fusion/**'
+
+# A new scorer is the extension path README documents, so it is worth seeing at
+# a glance which pull requests are exercising it.
+'area: scorer':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'pkg/scorer/**'
+
+'area: ci':
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'Makefile'
+          - '.golangci.yaml'
+          - '.goreleaser.yaml'
+          - '.changie.yaml'
+
+# The on-disk format is the one thing here that outlives the process, so a
+# change to it deserves to announce itself.
+'area: format':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'pkg/engine/segment.go'
+          - 'pkg/engine/persist.go'
+          - 'docs/FORMAT.md'

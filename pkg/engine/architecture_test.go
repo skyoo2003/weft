@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // This file is the milestone 1 pass/fail line. Everything else in the repo is a
 // search engine; this is the experiment the search engine exists to run.
 //
@@ -788,7 +790,7 @@ func TestNoExternalDependencies(t *testing.T) {
 // Tests execute in their own package directory, so that is one level up.
 func goList(t *testing.T, args ...string) []string {
 	t.Helper()
-	cmd := exec.Command("go", append([]string{"list"}, args...)...)
+	cmd := exec.CommandContext(t.Context(), "go", append([]string{"list"}, args...)...)
 	cmd.Dir = ".."
 	// GOWORK=off because `go list -m all` in workspace mode reports every
 	// workspace root module. Without this, checking out weft beneath a parent
@@ -823,9 +825,29 @@ func countGoLines(t *testing.T, dir string, testFiles bool) int {
 		if err != nil {
 			t.Fatalf("ReadFile(%s): %v", name, err)
 		}
-		total += strings.Count(string(b), "\n")
+		// The SPDX header and the blank line under it are not part of what a
+		// scorer costs to write: `make spdx` puts them on every .go file in the
+		// repository, so counting them would charge each scorer for a
+		// repository-wide licensing decision. Without this, adding the header
+		// moved scorer/recency from 99 lines to 100 and failed a budget that
+		// is supposed to measure the scorer.
+		total += strings.Count(string(b), "\n") - spdxHeaderLines(string(b))
 	}
 	return total
+}
+
+// spdxHeaderLines reports how many lines the SPDX header occupies at the top of
+// src: the directive itself plus the blank line separating it from whatever
+// follows. Zero when the file has no header.
+func spdxHeaderLines(src string) int {
+	if !strings.HasPrefix(src, "// SPDX-License-Identifier:") {
+		return 0
+	}
+	rest := src[strings.Index(src, "\n")+1:]
+	if strings.HasPrefix(rest, "\n") {
+		return 2
+	}
+	return 1
 }
 
 // importsOf returns the import paths of every non-test .go file in dir.

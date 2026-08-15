@@ -1,0 +1,36 @@
+# Documentation is most of what a first-time reader of this repository actually
+# reads, so it gets a gate too. The rules below are the ones that keep a diff
+# readable; the ones that would fight this project's prose are off, each with
+# the reason next to it.
+
+default: true
+
+heading-style:
+  style: atx
+code-block-style:
+  style: fenced
+code-fence-style:
+  style: backtick
+emphasis-style:
+  style: asterisk
+strong-style:
+  style: asterisk
+hr-style:
+  style: "---"
+ul-style:
+  style: dash
+ol-prefix:
+  style: ordered
+table-pipe-style:
+  style: leading_and_trailing
+no-duplicate-heading:
+  siblings_only: true
+
+# Off: the docs here run to long single-line paragraphs on purpose, so that a
+# prose edit produces a one-line diff instead of a reflowed block.
+line-length: false
+
+# Off: README opens with a badge and a blockquote before the first section, and
+# several docs lead with prose under the title. That is deliberate shape, not a
+# structure error.
+first-line-heading: false

@@ -3,7 +3,7 @@
 **Verdict: the architecture hypothesis holds. 3/3 assertions pass.** Evidence: `pkg/engine/architecture_test.go`.
 
 | Package | Implementation | Tests |
-|---|---|---|
+| --- | --- | --- |
 | `pkg/engine` | 527 | 1076 |
 | `pkg/fusion` | 76 | 174 |
 | `pkg/scorer/text` | 141 | 296 |
@@ -38,7 +38,7 @@ Two checks measure different things, and neither substitutes for the other:
   This assertion has been corrected three times, and what it now records is the result of separating two questions that look like one. **Does this change break a caller?** goes in the file. **Is this change visible in the source?** does not.
 
   | Correction | Was recorded | Why it was wrong |
-  |---|---|---|
+  | --- | --- | --- |
   | Signatures and member types | Names only | An interface method is the most expensive change a scorer can force — every existing scorer stops compiling — and names alone could not see one. |
   | Order per declaration | Every line sorted together | Field order is what unkeyed composite literals resolve against. Swapping the same-typed `Document.Key` and `Document.Text` reverses their meaning in existing callers, compiles cleanly, and left the golden byte-identical. |
   | Types without parameter names | `ctx context.Context` | Go has no named arguments, so renaming a parameter breaks nothing. Recording the name made the assertion fail on a pure refactor and tell the author to write down an engine cost that does not exist. |
@@ -50,7 +50,7 @@ The line budget counts implementation files only — counting tests would reward
 
 **Assertion 3 — fusion cannot see scorers.**
 
-```
+```text
 go list -deps ./pkg/fusion   → engine, and no other weft package
 go list -deps ./pkg/engine   → no weft package at all
 go list -m all               → this module only
@@ -81,13 +81,13 @@ Scoring `1/(1+hops)` puts seeds at 1.0, i.e. top. With seeds drawn from the text
 Measured on the `cmd/weft` corpus, query `ranking fusion`:
 
 | | Graph stream | Overlap with text stream |
-|---|---|---|
+| --- | --- | --- |
 | Seeds included | tfidf, rrf, bm25, hnsw, ivf | top 2 identical to text's top 2, same order |
 | Seeds excluded | bm25, hnsw, ivf | none |
 
 `tfidf` shows it most clearly: rank 1 in text and rank 1 in graph, so two votes for one piece of evidence.
 
-```
+```text
 included   tfidf  0.03279 (2nd)   ← 1/61 + 1/61
 excluded   tfidf  0.01639 (5th)   ← 1/61, exactly halved
 ```
@@ -143,7 +143,7 @@ A heap is `O(n log k)` against `O(n log n)` and pays off only when candidate set
 This is a documented precondition rather than a check, because every way to check it costs more than it returns:
 
 | Enforcement | What it costs |
-|---|---|
+| --- | --- |
 | `Index()` on `Scorer` | Breaks every existing implementation, and a scorer computing purely from `Query` has no answer to give. |
 | Optional `interface{ Index() *Index }` | Capability-not-type, so it fits §3.1's shape, but it only sees scorers that opt in and misses the nested case: `graph.New(ix1, seedOverIx2)` holds its seed privately, so that mix never reaches `Search`. |
 | Index identity on `Candidate` | Widens the type every scorer and every `Fuser` touches, and makes fusion compare something other than rank. |
@@ -166,7 +166,7 @@ The general fix is for `DocID` to carry its namespace, which milestone 2 needs a
 ## 5. Open questions
 
 | Question | Why it is open |
-|---|---|
+| --- | --- |
 | Is `RRF k = 60` right for this domain? | Cited default, never measured here (§3.2). |
 | Are `SeedN = 5` and "top n from text" good seeds? | Double counting is fixed (§2.3); seed quality is separate and unmeasured. |
 | PageRank instead of BFS distance? | BFS was the simplest real proximity. A replacement candidate if quality falls short. |
@@ -176,6 +176,11 @@ The general fix is for `DocID` to carry its namespace, which milestone 2 needs a
 
 ---
 
+<!-- Two top-level headings on purpose. This file is an append-only log of
+     milestone reports, each its own document with its own verdict; demoting
+     them under a single title would imply one report with sections, and a
+     later milestone would then be filed under a conclusion it did not reach. -->
+<!-- markdownlint-disable-next-line MD025 -->
 # Milestone 2 — Persistence
 
 **Verdict: the pass lines hold.** An index restored from disk is
@@ -216,7 +221,7 @@ assertion 2 intended: a visible edit, not a silent one.
 ## 2. What §4 asked for, and what it got
 
 | §4 item | Disposition |
-|---|---|
+| --- | --- |
 | 1. Postings format per D-001 | Done. Blocks of ≤128 with the metadata triple, delta-encoded, blocks independently decodable. |
 | 2. `Links` keyed by document key | Done. Keys on disk, never DocIDs; dangling links survive restore unresolved. |
 | 3. DocID density vs deletion/merge | **Designed, deliberately not built.** The manifest carries a generation number and a segment *list*; that is the place tombstones and multi-segment state will live. No Delete API exists, so density is never violated in v1. |

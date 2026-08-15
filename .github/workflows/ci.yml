@@ -2,6 +2,10 @@ name: CI
 
 # The gate is `make all`, not a list of commands copied from the Makefile.
 # What passes locally and what CI judges must be the same thing.
+#
+# Three steps sit outside `make all` because each costs something a local run
+# should not have to pay — a tool to install, or a minute of wall clock. They
+# are still Makefile targets, so the definition stays in one place either way.
 
 on:
   push:
@@ -16,14 +20,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   all:
     name: make all
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # checkout v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # setup-go v7.0.0
         with:
           # go.mod is the single source of truth for the Go version.
           go-version-file: go.mod
@@ -34,3 +42,27 @@ jobs:
 
       # fmt + build + vet + test -race.
       - run: make all
+
+      # Every .go file carries its licence where a scanner can find it. Cheap
+      # enough to run unconditionally, and the failure names the files.
+      - run: make spdx
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # golangci-lint-action v9.3.0
+        with:
+          # Must match GOLANGCI_VERSION in the Makefile: the action brings its
+          # own binary, so this is the one place the two can drift.
+          version: v2.12.2
+
+      - name: Lint documentation
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff  # markdownlint-cli2-action v24.2.0
+        with:
+          globs: '**/*.md'
+
+      # `go test` replays the seed corpus and stops there; it never starts the
+      # fuzzing engine. SECURITY.md names the segment decoder as the first place
+      # a hostile file lands, so this is the step most likely to find something
+      # nobody wrote a test for. A failure leaves the input in the log — copy it
+      # into pkg/engine/testdata/fuzz/ as a seed before fixing.
+      - name: Fuzz the segment decoder
+        run: make fuzz

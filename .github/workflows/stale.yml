@@ -1,0 +1,59 @@
+name: Stale
+
+# CONTRIBUTING says replies are slow but real, and this is what keeps that from
+# turning into a tracker full of threads nobody will answer. The windows are
+# deliberately long — 60 days of silence before a warning — because a slow
+# maintainer is the documented condition here, and a bot that closes an issue
+# faster than the maintainer answers it would be closing the maintainer's
+# backlog rather than the reporter's stale question.
+#
+# Nothing is deleted and nothing is locked. While an issue is still open the
+# label comes off by itself when anyone replies, which is what
+# `remove-stale-when-updated` does and the whole of it. It does not reach a
+# closed issue: a comment on one of those reopens nothing, so the closing
+# message asks for a reopen or a new issue rather than implying a reply is
+# enough.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93  # stale v11.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          days-before-stale: 60
+          days-before-close: 30
+          days-before-pr-stale: 30
+          days-before-pr-close: 30
+          stale-issue-label: "stale"
+          stale-pr-label: "stale"
+          stale-issue-message: >
+            No activity on this for 60 days, so it is marked stale and will close
+            in another 30. That is a queue-keeping rule and not a judgement about
+            the report — a comment removes the label, and a closed issue can be
+            reopened.
+          close-issue-message: >
+            Closed after 90 days without activity. Reopen it or file a new one if
+            it still matters; nothing here is decided by the fact that it closed.
+          stale-pr-message: >
+            No activity on this pull request for 30 days, so it is marked stale
+            and will close in another 30. A comment or a push removes the label.
+          close-pr-message: >
+            Closed after 60 days without activity. Reopen it if you want to pick
+            it back up.
+          # A priority label is the maintainer having read the thing, which is
+          # exactly the state a bot should not overwrite. Same for anything
+          # already accepted as a bug.
+          exempt-issue-labels: "priority: high,priority: medium,priority: low,bug,help wanted,good first issue"
+          exempt-pr-labels: "priority: high,priority: medium,dependencies"
+          remove-stale-when-updated: true
+          delete-branch: false
