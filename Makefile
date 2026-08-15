@@ -88,7 +88,10 @@ spdx-fix:
 # and CHANGELOG.md is generated from them. The "## Unreleased" heading is passed
 # on every merge so that what is pending is visible in the file rather than only
 # in a directory nobody browses.
-UNRELEASED_HEADING := ## Unreleased
+# The backslashes are Make's, not changie's: an unescaped `#` starts a comment,
+# so this would assign the empty string and both targets below would quietly
+# drop every pending fragment — including the check that exists to catch that.
+UNRELEASED_HEADING := \#\# Unreleased
 
 changelog-new:
 	@command -v changie >/dev/null || { echo "FAIL: changie is not installed. brew install changie"; exit 1; }

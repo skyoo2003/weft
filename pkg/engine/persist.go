@@ -66,9 +66,13 @@ func segDirName(gen uint64) string { return fmt.Sprintf("%s%06d", segPrefix, gen
 // snapshot with its BM25 statistics intact — but not alongside another Commit
 // on the same directory. weft has a single writer by design.
 func (ix *Index) Commit(dir string) error {
-	// 0o750, not 0o755: this directory holds the caller's corpus, and nothing
-	// weft does needs another user on the machine to read it.
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	// 0o700, not 0o755: this directory holds the caller's corpus, and nothing
+	// weft does needs another user on the machine to read it. Owner-only rather
+	// than 0o750, because the segment files inside are written 0o644 — leaving
+	// the group traversal bit set would hand the whole corpus to every other
+	// member of the caller's primary group, which on a shared machine is not a
+	// set weft gets to assume anything about.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 	root, err := os.OpenRoot(dir)
@@ -104,7 +108,7 @@ func (ix *Index) Commit(dir string) error {
 	if err := root.RemoveAll(seg); err != nil {
 		return fmt.Errorf("commit %s: clearing stale segment: %w", dir, err)
 	}
-	if err := root.Mkdir(seg, 0o750); err != nil {
+	if err := root.Mkdir(seg, 0o700); err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
 	segRoot, err := root.OpenRoot(seg)

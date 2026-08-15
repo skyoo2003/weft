@@ -15,3 +15,21 @@ Those three have kinds of their own below. A release that moved none of them and
 **The module version and the format version are independent.** `v0.2.0` does not imply format 2, and a format bump does not force a major version, because weft is v0.x and its API can break inside a minor either way. They count two different things: one an API you compile against, one bytes already on your disk.
 
 Entries are written with [changie](https://changie.dev) as the change is made, not reconstructed at release time. `make changelog-new` adds one.
+
+## Unreleased
+
+### Exported API
+
+- Baseline. The surface at this tag is whatever pkg/engine/testdata/engine_api.txt and public_api.txt record at the tagged commit; every later release states its diff against them rather than restating the whole surface. ([#9](https://github.com/skyoo2003/weft/issues/9))
+
+### On-disk format
+
+- Version 1, described in docs/FORMAT.md. Nothing to migrate from — this is the first tag. ([#9](https://github.com/skyoo2003/weft/issues/9))
+
+### Minimum Go
+
+- 1.26. This is the floor, not a tested ceiling — newer is untested rather than unsupported, and the gate pins this one line rather than a matrix. ([#9](https://github.com/skyoo2003/weft/issues/9))
+
+### Security
+
+- Commit now creates its index directory and segment directories with mode 0o700 rather than 0o755. The corpus is the caller's data and nothing weft does needs another user on the machine to read it — including the caller's own group, which 0o750 would let read the 0o644 segment files inside. ([#9](https://github.com/skyoo2003/weft/issues/9))

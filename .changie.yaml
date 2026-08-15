@@ -25,6 +25,10 @@ newlines:
   beforeChangelogVersion: 1
   beforeKind: 1
   afterKind: 1
+  # Without this the last change line ends the file with no newline, which
+  # `end-of-file-fixer` puts back on commit and `changelog-check` then reports
+  # as a mismatch on every run — a check failing on what its own fixer did.
+  endOfVersion: 1
 
 body:
   block: true

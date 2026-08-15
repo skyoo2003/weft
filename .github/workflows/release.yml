@@ -41,6 +41,11 @@ jobs:
             exit 1
           fi
 
+      # `sboms:` in .goreleaser.yaml shells out to syft, which a clean runner
+      # does not have. Without this the release fails after the archives are
+      # built and before anything is published.
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # sbom-action v0.24.0
+
       - name: Execute GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # goreleaser-action v7.2.3
         with:
@@ -49,3 +54,13 @@ jobs:
           args: release --clean --release-notes changes/${{ github.ref_name }}.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The permissions above only authorize an attestation; this step is what
+      # makes one. Named against the archives rather than checksums.txt so that
+      # `gh attestation verify` works on the file someone downloaded.
+      - name: Attest the archives
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # attest-build-provenance v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip

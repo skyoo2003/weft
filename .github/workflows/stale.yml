@@ -7,8 +7,12 @@ name: Stale
 # faster than the maintainer answers it would be closing the maintainer's
 # backlog rather than the reporter's stale question.
 #
-# Nothing is deleted and nothing is locked: a closed issue reopens with a
-# comment, and the label comes off by itself when anyone replies.
+# Nothing is deleted and nothing is locked. While an issue is still open the
+# label comes off by itself when anyone replies, which is what
+# `remove-stale-when-updated` does and the whole of it. It does not reach a
+# closed issue: a comment on one of those reopens nothing, so the closing
+# message asks for a reopen or a new issue rather than implying a reply is
+# enough.
 
 on:
   schedule:
