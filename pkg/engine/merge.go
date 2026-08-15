@@ -85,9 +85,21 @@ func (p *pendingSource) postings(t string) []Posting {
 type mergedSource struct {
 	segs []*segment
 	base DocID // segs[0].base, the id the merged segment starts at
+
+	// err holds the first thing this source could not read.
+	//
+	// A mapped segment answers a damaged record with absence, because Doc's
+	// signature is (Document, bool) and D-006 is why. That answer is right at
+	// the read API and wrong here: copied into a merge it becomes an empty-key
+	// document, or a term with no postings, written into the segment that
+	// replaces the damaged one — turning contained damage that Scrub can name
+	// into a segment no reader will ever accept, with the original bytes
+	// pruned. writeSegment has no error to return for it, so the failure is
+	// collected here and Merge refuses before it publishes anything.
+	err error
 }
 
-func (m mergedSource) count() int {
+func (m *mergedSource) count() int {
 	n := 0
 	for _, s := range m.segs {
 		n += s.count
@@ -95,7 +107,7 @@ func (m mergedSource) count() int {
 	return n
 }
 
-func (m mergedSource) totals() (totalLen, vecDim int) {
+func (m *mergedSource) totals() (totalLen, vecDim int) {
 	for _, s := range m.segs {
 		totalLen += s.totalLen
 		if vecDim == 0 {
@@ -106,7 +118,7 @@ func (m mergedSource) totals() (totalLen, vecDim int) {
 }
 
 // segFor finds the segment holding a local id, and the index-wide id it maps to.
-func (m mergedSource) segFor(local int) (*segment, DocID) {
+func (m *mergedSource) segFor(local int) (*segment, DocID) {
 	id := m.base + DocID(local)
 	for _, s := range m.segs {
 		if s.holds(id) {
@@ -116,18 +128,30 @@ func (m mergedSource) segFor(local int) (*segment, DocID) {
 	return nil, 0
 }
 
-func (m mergedSource) doc(local int) Document {
+// failf records the first unreadable thing. See mergedSource.err.
+func (m *mergedSource) failf(format string, args ...any) {
+	if m.err == nil {
+		m.err = fmt.Errorf(format+": %w", append(args, ErrCorrupt)...)
+	}
+}
+
+func (m *mergedSource) doc(local int) Document {
 	s, id := m.segFor(local)
 	if s == nil {
+		m.failf("merge: document %d belongs to no segment being merged", id)
 		return Document{}
 	}
-	d, _ := s.doc(id)
+	d, ok := s.doc(id)
+	if !ok {
+		m.failf("merge: document %d does not read back", id)
+	}
 	return d
 }
 
-func (m mergedSource) docLen(local int) int {
+func (m *mergedSource) docLen(local int) int {
 	s, id := m.segFor(local)
 	if s == nil {
+		m.failf("merge: document %d belongs to no segment being merged", id)
 		return 0
 	}
 	return s.docLen(id)
@@ -137,7 +161,7 @@ func (m mergedSource) docLen(local int) int {
 // because it comes out of maps: a term order taken from map iteration would give
 // two merges of the same corpus different bytes, and posting order decides
 // rankings. Milestone 4 section 4.2 is what that costs when nobody checks.
-func (m mergedSource) termList() []string {
+func (m *mergedSource) termList() []string {
 	seen := map[string]struct{}{}
 	for _, s := range m.segs {
 		for t := range s.terms {
@@ -147,12 +171,19 @@ func (m mergedSource) termList() []string {
 	return slices.Sorted(maps.Keys(seen))
 }
 
-func (m mergedSource) postings(t string) []Posting {
+func (m *mergedSource) postings(t string) []Posting {
 	var out []Posting
 	for _, s := range m.segs {
 		for _, e := range s.lookup(t) {
 			out = append(out, Posting{Doc: e.Doc - m.base, Freq: e.Freq})
 		}
+	}
+	// termList only names terms some segment's index holds, so every term asked
+	// for here has postings somewhere. None coming back means the one segment
+	// that had them would not decode them, and encodePostings would write a term
+	// with zero blocks — which the decoder refuses outright.
+	if len(out) == 0 {
+		m.failf("merge: term %q has postings in no segment being merged", t)
 	}
 	return out
 }
@@ -214,26 +245,40 @@ func (ix *Index) Merge() error {
 	}
 	defer segRoot.Close()
 
-	src := mergedSource{segs: ix.segs[:k], base: ix.segs[0].base}
+	src := &mergedSource{segs: ix.segs[:k], base: ix.segs[0].base}
 	merged := segInfo{name: seg, base: src.base, count: src.count()}
 	if err := writeSegment(segRoot, src); err != nil {
 		return fmt.Errorf("merge %s: %w", seg, err)
 	}
+	// A segment built out of something that would not read is not a segment to
+	// publish. writeSegment cannot report it — the source answers damage the way
+	// the read API does, with absence — so the failure comes off the source, and
+	// it is checked before anything on disk is named. See mergedSource.err.
+	if src.err != nil {
+		return fmt.Errorf("merge %s: %w", seg, src.err)
+	}
 	syncDir(segRoot)
 	syncDir(root)
 
-	published := append([]segInfo{merged}, live[k:]...)
-	if err := writeManifest(root, gen+1, published); err != nil {
-		return fmt.Errorf("merge %s: %w", ix.dir, err)
-	}
-
-	// Swap the merged segments for the one that replaced them. The new mapping
-	// is opened before the old ones are released, so a failure above leaves the
-	// index reading exactly what it read before.
+	// Mapped before it is published, not after. The files are durable and
+	// nothing names them yet, so a mapping that fails here leaves the directory
+	// and this index exactly as they were. Publishing first would leave the
+	// manifest a merge ahead of ix.segs, and every later Merge refusing the pair
+	// as corrupt — a durable success reported as a failure that cannot be
+	// retried.
 	replacement, err := openSegment(root, merged.name, merged.base)
 	if err != nil {
 		return fmt.Errorf("merge %s: %w", seg, err)
 	}
+
+	published := append([]segInfo{merged}, live[k:]...)
+	if err := writeManifest(root, gen+1, published); err != nil {
+		replacement.close() //nolint:errcheck // already returning an error
+		return fmt.Errorf("merge %s: %w", ix.dir, err)
+	}
+
+	// Swap the merged segments for the one that replaced them. The new mapping
+	// was opened above, so the old ones are only released once nothing can fail.
 	old := ix.segs[:k]
 	ix.segs = append([]*segment{replacement}, ix.segs[k:]...)
 	for _, s := range old {
