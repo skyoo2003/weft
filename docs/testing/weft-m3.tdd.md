@@ -39,7 +39,7 @@ then the variable-length entries it points at.
 
 **RED** — commit `70dd1f5`.
 
-```
+```text
 $ go test ./pkg/engine/ -run 'TestVersionOneIsRefused|TestDocOffsets|TestKeysSection|TestDocOffsetTable'
 pkg/engine/formatv2_test.go:88:29: undefined: docoffFile
 pkg/engine/formatv2_test.go:88:41: undefined: kindDocoff
@@ -48,7 +48,7 @@ pkg/engine/formatv2_test.go:107:16: undefined: decodeDocRecord
 pkg/engine/formatv2_test.go:129:30: undefined: keysFile
 pkg/engine/formatv2_test.go:129:40: undefined: kindKeys
 pkg/engine/formatv2_test.go:130:13: undefined: parseKeyTable
-FAIL	github.com/skyoo2003/weft/pkg/engine [build failed]
+FAIL    github.com/skyoo2003/weft/pkg/engine [build failed]
 ```
 
 Compile-time RED. Every failure names a symbol these tests newly reference and
@@ -56,9 +56,9 @@ nothing implements — not unrelated syntax errors, not broken setup.
 
 **GREEN** — commit `89846d4`.
 
-```
+```text
 $ go test ./...
-ok  	github.com/skyoo2003/weft/pkg/engine	3.839s
+ok      github.com/skyoo2003/weft/pkg/engine    3.839s
 (all 10 packages ok)
 
 $ make all       # fmt + build + vet + test -race
@@ -90,7 +90,7 @@ at a time or it is not checkable at all.
 
 **RED** — commit `eab4750`. The sweep measured rather than merely failed:
 
-```
+```text
 $ go test ./pkg/engine/ -run 'TestEveryByteFlipIsCaughtWithoutTheFrameCRC|TestARecordDecodedUnderTheWrongIDIsRefused'
 --- FAIL: TestEveryByteFlipIsCaughtWithoutTheFrameCRC/docs
     docs payload byte 10 flipped, frame checksum repaired: got <nil>, want ErrCorrupt
@@ -150,7 +150,7 @@ are unchanged. `Open` went from 979 ms to 54 ms. Recorded in
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 1 | A version 1 segment is refused with `ErrBadVersion`, never migrated or misread | `formatv2_test.go:TestVersionOneIsRefused` | unit | PASS | `go test ./pkg/engine/` |
 | 2 | Every `docoff` entry is the absolute file offset where that DocID's record begins, and decoding from there — with nothing before it read — yields that document | `formatv2_test.go:TestDocOffsetsLandOnRecordStarts` | unit | PASS | same |
 | 3 | An out-of-range DocID reports false rather than indexing past the table | `formatv2_test.go:TestDocOffsetsLandOnRecordStarts` | unit | PASS | same |
@@ -186,7 +186,7 @@ are unchanged. `Open` went from 979 ms to 54 ms. Recorded in
 Checkpoint commits on `m3-scale`, oldest first:
 
 | Commit | Stage | What it proves |
-|---|---|---|
+| --- | --- | --- |
 | `70dd1f5` | RED | The four format v2 tests fail to compile, each on a symbol they newly reference |
 | `89846d4` | GREEN | Same tests pass; `make all`/`arch`/`deps` green; 5.4M fuzz execs no panic; `pkg/scorer` and `pkg/fusion` diff 0 lines |
 | `6108a01` | docs | This file |
