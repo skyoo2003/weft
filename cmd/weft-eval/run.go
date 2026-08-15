@@ -174,6 +174,20 @@ func loadQueries(dir string) ([]eval.Query, error) {
 					"the vector file is from an older query set (regenerate with "+
 					"testdata/gen_query_vectors.py)", q.ID, vecPath, v.Text, queriesFile, q.Text)
 			}
+			// And which embedding produced it, which the id and the text cannot say. A
+			// file generated from another adapter, base revision or local model
+			// configuration carries the right id and the right question, so every check
+			// above passes while the vector scorer computes cosine similarity across two
+			// spaces — the query-side half of the hazard checkVectorModels closes on the
+			// document side. Absence is tolerated for the same reason it is there: the
+			// committed query-vectors.jsonl predates the field. A recorded model that
+			// disagrees is not.
+			if v.Model != "" && v.Model != queryVecModel {
+				return nil, fmt.Errorf("query %s in %s was embedded by %q, and the document vectors "+
+					"are %s: cosine similarity between two embedding spaces is not a similarity "+
+					"(regenerate with testdata/gen_query_vectors.py)",
+					q.ID, vecPath, v.Model, eval.S2Model)
+			}
 			eq.Query.Vector = v.Vec
 			withVec++
 		}
@@ -297,13 +311,16 @@ func run(ctx context.Context, args []string) error {
 	var k, overfetch, iters int
 	var rankConst float64
 	var anySnapshot bool
-	data := dataFlags("run", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags("run", args, func(fs *flag.FlagSet) {
 		fs.IntVar(&k, "k", frozenK, "rank cut")
 		fs.IntVar(&overfetch, "overfetch", frozenOverfetch, "ask each scorer for k*this")
 		fs.IntVar(&iters, "iters", bootstrapIters, "bootstrap resamples")
 		fs.Float64Var(&rankConst, "rrfk", fusion.RRFk, "RRF rank constant")
 		snapshotFlag(fs, &anySnapshot)
 	})
+	if flagErr != nil {
+		return flagErr
+	}
 
 	if err := checkIters(iters); err != nil {
 		return err
@@ -426,12 +443,15 @@ func topMoves(base, arm map[string]float64, n int) []move {
 func sweep(ctx context.Context, args []string) error {
 	var k, iters int
 	var anySnapshot bool
-	data := dataFlags("sweep", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags("sweep", args, func(fs *flag.FlagSet) {
 		fs.IntVar(&k, "k", frozenK, "rank cut")
 		fs.IntVar(&iters, "iters", 2000,
 			"bootstrap resamples per configuration (lower than the headline: this is a sign check, not a published interval)")
 		snapshotFlag(fs, &anySnapshot)
 	})
+	if flagErr != nil {
+		return flagErr
+	}
 
 	if err := checkIters(iters); err != nil {
 		return err
@@ -632,11 +652,14 @@ func sweep(ctx context.Context, args []string) error {
 func weights(ctx context.Context, args []string) error {
 	var k, iters int
 	var anySnapshot bool
-	data := dataFlags("weights", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags("weights", args, func(fs *flag.FlagSet) {
 		fs.IntVar(&k, "k", frozenK, "rank cut")
 		fs.IntVar(&iters, "iters", bootstrapIters, "bootstrap resamples")
 		snapshotFlag(fs, &anySnapshot)
 	})
+	if flagErr != nil {
+		return flagErr
+	}
 
 	if err := checkIters(iters); err != nil {
 		return err
@@ -732,11 +755,14 @@ func weights(ctx context.Context, args []string) error {
 func diagnose(ctx context.Context, args []string) error {
 	var deep, k int
 	var anySnapshot bool
-	data := dataFlags("diagnose", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags("diagnose", args, func(fs *flag.FlagSet) {
 		fs.IntVar(&deep, "deep", 1_000_000, "k to request, large enough not to truncate the frontier")
 		fs.IntVar(&k, "k", frozenK, "the cut whose tie group is measured")
 		snapshotFlag(fs, &anySnapshot)
 	})
+	if flagErr != nil {
+		return flagErr
+	}
 
 	if !anySnapshot {
 		if err := verifySnapshot(*data, queriesFile, qrelsFile); err != nil {

@@ -46,6 +46,12 @@ const (
 	// optional; run reports its absence rather than quietly measuring a text-only
 	// baseline.
 	queryVecFile = "query-vectors.jsonl"
+
+	// queryVecModel is what that script records in each record it writes: the SPECTER2
+	// base plus the ad-hoc query adapter, which is the query-side counterpart of the
+	// eval.S2Model the document vectors carry. Written here as a literal because the
+	// Go side never loads a model — it only checks that the file says it used this one.
+	queryVecModel = "allenai/specter2_base+allenai/specter2_adhoc_query"
 )
 
 func main() {
@@ -104,15 +110,27 @@ Run any subcommand with -h for its flags. docs/EVAL.md is the measurement design
 	os.Exit(2)
 }
 
-// dataFlags are shared by every subcommand.
-func dataFlags(name string, args []string, extra func(*flag.FlagSet)) *string {
+// dataFlags registers -data plus a subcommand's own flags and parses args.
+//
+// A leftover positional argument is refused rather than ignored, because flag stops
+// parsing at the first non-flag argument and says nothing: `weft-eval prepare typo
+// -limit=1` leaves -limit at its default, and the default here means unlimited. The
+// typo therefore starts hours of rate-limited API requests, appending to the resumable
+// cache, having silently discarded the flag that was meant to keep it small. Every
+// subcommand takes its input from flags alone, so there is no argument this could be
+// throwing away on purpose.
+func dataFlags(name string, args []string, extra func(*flag.FlagSet)) (*string, error) {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	dir := fs.String("data", ".eval-data", "directory holding the downloaded corpus and generated artifacts")
 	if extra != nil {
 		extra(fs)
 	}
 	_ = fs.Parse(args) // ExitOnError already handled a bad flag.
-	return dir
+	if fs.NArg() > 0 {
+		return nil, fmt.Errorf("%s takes no arguments, and %q is not a flag: parsing stopped there, "+
+			"so every flag after it was ignored and left at its default", name, fs.Arg(0))
+	}
+	return dir, nil
 }
 
 // ---------------------------------------------------------------- prepare
@@ -121,13 +139,16 @@ func prepare(ctx context.Context, args []string) error {
 	var apiKey string
 	var limit int
 	var anySnapshot bool
-	data := dataFlags("prepare", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags("prepare", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&apiKey, "api-key", os.Getenv("S2_API_KEY"),
 			"Semantic Scholar API key (optional; raises the rate limit)")
 		fs.IntVar(&limit, "limit", 0,
 			"stop after this many documents (0 = all); for smoke-testing the pipeline")
 		snapshotFlag(fs, &anySnapshot)
 	})
+	if flagErr != nil {
+		return flagErr
+	}
 
 	// Before the corpus is read and long before anything is appended. -limit is the
 	// smoke-test flag, so the value a typo produces is the one that matters: 0 means
@@ -575,12 +596,15 @@ func estimate(docs int) time.Duration {
 
 func build(ctx context.Context, args []string) error {
 	var partial, anySnapshot bool
-	data := dataFlags("build", args, func(fs *flag.FlagSet) {
+	data, flagErr := dataFlags("build", args, func(fs *flag.FlagSet) {
 		fs.BoolVar(&partial, "partial", false,
 			"build even though the Semantic Scholar cache does not cover every document "+
 				"(the vector and graph arms then measure a corpus that is partly text-only)")
 		snapshotFlag(fs, &anySnapshot)
 	})
+	if flagErr != nil {
+		return flagErr
+	}
 
 	corpusPath := filepath.Join(*data, corpusFile)
 	s2Path := filepath.Join(*data, s2File)
@@ -773,6 +797,18 @@ func build(ctx context.Context, args []string) error {
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	// The old account of this index goes before the new index does.
+	//
+	// A rebuild replaces the segments and then records what they came from, and the
+	// gap between those two is a window in which a crash leaves the previous
+	// provenance.json standing beside a manifest it does not describe. A later run
+	// verifies the stale record and accepts a foreign or partial index as the pinned
+	// one — the exact substitution provenance exists to refuse, reached through
+	// provenance itself. Removed first, so a crash anywhere in the window leaves an
+	// index that cannot say what it holds, and verifyProvenance refuses that.
+	if err := os.Remove(filepath.Join(dir, provenanceFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale %s: %w", provenanceFile, err)
 	}
 	start := time.Now()
 	if err := ix.Commit(dir); err != nil {

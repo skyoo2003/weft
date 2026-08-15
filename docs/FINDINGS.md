@@ -277,7 +277,7 @@ version 128 would be a format change anyway.
 
 **Verdict: the graph signal does not improve ranking quality.** The PRD's second
 falsification condition is met and answered *no*. Under equal-weight fusion it costs
-0.1227 nDCG@10, and no fusion weight makes it worth anything: the best delta available
+0.1227 nDCG@10, and no fusion weight in the tested grid makes it worth anything: the best delta available
 is exactly +0.0000. Measurement design and full numbers: [EVAL.md](EVAL.md).
 
 **The larger finding is about fusion, not about graphs.** That −0.1227 was RRF's equal

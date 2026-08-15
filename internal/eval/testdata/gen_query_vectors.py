@@ -257,7 +257,13 @@ def generate(out_path: str) -> int:
 
     with open(out_path, "w") as f:
         for q, v in zip(queries, vecs):
-            json.dump({"id": q["_id"], "text": q["text"], "vec": v}, f)
+            # The model goes in the file, not only in the log below. A query vector
+            # from another adapter or base revision carries the right id and the right
+            # text, so every pairing check the loader has passes while the arithmetic
+            # is cosine similarity between two embedding spaces. The document side
+            # records its model for the same reason; see checkVectorModels.
+            json.dump({"id": q["_id"], "text": q["text"], "vec": v,
+                       "model": f"{BASE}+{QUERY_ADAPTER}"}, f)
             f.write("\n")
     print(f"wrote {len(queries)} query vectors of dimension {len(vecs[0])} to {out_path}")
     print(f"  model {BASE} + {QUERY_ADAPTER}")

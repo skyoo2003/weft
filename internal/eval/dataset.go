@@ -253,6 +253,13 @@ func ReadQrels(path string) (map[string]map[string]int, error) {
 type QueryVector struct {
 	Text string
 	Vec  []float32
+
+	// Model is the embedding the vector came out of, as gen_query_vectors.py records
+	// it. Empty means a file written before the field existed — which is what the
+	// committed measurement was generated into — so absence is tolerated and a
+	// mismatch is not; see loadQueries, and checkVectorModels for the document side of
+	// the same hazard.
+	Model string
 }
 
 // ReadQueryVectors reads a query-vectors.jsonl into query id -> vector.
@@ -296,9 +303,10 @@ func ReadQueryVectors(path string) (map[string]QueryVector, error) {
 			continue
 		}
 		var rec struct {
-			ID   string    `json:"id"`
-			Text string    `json:"text"`
-			Vec  []float32 `json:"vec"`
+			ID    string    `json:"id"`
+			Text  string    `json:"text"`
+			Vec   []float32 `json:"vec"`
+			Model string    `json:"model"`
 		}
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			return nil, fmt.Errorf("%s line %d: %w: %v", path, line, ErrBadRecord, err)
@@ -340,7 +348,7 @@ func ReadQueryVectors(path string) (map[string]QueryVector, error) {
 				"(two generations concatenated? regenerate with testdata/gen_query_vectors.py)",
 				path, line, rec.ID, ErrBadRecord)
 		}
-		out[rec.ID] = QueryVector{Text: rec.Text, Vec: rec.Vec}
+		out[rec.ID] = QueryVector{Text: rec.Text, Vec: rec.Vec, Model: rec.Model}
 	}
 	if err := s.Err(); err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)

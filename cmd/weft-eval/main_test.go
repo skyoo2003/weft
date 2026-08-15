@@ -942,3 +942,97 @@ func TestBuildRefusesVectorsFromAnotherEmbeddingModel(t *testing.T) {
 		t.Errorf("build refused a cache written before the model field existed: %v", err)
 	}
 }
+
+// TestLoadQueriesRejectsVectorsFromAnotherEmbedding is the query side of the hazard
+// checkVectorModels closes on the document side.
+//
+// A file generated from another adapter, base revision or local model configuration
+// carries the right query id and the right question text, so every pairing check
+// passes while the vector scorer computes cosine similarity between two embedding
+// spaces. Absence is tolerated — the committed query-vectors.jsonl predates the field
+// — and a recorded model that disagrees is not.
+func TestLoadQueriesRejectsVectorsFromAnotherEmbedding(t *testing.T) {
+	const q = `{"_id":"1","text":"what is the origin of COVID-19"}` + "\n"
+	files := map[string]string{
+		queriesFile: q,
+		qrelsFile:   "query-id\tcorpus-id\tscore\n1\ta\t2\n",
+		queryVecFile: `{"id":"1","text":"what is the origin of COVID-19","vec":[0.1,0.2],` +
+			`"model":"allenai/specter2_base+some_other_adapter"}` + "\n",
+	}
+	if _, err := loadQueries(evalDir(t, files)); err == nil {
+		t.Fatal("loadQueries accepted a query vector from another embedding; the vector arm " +
+			"would be cosine similarity across two spaces, published under its usual name")
+	}
+
+	files[queryVecFile] = `{"id":"1","text":"what is the origin of COVID-19","vec":[0.1,0.2],` +
+		`"model":"` + queryVecModel + `"}` + "\n"
+	if _, err := loadQueries(evalDir(t, files)); err != nil {
+		t.Errorf("loadQueries refused the model gen_query_vectors.py writes: %v", err)
+	}
+
+	// No model at all is what the committed file holds, and refusing it would refuse
+	// the published measurement rather than a mistake.
+	files[queryVecFile] = `{"id":"1","text":"what is the origin of COVID-19","vec":[0.1,0.2]}` + "\n"
+	if _, err := loadQueries(evalDir(t, files)); err != nil {
+		t.Errorf("loadQueries refused a file written before the model field existed: %v", err)
+	}
+}
+
+// TestSubcommandsRefuseALeftoverArgument: flag stops parsing at the first non-flag
+// argument and says nothing, so `weft-eval prepare typo -limit=1` leaves -limit at its
+// default — and the default here means unlimited, i.e. hours of rate-limited API
+// requests appending to the resumable cache, with the flag that was meant to keep it
+// small silently discarded.
+func TestSubcommandsRefuseALeftoverArgument(t *testing.T) {
+	for _, cmd := range []struct {
+		name string
+		fn   func(context.Context, []string) error
+	}{
+		{"prepare", prepare}, {"build", build}, {"run", run}, {"sweep", sweep},
+		{"weights", weights}, {"diagnose", diagnose},
+	} {
+		t.Run(cmd.name, func(t *testing.T) {
+			err := cmd.fn(context.Background(), []string{"typo", "-data", t.TempDir(), "-any-snapshot"})
+			if err == nil || !strings.Contains(err.Error(), "typo") {
+				t.Errorf("error = %v, want it to name the argument that stopped flag parsing", err)
+			}
+		})
+	}
+}
+
+// TestBuildLeavesNoProvenanceForAnIndexItDidNotFinish closes the window between the
+// commit and the record of what was committed.
+//
+// A rebuild replaces the segments and then writes provenance.json. A crash in between
+// used to leave the previous record standing beside a manifest it does not describe,
+// and a later run would verify that stale record and accept a foreign or partial index
+// as the pinned one — the substitution provenance exists to refuse, reached through
+// provenance itself. The old record is removed first, so an unfinished rebuild leaves
+// an index that cannot say what it holds, which is what verifyProvenance refuses.
+func TestBuildLeavesNoProvenanceForAnIndexItDidNotFinish(t *testing.T) {
+	dir := evalDir(t, map[string]string{
+		corpusFile: twoDocCorpus,
+		s2File:     `{"key":"a","corpus_id":"1"}` + "\n" + `{"key":"b","corpus_id":"2"}` + "\n",
+	})
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Fatalf("first build: %v", err)
+	}
+	path := filepath.Join(dir, indexDir, provenanceFile)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("first build wrote no provenance: %v", err)
+	}
+
+	// A manifest engine cannot read. It refuses rather than guessing a generation on
+	// top of a directory in an unknown state, which is a commit that fails after this
+	// build has already decided to replace the index — the window this test is about.
+	if err := os.WriteFile(filepath.Join(dir, indexDir, "MANIFEST"), []byte("not a manifest"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err == nil {
+		t.Fatal("build committed over an entry weft did not write")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("provenance survived a rebuild that did not finish (stat err %v); a later run "+
+			"would verify it and publish whatever the index now holds", err)
+	}
+}

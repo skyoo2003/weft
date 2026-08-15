@@ -655,6 +655,21 @@ query is scored on. Section 4's rule asks for a positive delta whose interval ex
 zero; the best available is a delta of zero. Down-weighting a near-noise stream stops
 it doing harm. It does not turn it into information.
 
+**What "no weight" is entitled to mean, and what it is not.** This is a grid of eight
+values, and nDCG is not monotonic in the weight: a weighted RRF ranking changes at
+query-specific score-crossing thresholds, so the two ends of an unsampled interval do
+not bound what happens inside it. The claim that carries no sampling assumption is the
+lower one — **at 0.1 and below the arm is bit-identical to the baseline**, so every
+weight in that region provably changes nothing, and there is no room for an unmeasured
+maximum under it. Above 0.1 the honest statement is the sampled one: of the weights
+tested, none beats the baseline, and the interval between 0.25 and 0.1 is where an
+untested value would have to hide. Two things make that a thin hope rather than an open
+question — the arm at 0.25 is already within 0.0019 of the baseline it cannot beat, and
+the mechanism section 5.9 measured says why: the graph stream's scores are three
+distinct values on most queries, so re-weighting moves a tie group rather than a
+ranking. Worth stating precisely all the same, because "no weight" and "no weight we
+tried" are different claims, and this document exists to keep them apart.
+
 > An earlier revision of this table reported a best case of **+0.0018 at weight 0.1,
 > CI [+0.0000, +0.0053]**, and both this document and the README built a sentence on
 > it — "worth +0.0018, a 0.29% relative gain". That number does not survive
@@ -769,7 +784,22 @@ keeping the same document keys satisfied the qrels check too. `build` now writes
 `index/provenance.json` recording the sha256 of the corpus it read and whether
 `-partial` was used, and `run`, `sweep`, `weights` and `diagnose` refuse an index that
 does not match the pinned release, cannot say which corpus it holds, or was built over
-a cache that does not cover it. `-any-snapshot` opts out, as everywhere else.
+a cache that does not cover it. `-any-snapshot` opts out, as everywhere else. The
+record is removed before the segments are replaced rather than written after, so a
+rebuild that does not finish leaves an index that cannot say what it holds — which is
+refused — instead of one describing itself with the previous build's account.
+
+**And both sides of the vector arm now name their embedding.** Width is not provenance:
+SPECTER v1 and v2 are both 768-dimensional, so a cached document vector from the wrong
+one was indexed on a width match and the query vectors were checked for id and text but
+never for which model produced them. Cosine similarity across two embedding spaces is
+not a similarity, and it arrives as a plausible vector baseline with the whole graph
+delta measured against it. `build` now refuses document vectors carrying a foreign
+model, `gen_query_vectors.py` records `allenai/specter2_base+allenai/specter2_adhoc_query`
+in every record it writes, and `run` refuses a query vector that names anything else.
+An unrecorded model is warned about rather than refused on both sides: that is what the
+committed artifacts hold, so refusing it would refuse the published measurement rather
+than a mistake.
 
 ---
 
@@ -782,7 +812,7 @@ as weft implements it does not improve nDCG@10.**
 |---|---|
 | 1. Frozen: paired 95% CI for `+graph` − baseline excludes zero and is positive | **FAILS** — excludes zero and is *negative*: −0.1227, [−0.1550, −0.0909] |
 | 2. Stable: the sign does not flip across the sweep | Holds — 0 flips in 28 configurations **of the pair this rule names**, negative throughout, closest interval [−0.0380, −0.0065] |
-| Best case under any fusion weight (section 5.11) | **+0.0000** — no weight beats the baseline; below 0.1 the arm *is* the baseline |
+| Best case under any fusion weight (section 5.11) | **+0.0000** — no weight in the tested grid beats the baseline, and at 0.1 and below the arm *is* the baseline |
 
 Condition 1 fails, which is the "no" branch. Per the PRD and [D-004](DECISIONS.md) the
 consequence is that `pkg/scorer/graph` goes while the `Scorer` interface,

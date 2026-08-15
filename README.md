@@ -52,7 +52,7 @@ TREC-COVID, 50 queries, 171,332 documents, 579,719 in-corpus citation edges from
 
 **Graph proximity does not improve ranking.** Under equal-weight fusion it costs 0.1227 nDCG@10 (95% CI [−0.1550, −0.0909]), and across 28 configurations of the RRF rank constant and fusion depth the sign never flips and no interval reaches zero.
 
-**But that −0.1227 belonged to the fusion operator, not to the graph.** Giving the graph stream half a vote instead of a full one erases all but 0.0019 of the regression. No weight beats the baseline: from 0.1 downward the arm *is* the baseline, delta exactly zero. So the accurate statement is the flatter one: the graph signal is not harmful information, it is not information.
+**But that −0.1227 belonged to the fusion operator, not to the graph.** Giving the graph stream half a vote instead of a full one erases all but 0.0019 of the regression. No weight in the tested grid beats the baseline, and from 0.1 downward the arm *is* the baseline, delta exactly zero — see [EVAL.md](docs/EVAL.md) section 5.11 for what that is and is not entitled to claim. So the accurate statement is the flatter one: the graph signal is not harmful information, it is not information.
 
 | Graph stream weight | nDCG@10 | Delta vs baseline |
 |---|---|---|
@@ -189,7 +189,7 @@ CI runs `make all` plus four targets kept out of it because each costs a tool to
 | No deletion | Documents can be added, never removed. Tombstones and DocID namespacing are one design problem, taken together in milestone 3: [FINDINGS, milestone 2 §4](docs/FINDINGS.md). |
 | Durability stops at fsync | Atomic against process death; best-effort against power loss, with no platform write barrier: [FORMAT.md §6](docs/FORMAT.md). |
 | No early termination | The top-k candidate interface forecloses WAND-style skipping. Cost and extension path: [FINDINGS §3.1](docs/FINDINGS.md). |
-| **Graph proximity measured worthless** | +0.0000 nDCG@10 at its best fusion weight — no weight beats the baseline — and −0.1227 if fused at equal weight. Kept for the milestone 1 assertions and marked in its package doc: [D-005](docs/DECISIONS.md). Do not enable `scorer/graph` expecting quality, and weight it down if you enable it at all. |
+| **Graph proximity measured worthless** | +0.0000 nDCG@10 at its best fusion weight — no weight in the tested grid beats the baseline, and at 0.1 and below the arm is the baseline exactly — and −0.1227 if fused at equal weight. Kept for the milestone 1 assertions and marked in its package doc: [D-005](docs/DECISIONS.md). Do not enable `scorer/graph` expecting quality, and weight it down if you enable it at all. |
 | Fusion weights have no source | `FuseWeighted` exists, but nothing decides what the weights should be. Hand-tuning per corpus reintroduces the per-deployment burden this design avoids; learning them from judgments is unbuilt. Use `Fuse` unless you have measured your own ([FINDINGS milestone 4 §7](docs/FINDINGS.md)). |
 | Scorers must share one index | `DocID` is index-relative, so scorers built against different indexes fuse unrelated documents. A precondition on `Search`, not a check: [FINDINGS §3.4](docs/FINDINGS.md). |
 | No CJK tokenization | Whitespace and punctuation splitting only, so CJK runs collapse into one token. |
