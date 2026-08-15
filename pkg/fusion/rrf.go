@@ -169,10 +169,31 @@ func scaleDown(w []float64) float64 {
 	if maxW <= 1 {
 		return 1
 	}
+	// Scaled by a power of two, not by maxW itself.
+	//
+	// Dividing by maxW is a rounding operation, and it does not round every weight the
+	// same way. With weights 3, 2, 1 at RRFk=60, a document at rank 831 of the first
+	// stream totals 0.003367003367003367 and one at ranks 897 and 723 of the other two
+	// totals 0.0033670033670033673 — one ulp higher, so it wins. Divide the weights by
+	// 3 and the second document's two rounded terms lose more than the first's one
+	// does: the totals become 0.001122334455667789 and 0.0011223344556677889, and the
+	// order reverses. A scaling documented as leaving the fused order unchanged would
+	// have changed it, silently, for weights entirely in contract.
+	//
+	// Frexp gives the exponent of maxW, and Ldexp by its negation is exact for every
+	// finite weight: it adjusts the exponent and leaves the significand alone. Every
+	// weight is therefore scaled by the same power of two, and IEEE-754 multiplication
+	// and addition commute with that, so each document's total comes out as the
+	// unscaled total divided by 2^exp to the last bit. The order cannot move.
+	//
+	// The bound is the same argument as before and slightly tighter: maxW lands in
+	// [0.5, 1), so no term exceeds 1/61 and reaching +Inf would still take more than
+	// 1e310 streams.
+	_, exp := math.Frexp(maxW)
 	for i := range w {
-		w[i] /= maxW
+		w[i] = math.Ldexp(w[i], -exp)
 	}
-	return 1 / maxW
+	return math.Ldexp(1, -exp)
 }
 
 // fuse is the shared implementation. dflt is what a stream past the end of weights

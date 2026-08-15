@@ -129,6 +129,17 @@ func prepare(ctx context.Context, args []string) error {
 		snapshotFlag(fs, &anySnapshot)
 	})
 
+	// Before the corpus is read and long before anything is appended. -limit is the
+	// smoke-test flag, so the value a typo produces is the one that matters: 0 means
+	// unlimited, and `limit > 0` therefore read -1 as unlimited too. A mistyped
+	// `-limit=-1` then started fetching the whole corpus — hours of rate-limited
+	// requests against a shared anonymous budget, appending to the resumable cache the
+	// whole way — with nothing in the log saying the flag had been ignored.
+	if limit < 0 {
+		return fmt.Errorf("-limit=%d: the number of documents to fetch cannot be negative "+
+			"(0 means all of them)", limit)
+	}
+
 	corpusPath := filepath.Join(*data, corpusFile)
 	metaPath := filepath.Join(*data, metadataFile)
 	outPath := filepath.Join(*data, s2File)
@@ -661,6 +672,13 @@ func build(ctx context.Context, args []string) error {
 	// corpus that is not there.
 	dim, dimTally := dominantDim(recs, corpusKeys)
 
+	// And the embedding space those widths belong to, which width cannot tell apart.
+	// See checkVectorModels: two SPECTER releases share 768 dimensions and mean
+	// different things by them.
+	if err := checkVectorModels(recs, corpusKeys, partial); err != nil {
+		return err
+	}
+
 	err = eval.ReadCorpus(corpusPath, func(d eval.CorpusDoc) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -851,6 +869,65 @@ func corpusIDIndex(recs map[string]eval.S2Record, corpus map[string]bool) (map[s
 // thing to pick well. The zero return for a cache with no vectors at all is the width
 // no record matches, so nothing is indexed with a vector — which is correct, and which
 // the coverage line then shows as 0.
+// checkVectorModels refuses to index document vectors that a foreign embedding model
+// produced, and reports the provenance of the ones it does index.
+//
+// Width is not provenance. SPECTER v1 and v2 both emit 768 dimensions, so dominantDim
+// accepts either and engine.Add stores either; the query vectors, meanwhile, come from
+// testdata/gen_query_vectors.py under eval.S2Model. Cosine similarity between two
+// embedding spaces is a number with no meaning, and it arrives as a plausible-looking
+// vector baseline and a graph delta measured against it. Nothing downstream could
+// notice: the model label is not part of a committed index, and prepare's warning is
+// printed by the invocation that fetched the batch, which on a resumed job is not the
+// one that finishes.
+//
+// Refused rather than skipped. A skipped vector lowers coverage, and coverage is
+// already reported, so a run could publish a vector arm over whatever remained without
+// the reason ever being stated — docs/EVAL.md section 4.1 is what that looks like.
+// -partial is the existing way to say "these arms are not publishable" and is the
+// override here too; run, sweep and weights refuse a partial index by its provenance.
+//
+// An unrecorded model is warned about and indexed. It means a cache written before the
+// field existed — which is what the committed measurement was fetched into, all 148,232
+// of its vectors — so refusing it would refuse the published index rather than a
+// mistake. The warning is the honest statement of what is and is not known.
+func checkVectorModels(recs map[string]eval.S2Record, corpus map[string]bool, partial bool) error {
+	tally := map[string]int{}
+	for key, r := range recs {
+		if corpus[key] && len(r.Vector) > 0 {
+			tally[r.Model]++
+		}
+	}
+	reportModels(tally)
+
+	foreign, worst := 0, ""
+	for m, n := range tally {
+		if m == eval.S2Model || m == "" {
+			continue
+		}
+		foreign += n
+		// Named deterministically: map order is randomised, and an error that changes
+		// between identical runs is an error nobody can act on.
+		if worst == "" || m < worst {
+			worst = m
+		}
+	}
+	if foreign == 0 {
+		return nil
+	}
+	if partial {
+		log.Printf("WARNING: indexing %d vectors from %s under -partial; they are in a different "+
+			"embedding space from the query vectors, so the vector and graph arms measure nothing",
+			foreign, worst)
+		return nil
+	}
+	return fmt.Errorf("%d cached vectors were produced by %s rather than %s, and the query vectors "+
+		"are %s: cosine similarity across two embedding spaces is not a similarity, and an index "+
+		"carries no model label for a later command to check. Refetch those documents against a "+
+		"fresh %s, or pass -partial to build an index whose arms must not be published",
+		foreign, worst, eval.S2Model, eval.S2Model, s2File)
+}
+
 func dominantDim(recs map[string]eval.S2Record, corpus map[string]bool) (int, map[int]int) {
 	tally := make(map[int]int)
 	for key, r := range recs {

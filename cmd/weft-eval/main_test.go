@@ -869,3 +869,76 @@ func TestRunRejectsTheResampleCountBeforeItMeasuresAnything(t *testing.T) {
 		})
 	}
 }
+
+// TestPrepareRejectsANegativeLimit: -limit is the smoke-test flag, so the value a typo
+// produces is the one that matters. 0 means unlimited, and `limit > 0` read -1 as
+// unlimited too — a mistyped `-limit=-1` started fetching the whole corpus, hours of
+// rate-limited requests appending to the resumable cache, with nothing in the log
+// saying the flag had been ignored.
+func TestPrepareRejectsANegativeLimit(t *testing.T) {
+	dir := evalDir(t, map[string]string{
+		corpusFile:   twoDocCorpus,
+		metadataFile: "cord_uid,doi,pmcid,pubmed_id,s2_id\na,,,,1\nb,,,,2\n",
+	})
+
+	err := prepare(context.Background(), []string{"-data", dir, "-any-snapshot", "-limit=-1"})
+	if err == nil {
+		t.Fatal("prepare accepted -limit=-1 and fell through to the unlimited path")
+	}
+	if !strings.Contains(err.Error(), "-limit") {
+		t.Errorf("error = %v, want it to name the flag", err)
+	}
+	// Rejected before anything is written, so the typo costs a message rather than a
+	// mutated cache.
+	if _, statErr := os.Stat(filepath.Join(dir, s2File)); statErr == nil {
+		t.Error("a cache was written for an invocation that was refused")
+	}
+}
+
+// TestBuildRefusesVectorsFromAnotherEmbeddingModel: width is not provenance. SPECTER
+// v1 and v2 both emit 768 dimensions, so dominantDim accepts either and engine.Add
+// stores either, while the query vectors come from gen_query_vectors.py under
+// eval.S2Model. Cosine similarity across two embedding spaces is not a similarity, and
+// it arrives as a plausible vector baseline with a graph delta measured against it —
+// with nothing downstream able to notice, because a committed index carries no model
+// label and prepare's warning belongs to whichever invocation fetched the batch.
+func TestBuildRefusesVectorsFromAnotherEmbeddingModel(t *testing.T) {
+	files := map[string]string{
+		corpusFile: twoDocCorpus,
+		s2File: `{"key":"a","corpus_id":"1","vec":[1,2],"model":"specter_v1"}` + "\n" +
+			`{"key":"b","corpus_id":"2","vec":[3,4],"model":"specter_v2"}` + "\n",
+	}
+
+	dir := evalDir(t, files)
+	err := build(context.Background(), []string{"-data", dir, "-any-snapshot"})
+	if err == nil {
+		t.Fatal("build indexed a vector from another embedding model; the vector arm it " +
+			"publishes is cosine similarity between two different spaces")
+	}
+	if !strings.Contains(err.Error(), "specter_v1") {
+		t.Errorf("error = %v, want it to name the model that does not belong", err)
+	}
+
+	// -partial is the existing way to say "these arms are not publishable", and it is
+	// the override here too — run, sweep and weights refuse such an index by its
+	// provenance, so the escape hatch cannot become a published number.
+	dir = evalDir(t, files)
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot", "-partial"}); err != nil {
+		t.Fatalf("build -partial: %v", err)
+	}
+	if err := verifyProvenance(filepath.Join(dir, indexDir)); err == nil {
+		t.Error("a -partial index passed the provenance check, so its arms can be published after all")
+	}
+
+	// An unrecorded model is warned about, not refused: it is what the committed
+	// measurement was fetched into, all 148,232 of its vectors, so refusing it would
+	// refuse the published index rather than a mistake.
+	dir = evalDir(t, map[string]string{
+		corpusFile: twoDocCorpus,
+		s2File: `{"key":"a","corpus_id":"1","vec":[1,2]}` + "\n" +
+			`{"key":"b","corpus_id":"2","vec":[3,4]}` + "\n",
+	})
+	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Errorf("build refused a cache written before the model field existed: %v", err)
+	}
+}

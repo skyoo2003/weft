@@ -513,3 +513,76 @@ func TestFuseWeightedIsReusableAcrossStreamCounts(t *testing.T) {
 		t.Errorf("after a one-stream call = %v, want %v", got, first)
 	}
 }
+
+// TestScaleDownCannotMoveTheFusedOrder is the property scaleDown's documentation
+// claims and, until this test, only asserted for the scores it happened to produce.
+//
+// "Only the ratios between weights affect the fused order" is true of the arithmetic
+// on paper and not of float64. Dividing each weight by the largest of them is a
+// rounding operation, and it rounds a document's one term differently from another
+// document's two — so the scaling, documented as leaving the order unchanged, could
+// change it for weights entirely in contract.
+//
+// The case below is the smallest one found by search. Under weights 3, 2, 1 at RRFk=60
+// a document at rank 152 of the first stream outscores one at ranks 92 and 947 of the
+// other two, by one ulp. Divide the weights by 3 and the two totals become equal — at
+// which point TopK settles them on DocID, which is the collapse to insertion order
+// every other guard in this file exists to prevent, arriving through the one operation
+// that promised not to reorder anything.
+func TestScaleDownCannotMoveTheFusedOrder(t *testing.T) {
+	const (
+		docA engine.DocID = 1
+		docB engine.DocID = 2
+	)
+	// stream builds a stream of the given depth with want at the last position, so its
+	// rank is exactly depth. The filler ids are disjoint per stream and disjoint from
+	// docA and docB, so nothing else can accumulate across streams and interfere.
+	stream := func(depth int, filler engine.DocID, want engine.DocID) []engine.Candidate {
+		out := make([]engine.Candidate, depth)
+		for i := range out {
+			out[i] = engine.Candidate{Doc: filler + engine.DocID(i), Score: float64(depth - i)}
+		}
+		out[depth-1] = engine.Candidate{Doc: want, Score: 1}
+		return out
+	}
+	streams := [][]engine.Candidate{
+		stream(152, 1_000, docA),
+		stream(92, 100_000, docB),
+		stream(947, 500_000, docB),
+	}
+
+	// What the weighted formula orders, computed the way fuse computes it: the
+	// reciprocal once per rank, multiplied by the stream's weight, accumulated in
+	// ascending rank order. Unscaled, because that is the order the scaling must
+	// preserve.
+	term := func(w float64, rank int) float64 { return w * (1 / (RRFk + float64(rank))) }
+	wantA := term(3, 152)
+	wantB := term(2, 92) + term(1, 947)
+	if wantA <= wantB {
+		t.Fatalf("the fixture no longer distinguishes the two documents (A %v, B %v); it is the "+
+			"one-ulp gap that this test is about", wantA, wantB)
+	}
+
+	got := FuseWeighted(3, 2, 1)(streams, 4000)
+	ids := docs(got)
+	ia, ib := slices.Index(ids, docA), slices.Index(ids, docB)
+	if ia < 0 || ib < 0 {
+		t.Fatalf("fused list is missing a document: A at %d, B at %d", ia, ib)
+	}
+	if ia > ib {
+		t.Errorf("A fused below B, and unscaled the weights put A above it (%v vs %v); the "+
+			"scaling reordered what it documents itself as leaving alone", wantA, wantB)
+	}
+	if got[ia].Score == got[ib].Score {
+		t.Errorf("A and B fused to the same score %v, and unscaled they differ (%v vs %v); tied "+
+			"here they are settled by DocID, which is insertion order", got[ia].Score, wantA, wantB)
+	}
+
+	// And the scaling is exactly a power of two, which is what makes the above hold in
+	// general rather than for this fixture: every score is the unscaled score divided
+	// by 2^exp, to the last bit.
+	if want := math.Ldexp(wantA, -2); got[ia].Score != want {
+		t.Errorf("A scored %v, want %v exactly: 3 scales by 2^-2, and Ldexp leaves the "+
+			"significand alone", got[ia].Score, want)
+	}
+}
