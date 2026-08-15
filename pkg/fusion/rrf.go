@@ -14,6 +14,7 @@ package fusion
 import (
 	"math"
 	"slices"
+	"sort"
 
 	"github.com/skyoo2003/weft/pkg/engine"
 )
@@ -230,14 +231,41 @@ func fuse(streams [][]engine.Candidate, k int, weights []float64, dflt float64) 
 	//
 	// Sweeping rank by rank, every document accumulates in ascending rank order
 	// whatever stream supplied each hit, so equal multisets sum to identical
-	// bits. Repeats of one rank across streams add the same value and commute.
-	// Same total work, and the reciprocal is computed once per rank rather than
-	// once per candidate.
+	// bits. Same total work, and the reciprocal is computed once per rank rather
+	// than once per candidate.
+	//
+	// Within one rank the streams are visited lightest weight first, not in the
+	// order the caller passed them. Unweighted, repeats of a rank across streams
+	// add the same value and commute, which is what the paragraph above used to
+	// rest on; weighted, they do not. A document at rank 1 of three streams
+	// weighted 0.25, 1/6 and 0.125 sums to a different last bit if the first and
+	// third stream are exchanged — the same scorers, the same weights, moved
+	// together — and that bit is enough to swap it with a competitor or to tie
+	// with one and lose on DocID. Ordering by the weight rather than by the
+	// position makes the sum a function of the multiset the document actually
+	// earned, which is the same property the rank-major sweep buys one level up.
+	// Equal weights contribute equal values and commute, so the stable sort leaves
+	// the unweighted path in slice order and bit-identical to what it always was.
+	order := make([]int, len(streams))
+	for i := range order {
+		order[i] = i
+	}
+	weightOf := func(si int) float64 {
+		if si < len(weights) {
+			return weights[si]
+		}
+		return dflt
+	}
+	// NaN sorts nowhere in particular and is dropped by the guard below without
+	// reaching the sum, so where it lands cannot matter.
+	sort.SliceStable(order, func(a, b int) bool { return weightOf(order[a]) < weightOf(order[b]) })
+
 	for i := 0; i < depth; i++ {
 		// Note what is absent: Candidate.Score is never read. Position is
 		// everything.
 		w := 1 / (RRFk + float64(i+1))
-		for si, stream := range streams {
+		for _, si := range order {
+			stream := streams[si]
 			if i >= len(stream) {
 				continue
 			}
@@ -245,10 +273,7 @@ func fuse(streams [][]engine.Candidate, k int, weights []float64, dflt float64) 
 			// would save nothing measurable and would create two accumulation paths
 			// whose last bits could drift apart, which is exactly what the
 			// rank-major ordering above exists to prevent.
-			sw := dflt
-			if si < len(weights) {
-				sw = weights[si]
-			}
+			sw := weightOf(si)
 			// Weight 0 must not create the map entry. Accumulating 0 would leave the
 			// document in the result at score 0 — last, but present, holding a rank
 			// it did not earn from a stream the caller switched off. A document that

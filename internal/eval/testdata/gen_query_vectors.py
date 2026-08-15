@@ -219,14 +219,31 @@ def sanity(query_vecs: dict[str, list[float]]) -> bool:
         print("\nsanity check skipped: no judged document has a vector yet", file=sys.stderr)
         return True
 
+    # One-sided sign test against a coin flip. A bare majority used to pass, and a
+    # bare majority is what an adapter embedding in the wrong space produces: with 50
+    # queries, 26 wins is the median outcome of pure noise, so the check accepted
+    # exactly the result it exists to refuse. math.comb keeps this exact and keeps the
+    # script on the standard library.
+    p_value = sum(math.comb(compared, w) for w in range(wins, compared + 1)) / 2**compared
+
     print(f"\nsanity check over {compared} queries with judged documents that have vectors")
     print(f"  mean cosine to judged-relevant  {rel_sum / compared:.4f}")
     print(f"  mean cosine to random           {rnd_sum / compared:.4f}")
-    print(f"  relevant wins                   {wins}/{compared}")
-    if wins * 2 <= compared:
+    print(f"  relevant wins                   {wins}/{compared}  (sign test p = {p_value:.2e})")
+
+    # Both halves have to hold, because they fail differently. The sign test asks
+    # whether relevant beats random more often than chance; the aggregate margin asks
+    # whether it beats it by anything worth fusing. An adapter can win narrowly and
+    # often on near-identical cosines, and that is a stream of noise with a consistent
+    # tilt. The threshold is 0.001 rather than a conventional 0.05 because this is a
+    # gate on a published baseline, not a hypothesis test someone will replicate: on
+    # the run recorded in docs/EVAL.md section 5.4 it was 50/50 wins, p = 8.9e-16,
+    # with means 0.7620 against 0.6842, so the bar is nowhere near the real result.
+    if p_value >= 0.001 or rel_sum <= rnd_sum:
         print(
-            "\nFAIL: the query adapter does not separate relevant from random.\n"
-            "The vector arm would be contributing noise. Drop it rather than report it.",
+            "\nFAIL: the query adapter does not separate relevant from random by more than\n"
+            "chance would. The vector arm would be contributing noise. Drop it rather than\n"
+            "report it.",
             file=sys.stderr,
         )
         return False

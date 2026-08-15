@@ -627,3 +627,86 @@ func TestScaleDownDropsAStreamItCannotRepresent(t *testing.T) {
 			"not drop it", got, loud, soft)
 	}
 }
+
+// TestFuseWeightedIsInvariantToStreamOrder pins the property the rank-major sweep
+// buys, at the one place weights could still take it away.
+//
+// Rank-major accumulation makes a document's total a function of the ranks it earned
+// rather than of the order the scorers were listed in. Unweighted that holds within a
+// rank too, because repeats of one rank add the same value and commute. Weighted they
+// do not: three streams meeting at rank 1 with different weights sum to a different
+// last bit depending on which order they are visited, so moving a scorer and its
+// weight together — semantically the same fusion — could swap two documents or tie
+// them and let DocID decide.
+//
+// The case is the smallest found by search: at RRFk=60 a document at rank 1 of three
+// streams weighted 0.25, 1/6 and 0.125 beats one weighted 0.5416666666666666 by a
+// single ulp, and exchanging the first and third stream/weight pair used to make them
+// equal.
+func TestFuseWeightedIsInvariantToStreamOrder(t *testing.T) {
+	// The competitor takes the lower DocID on purpose. These two totals are a hair
+	// apart, so an order-dependent sum either separates them or ties them — and a tie
+	// is settled by DocID. With the competitor first, the two answers are different
+	// rankings rather than the same one reached twice.
+	const (
+		whole engine.DocID = 1
+		split engine.DocID = 2
+	)
+	type pair struct {
+		w      float64
+		stream []engine.Candidate
+	}
+	pairs := []pair{
+		{0.25, []engine.Candidate{{Doc: split, Score: 1}}},
+		{1.0 / 6.0, []engine.Candidate{{Doc: split, Score: 1}}},
+		{0.125, []engine.Candidate{{Doc: split, Score: 1}}},
+		{0.5416666666666666, []engine.Candidate{{Doc: whole, Score: 1}}},
+	}
+
+	fuseOf := func(p []pair) []engine.DocID {
+		ws := make([]float64, len(p))
+		streams := make([][]engine.Candidate, len(p))
+		for i, x := range p {
+			ws[i], streams[i] = x.w, x.stream
+		}
+		return docs(FuseWeighted(ws...)(streams, 10))
+	}
+
+	want := fuseOf(pairs)
+	// Every permutation of the same (stream, weight) pairs is the same fusion, so
+	// every one has to produce the same ranking. Enumerated rather than sampled:
+	// there are 24 of them.
+	var perm func([]pair, int)
+	checked := 0
+	perm = func(p []pair, i int) {
+		if i == len(p) {
+			checked++
+			if got := fuseOf(p); !slices.Equal(got, want) {
+				order := make([]float64, len(p))
+				for j, x := range p {
+					order[j] = x.w
+				}
+				t.Fatalf("weights in order %v fused to %v, the same pairs in the declared order "+
+					"fused to %v; moving a scorer and its weight together is the same fusion",
+					order, got, want)
+			}
+			return
+		}
+		for j := i; j < len(p); j++ {
+			p[i], p[j] = p[j], p[i]
+			perm(p, i+1)
+			p[i], p[j] = p[j], p[i]
+		}
+	}
+	perm(slices.Clone(pairs), 0)
+	if checked != 24 {
+		t.Errorf("checked %d orderings, want all 24", checked)
+	}
+
+	// Under the canonical order these two land on identical bits, which is itself the
+	// point: 0.25 + 1/6 + 0.125 and 0.5416666666666666 are a hair apart in exact
+	// arithmetic, so whether they separate is decided by summation order alone. Tied,
+	// TopK settles them on DocID — the same answer from every permutation. Before the
+	// ordering, the declared order separated them and exchanging the first and third
+	// pair did not.
+}

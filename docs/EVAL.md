@@ -375,10 +375,19 @@ to its judged-relevant documents against mean cosine to random ones.
 
     mean cosine to judged-relevant  0.7620
     mean cosine to random           0.6842
-    relevant wins                   50/50
+    relevant wins                   50/50  (sign test p = 8.88e-16)
 
 The query vectors are in a usable space. Both checks are built into the script and
 rerun with it.
+
+**The bar this clears was raised after review.** The check originally passed on a
+bare majority of wins, and a bare majority is the median outcome of a coin flip — so
+an adapter embedding into the wrong space would have produced roughly 26 of 50 and
+been accepted by the check written to refuse it, with the aggregate cosines printed
+above and never compared. It now requires both a one-sided sign test at p < 0.001
+(exact, via `math.comb`, so the script stays on the standard library) and a positive
+aggregate margin. The run above sits sixteen orders of magnitude inside the first and
+0.0778 inside the second; 34 of 50 wins would fail.
 
 ### 5.5 The text baseline, against an external number
 
