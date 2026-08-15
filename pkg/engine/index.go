@@ -5,7 +5,6 @@ package engine
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -87,8 +86,6 @@ type Index struct {
 //
 // Requires ix.mu.
 
-func (ix *Index) lenAt() int { return int(ix.base) + len(ix.docs) }
-
 func (ix *Index) docAt(id DocID) (Document, bool) {
 	if s := ix.segFor(id); s != nil {
 		return s.doc(id)
@@ -122,24 +119,6 @@ func (ix *Index) lookupAt(term string) []Posting {
 		return pending
 	}
 	return append(out, pending...)
-}
-
-// terms is every term the index holds, sorted. Requires ix.mu.
-//
-// The union of the pending segment's map and each committed segment's, which is
-// bounded by the vocabulary — the one thing about a segment that is already
-// held in memory rather than mapped.
-func (ix *Index) terms() []string {
-	seen := make(map[string]struct{}, len(ix.postings))
-	for t := range ix.postings {
-		seen[t] = struct{}{}
-	}
-	for _, s := range ix.segs {
-		for t := range s.terms {
-			seen[t] = struct{}{}
-		}
-	}
-	return slices.Sorted(maps.Keys(seen))
 }
 
 // segFor returns the committed segment holding id, or nil. Requires ix.mu.

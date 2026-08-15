@@ -142,7 +142,7 @@ func (s *segment) holds(id DocID) bool {
 // without shrinking it. An approximate vector index is what removes the scan.
 // Nothing in this file can.
 func (s *segment) doc(id DocID) (Document, bool) {
-	local := DocID(uint64(id) - uint64(s.base))
+	local := id - s.base
 	off, ok := s.offs.at(local)
 	if !ok || off < segHeaderLen || off-segHeaderLen > len(s.docs) {
 		return Document{}, false
@@ -163,7 +163,7 @@ func (s *segment) doc(id DocID) (Document, bool) {
 // docLen is arithmetic on the mapped table, not a decode. BM25 asks once per
 // posting, which is why the token count is in the table at all.
 func (s *segment) docLen(id DocID) int {
-	return s.offs.docLen(DocID(uint64(id) - uint64(s.base)))
+	return s.offs.docLen(id - s.base)
 }
 
 // resolve binary-searches this segment's keys. The DocID returned is
@@ -173,7 +173,7 @@ func (s *segment) resolve(key string) (DocID, bool) {
 	if err != nil || !ok {
 		return 0, false
 	}
-	return DocID(uint64(s.base) + uint64(id)), true
+	return s.base + id, true
 }
 
 // lookup decodes the postings for term, ascending by index-wide DocID, or nil
@@ -190,7 +190,7 @@ func (s *segment) lookup(term string) []Posting {
 	}
 	if s.base != 0 {
 		for i := range pl {
-			pl[i].Doc = DocID(uint64(s.base) + uint64(pl[i].Doc))
+			pl[i].Doc += s.base
 		}
 	}
 	return pl

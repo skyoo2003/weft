@@ -51,7 +51,7 @@ const docoffLenAt = 8
 
 // encodeDocOffsets writes the docoff section: one (offset, token count) pair
 // per DocID, in DocID order, so entry i sits at a computable position.
-func encodeDocOffsets(w *segWriter, offs []int, docLen []int) {
+func encodeDocOffsets(w *segWriter, offs, docLen []int) {
 	w.uvarint(uint64(len(offs)))
 	for i, off := range offs {
 		var b [docoffWidth]byte

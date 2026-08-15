@@ -57,8 +57,10 @@ type pendingSource struct {
 	buf []Posting
 }
 
-func (p *pendingSource) count() int             { return len(p.ix.docs) }
-func (p *pendingSource) totals() (int, int)     { return p.ix.totalLen, p.ix.vecDim }
+func (p *pendingSource) count() int { return len(p.ix.docs) }
+func (p *pendingSource) totals() (totalLen, vecDim int) {
+	return p.ix.totalLen, p.ix.vecDim
+}
 func (p *pendingSource) doc(local int) Document { return p.ix.docs[local] }
 func (p *pendingSource) docLen(local int) int   { return p.ix.docLen[local] }
 func (p *pendingSource) termList() []string     { return slices.Sorted(maps.Keys(p.ix.postings)) }
@@ -67,7 +69,7 @@ func (p *pendingSource) postings(t string) []Posting {
 	pl := p.ix.postings[t]
 	p.buf = append(p.buf[:0], pl...)
 	for i := range p.buf {
-		p.buf[i].Doc = DocID(uint64(p.buf[i].Doc) - uint64(p.ix.base))
+		p.buf[i].Doc -= p.ix.base
 	}
 	return p.buf
 }
@@ -93,20 +95,19 @@ func (m mergedSource) count() int {
 	return n
 }
 
-func (m mergedSource) totals() (int, int) {
-	total, dim := 0, 0
+func (m mergedSource) totals() (totalLen, vecDim int) {
 	for _, s := range m.segs {
-		total += s.totalLen
-		if dim == 0 {
-			dim = s.vecDim
+		totalLen += s.totalLen
+		if vecDim == 0 {
+			vecDim = s.vecDim
 		}
 	}
-	return total, dim
+	return totalLen, vecDim
 }
 
 // segFor finds the segment holding a local id, and the index-wide id it maps to.
 func (m mergedSource) segFor(local int) (*segment, DocID) {
-	id := DocID(uint64(m.base) + uint64(local))
+	id := m.base + DocID(local)
 	for _, s := range m.segs {
 		if s.holds(id) {
 			return s, id
@@ -150,7 +151,7 @@ func (m mergedSource) postings(t string) []Posting {
 	var out []Posting
 	for _, s := range m.segs {
 		for _, e := range s.lookup(t) {
-			out = append(out, Posting{Doc: DocID(uint64(e.Doc) - uint64(m.base)), Freq: e.Freq})
+			out = append(out, Posting{Doc: e.Doc - m.base, Freq: e.Freq})
 		}
 	}
 	return out
