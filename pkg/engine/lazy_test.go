@@ -308,9 +308,95 @@ func TestCloseReleasesTheSegments(t *testing.T) {
 	}
 }
 
+// openHeap is the Go heap an opened index retains, with the corpus that built
+// it dropped first.
+func openHeap(t *testing.T, docs int) (heap uint64, onDisk int64) {
+	t.Helper()
+	dir := t.TempDir()
+	func() {
+		ix := bulkCorpus(t, docs)
+		defer ix.Close() //nolint:errcheck // teardown
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+	}()
+	onDisk = segmentBytes(t, dir)
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	heap = after.HeapAlloc - before.HeapAlloc
+	// Read after the measurement, so the compiler cannot decide the index was
+	// dead before the second reading and collect what is being measured.
+	if got.Len() != docs {
+		t.Fatalf("opened %d documents, want %d", got.Len(), docs)
+	}
+	got.Close() //nolint:errcheck // teardown
+	return heap, onDisk
+}
+
+// TestHeapDoesNotScaleWithTheCorpus is the milestone's memory pass line.
+//
+// It measures scaling rather than a size, which is what makes it cheap enough
+// to run: eight times the corpus must not be eight times the heap. An index
+// that decoded on Open would track the corpus exactly.
+//
+// What it does not measure is stated here rather than left for a reader to
+// assume. Go's heap is not the machine's memory. Mapped pages live in the page
+// cache, so this number going flat means the corpus left the Go heap — not that
+// it stopped needing to be resident. On the milestone 4 corpus roughly 69% of
+// the docs file is vectors and scorer/vector scans all of them per query, so
+// that scan's working set is unchanged by everything in this milestone. Only an
+// approximate vector index removes it, and this is the assertion that would
+// otherwise read as if it had.
+func TestHeapDoesNotScaleWithTheCorpus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds two corpora, the larger 8 MB")
+	}
+	small, smallDisk := openHeap(t, 250)
+	large, largeDisk := openHeap(t, 2000)
+	t.Logf("250 docs: %d bytes on disk, %d heap; 2000 docs: %d on disk, %d heap",
+		smallDisk, small, largeDisk, large)
+
+	if largeDisk < smallDisk*7 {
+		t.Fatalf("the corpora are not 8x apart on disk: %d and %d", smallDisk, largeDisk)
+	}
+	if large > small*2 {
+		t.Errorf("8x the corpus retained %d bytes of heap against %d — Open is still holding the corpus", large, small)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Incremental commit: D-003's repayment.
 // ---------------------------------------------------------------------------
+
+// TestCommitIsByteDeterministic is the merge assertion's other half.
+//
+// A commit reads its term set out of a map too, so the same corpus committed
+// twice has the same chance of producing two different files — and the same
+// consequence, since posting order decides rankings. Milestone 4 section 4.2 is
+// what it costs to find that out downstream.
+func TestCommitIsByteDeterministic(t *testing.T) {
+	build := func(t *testing.T) map[string]uint32 {
+		t.Helper()
+		dir := t.TempDir()
+		ix := bulkCorpus(t, 200)
+		defer ix.Close() //nolint:errcheck // teardown
+		if err := ix.Commit(dir); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		return dirBytes(t, filepath.Join(dir, segDirName(1)))
+	}
+	if first, second := build(t), build(t); !maps.Equal(first, second) {
+		t.Errorf("two commits of the same corpus produced different bytes:\n first %v\nsecond %v", first, second)
+	}
+}
 
 // dirBytes hashes every file under dir, so "these bytes did not change" is one
 // comparison rather than a walk in the test.
