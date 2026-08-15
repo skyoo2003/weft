@@ -561,3 +561,151 @@ to avoid, and that is the strongest objection to this API existing at all. Learn
 them from relevance judgments is a different project. `FuseWeighted`'s documentation
 says plainly that a caller with no measurement of its own should use `Fuse`, which is
 the honest position until one of those is settled.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 3 — Scale
+
+**Verdict: storage is lazy and the read API did not move; the corpus is not
+resident-free.** Four of the five pass lines hold. The fifth — that a corpus
+larger than memory is workable — is true of the text and graph paths and
+false of the vector path, for a reason arithmetic settles rather than
+engineering. Evidence: `pkg/engine/lazy_test.go`, `formatv2_test.go`,
+`segment_test.go`; the format is [FORMAT.md](FORMAT.md), the decisions are
+[D-006](DECISIONS.md) and [D-007](DECISIONS.md).
+
+| Pass line | Result |
+| --- | --- |
+| Lazy ranks identically to eager | **holds.** All five milestone 4 arms reproduce to four decimals |
+| Heap does not scale with the corpus | **holds.** 74,504 bytes at 250 documents, 74,504 at 2,000 |
+| Commit cost is bounded by the addition | **holds.** One document onto a 7.2 MB corpus writes 245 bytes |
+| Segment bytes are deterministic | **holds.** Commit and merge both |
+| `pkg/scorer` and `pkg/fusion` unchanged | **holds.** 0 lines |
+
+## 1. Result
+
+**The real corpus reproduces milestone 4 exactly.** The evaluation index was
+rebuilt at format v2 and `make eval` re-run against it:
+
+| Arm | Milestone 4 | Milestone 3 |
+| --- | --- | --- |
+| `text` | 0.5826 | 0.5826 |
+| `text+vector` | 0.6233 | 0.6233 |
+| `text+graph` | 0.3985 | 0.3985 |
+| `text+vector+graph` | 0.5005 | 0.5005 |
+| `text+vector+graph-including-seeds` | 0.5451 | 0.5451 |
+
+Both binding deltas carry their intervals across unchanged — `−0.1227`
+`[−0.1550, −0.0909]` and `+0.0407` `[+0.0010, +0.0798]` — and so do the largest
+per-query moves, query 24 at `0.9149 → 0.4819` and query 40 at `1.0000 →
+0.6321`. 171,332 documents, avgdl 169.4, 579,719 in-corpus edges: the same
+corpus, read a different way, ranked identically.
+
+**Opening it costs 54 ms.** Milestone 4 measured 979 ms for the same directory.
+
+**The six read methods kept their signatures.** `engine`'s exported API grew by
+three names — `Scrub`, `Close`, `Merge` — and no existing one moved. That is the
+milestone 1 hypothesis surviving contact with storage, and the golden file is
+what makes it a measurement rather than a claim.
+
+## 2. What the numbers are
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| `Open` allocation, 7.2 MB segment | the corpus | 154,696 B (2.1%) |
+| `Commit` allocation, 7.2 MB segment | 51,453,656 B (585%) | 695,536 B (9.6%) |
+| Commit after one `Add`, 7.2 MB corpus | the corpus | 245 B |
+| Heap after `Open`, 250 → 2,000 documents | tracks the corpus | 74,504 → 74,504 B |
+
+Two of those were found by writing the test rather than by reasoning about the
+design. The writer's 51 MB was mostly not the buffer it was rewritten to remove
+— 35 MB of it was a ten-byte varint scratch array escaping to the heap on every
+posting, twice. And making the pending index satisfy the merge's source
+interface put 9 MB straight back, by allocating a translated posting list per
+term.
+
+## 3. The arithmetic the milestone does not beat
+
+`mmap` moves a corpus out of the Go heap and into the page cache. **That is a
+different accounting, not a smaller working set**, and the flat heap number
+above says exactly that and nothing more.
+
+On the evaluation index, of a 656 MB `docs` file roughly 434 MiB — 69% — is
+vectors: 148,232 documents at 768 dimensions. `scorer/vector` scans every one of
+them on every query. So every page of that 434 MiB is touched per query, before
+and after this milestone, and the heap assertion passes while the machine needs
+the memory it always needed.
+
+The text and graph paths are genuinely lazy: postings are decoded per term,
+O(df) and not O(corpus), and links per document. The vector path is the
+exception and it is the majority of the bytes.
+
+**This is why the milestone's outcome sentence is only half true.** "Works on a
+corpus larger than memory" holds for a corpus without vectors and does not hold
+for one with them. Removing the scan is an approximate index — planned as task 7,
+not built — and until it exists this is the honest statement of where the
+milestone stands.
+
+## 4. Known costs
+
+### 4.1 Corruption and absence are one answer
+
+`Doc` returns `(Document, bool)`. A record that fails its checksum reports the id
+as absent, because the alternative is an error return on all six read methods —
+the one change that reaches every scorer, and the change this milestone exists to
+avoid making. What still holds is pinned: never a wrong document, never a panic,
+neighbouring documents untouched, and `Scrub` names the damage. [D-006](DECISIONS.md).
+
+### 4.2 A unit nobody reads is never verified
+
+Milestone 2 got whole-index verification free, because `Open` read every byte.
+This one has to buy it, and `Scrub` is the price. Rot in a document no query
+reaches sits there until somebody runs it. That is the deal lazy loading makes
+and it is stated in `Scrub`'s own documentation rather than only here.
+
+### 4.3 `Commit` holds the write lock
+
+The streaming writer put the disk writes inside the lock, and adopting the new
+segment made `Commit` a writer rather than a reader. Queries now wait on a commit
+where they used to run alongside it. Incremental commit is what bounds the
+window — a commit writes what was added, not the corpus — and the marker names
+the upgrade: encode under the read lock, swap under the write lock, counting
+captured documents. Worth doing when a load test shows the pause.
+
+### 4.4 Merge policy is a constant
+
+Eight segments, oldest run merged. Adjacency is not a policy choice — it is what
+makes a merge a concatenation, so every document keeps its id and no ranking can
+move — but the number is unmeasured, and what it trades against is write
+amplification nobody counts. Milestone 5's load test is the instrument.
+
+### 4.5 The terms index is read in full
+
+Bounded by the vocabulary and not the corpus: 2.7 MB behind 626 MiB on the
+evaluation index. A third fixed-width table would remove it and would be a format
+section bought before anything measured a need. If a corpus turns up whose
+vocabulary is the problem, `decodeTermIndex` is the function that says so.
+
+## 5. What milestone 1 §3.4 got, and did not
+
+The DocID namespace question stayed open and did not get worse, which was the
+obligation. A segment owns `[base, base+count)`, ids stay dense and index-wide,
+and `DocID` is still a `uint32` — no composite id, no widened `Candidate`, no
+method on `Scorer`. The manifest checks that the bases tile `[0, total)`
+contiguously while it reads them, because a list that did not would give two
+segments overlapping ids and `segFor` would answer with whichever it walked into
+first: a wrong document, not an error.
+
+*Between* indexes the problem is exactly where milestone 1 left it.
+
+## 6. Carried into milestone 5
+
+1. **The vector scan is the milestone's unfinished half** (§3). An approximate
+   index is the only thing that closes it.
+2. **Block metadata is still written and unread.** D-001 wrote it for a skipper;
+   the per-block checksums added here mean a skipped block can now be verified
+   when it is finally read.
+3. **`Scrub` has no schedule and no incremental form.** It reads everything.
+4. **RSS was not measured**, only the Go heap. §3 is the argument for why the two
+   differ; a load test is what would show by how much.

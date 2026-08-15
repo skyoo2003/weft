@@ -353,3 +353,121 @@ scorer is marked at the point of use rather than only in a document nobody reads
 present and still unweighted at milestone 6. That would mean the finding was used as a
 reason not to delete rather than as a direction, which is the failure this entry claims
 to have avoided. The check is mechanical: grep for `FuseWeighted` outside `pkg/fusion`.
+
+---
+
+## D-006 — Map the segments, so the read API does not grow an error
+
+**Status:** accepted, 2026-08-15
+**Context:** [FINDINGS milestone 2 §3.2](FINDINGS.md), [milestone 1 §3.4](FINDINGS.md),
+`pkg/engine/mmap_unix.go`
+
+### Question
+
+Milestone 3 has to read a corpus larger than memory. Two things follow and they pull in
+opposite directions: reads must not load what they do not use, and the six read methods
+the scorers call must keep their signatures — the milestone 1 hypothesis is exactly the
+claim that scale costs `pkg/scorer` nothing.
+
+Reading lazily means reading from a file. A file read fails.
+
+### Decision
+
+**`mmap`, and DocIDs stay one dense `uint32` space.**
+
+The decoders already work over a `[]byte`, so a mapped region reaches them with the
+parsing, the bounds checks and the verification unchanged. More to the point, an access
+to mapped memory cannot fail, so `Doc(id) (Document, bool)` keeps its shape.
+
+`ReadAt` was the alternative and it is the one that costs. Every one of the six read
+methods would return an error, all four scorers would handle it, and `engine_api.txt`
+would record the widening — which is precisely what that golden file is for. The
+measured cost of the choice actually made is three new names: `Scrub`, `Close`, `Merge`.
+
+The DocID half is the same shape of decision. Two live segments could have been
+`(segment, local id)`; instead a segment owns `[base, base+count)` and the manifest says
+where. `DocID`'s width is in the golden file, ids stay dense, and `TopK`'s tiebreak still
+means what it meant.
+
+### What it does not buy, at the same volume
+
+**mmap moves a corpus out of the Go heap and into the page cache. It does not shrink a
+working set.** The heap assertion is flat — 74,504 bytes at 250 documents and 74,504 at
+2,000, 7.9× apart on disk — and flat says the corpus left the heap, not that it stopped
+needing to be resident.
+
+On the milestone 4 corpus roughly 69% of the 656 MB docs file is vectors, and
+`scorer/vector` scans every one of them per query. That scan's working set is unchanged
+by anything in this milestone. Only an approximate vector index removes it.
+
+### The cost this hides, and where it is visible
+
+`Doc` returns `(Document, bool)`, so a record failing its checksum reports the id as
+**absent**. Corruption and "no such document" are one answer at the read API. The
+alternative is the error return this decision exists to avoid, so the trade is taken
+deliberately and pinned by a test: never a wrong document, never a panic, neighbouring
+documents untouched, and `Scrub` names the damage.
+
+### What would show this decision was wrong
+
+A scorer needs to tell absence from damage. If that happens the honest fix is the error
+return — and the diff it forces across the scorers is the number this decision claimed
+to be avoiding, so record it here rather than adding a second, quieter channel.
+
+---
+
+## D-007 — Format v2 refuses version 1, and this argument works exactly once
+
+**Status:** accepted, 2026-08-15
+**Context:** [FORMAT.md](FORMAT.md), D-003 above, `pkg/engine/segment.go`
+
+### Question
+
+Version 1 wrote documents as a bare run of variable-length records and rebuilt `byKey` by
+reading all of them. Neither a `DocID` nor a `Key` could reach its document without
+decoding every document in front of it — no arrangement of a lazy reader fixes that, only
+different bytes do. So the format changes. Does the reader migrate v1 or refuse it?
+
+### Decision
+
+**Refuse, with `ErrBadVersion`.** One reason, and it is not a technical one: **weft has no
+users, and no version 1 index exists anywhere that cannot be rebuilt.** The evaluation
+directory was the only one, and `weft-eval build` regenerated it from sources still on
+disk.
+
+FORMAT.md §7.5 says a migration reads the old version and writes the new one. This
+milestone is exempt, and **the exemption is not available again**: it rests on a user
+count, and a user count only goes up.
+
+### What v2 adds, and why each is a format change rather than a code change
+
+| Section | What it makes possible |
+| --- | --- |
+| `docoff` | `DocID` → the record's offset, with the token count beside it. Fixed width, so entry *i* is arithmetic. BM25 asks for a length once per posting, and a length reachable only by decoding the record would make every posting cost a key, a text and a vector. |
+| `keys` | sorted `Key` → `DocID`, binary-searchable, so `Resolve` is not a map rebuilt by reading the corpus. |
+| per-unit checksums | one record, block or entry at a time. The frame checksum covers a whole file, so computing it costs a full read — the cost being removed. |
+
+The manifest's contents changed and its *shape* did not: D-003 put a segment list there
+for this. Entries now carry `(name, base, count)`.
+
+The checksums are **seeded**, and the seed is the part worth recording. A document record
+never carried its own DocID — position named it — so a lazy reader following a damaged
+offset table would decode a healthy record under someone else's id and return a plausible
+wrong answer. Binding the id in makes the record prove which document it is.
+
+### D-003's retrospective: what v1 got wrong
+
+D-003 asked what would show it wrong: "milestone 3 finds the v1 section formats unusable
+for multi-segment reading, forcing a version bump that rewrites more than the manifest."
+
+**That is what happened, and not for the reason it expected.** Multi-segment reading was
+fine — the manifest was a list, as designed, and incremental commit extends its contents
+rather than its shape. What v1 could not do was let a *single* segment be read lazily: the
+`docs` section was positional and `byKey` was derived, so both had to be reconstructed in
+full. D-003 was watching the seam between segments. The problem was inside one.
+
+### What would show this decision was wrong
+
+Somebody turns up holding a v1 index they cannot rebuild. Then refusing was the wrong
+call, and the fix is a converter shipped separately rather than a reader carrying two
+formats. Record it here if it happens.

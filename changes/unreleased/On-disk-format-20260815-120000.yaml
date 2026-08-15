@@ -1,0 +1,11 @@
+kind: On-disk format
+body: 'Version 2. Version 1 indexes are refused with ErrBadVersion and are not
+  migrated — weft has no users and the only v1 directory in existence is rebuildable,
+  which is an argument available exactly once (docs/DECISIONS.md D-007). New sections
+  docoff and keys let a DocID or a Key reach its document without decoding the
+  documents in front of it; per-unit checksums let one record, block or entry be
+  verified without reading the whole file; the manifest''s segment entries now carry
+  (name, base, count).'
+time: 2026-08-15T12:00:00.000000000+09:00
+custom:
+  Issue: 9

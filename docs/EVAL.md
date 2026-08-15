@@ -985,3 +985,41 @@ git show ed80dc2:pkg/scorer/graph/graph.go > pkg/scorer/graph/graph.go
 go run ./cmd/weft-eval run && go run ./cmd/weft-eval diagnose
 git checkout pkg/scorer/graph/graph.go
 ```
+
+---
+
+## 8. Re-measured on format version 2 (milestone 3, 2026-08-15)
+
+Milestone 3 replaced the on-disk format and the way an index is read: segments are
+mapped rather than decoded, `Open` no longer touches the corpus, and a commit
+writes only what was added. Everything above was measured through the old reader,
+so all of it was re-run against a rebuilt index.
+
+**Nothing moved.** Same corpus — 171,332 documents, avgdl 169.4, 579,719 in-corpus
+edges — and the same numbers to four decimals:
+
+| Arm | Section 5 | Version 2 |
+| --- | --- | --- |
+| `text` | 0.5826 | 0.5826 |
+| `text+vector` | 0.6233 | 0.6233 |
+| `text+graph` | 0.3985 | 0.3985 |
+| `text+vector+graph` | 0.5005 | 0.5005 |
+| `text+vector+graph-including-seeds` | 0.5451 | 0.5451 |
+
+Both binding deltas carry their intervals across — `−0.1227` `[−0.1550, −0.0909]`
+and `+0.0407` `[+0.0010, +0.0798]` — and so do the largest per-query moves, query
+24 at `0.9149 → 0.4819` and query 40 at `1.0000 → 0.6321`.
+
+That is the point of running it. A storage change that altered a ranking would be
+a bug wearing the clothes of a result, and section 4.2's lesson is that the
+instruments in this document cannot see one: the bootstrap resamples queries
+against whatever index it is handed.
+
+**What did change is the cost of opening it: 979 ms to 54 ms.** The index has to
+be rebuilt to be read at all — v1 is refused with `ErrBadVersion`, which
+`weft-eval run` reports along with the remedy:
+
+```bash
+weft-eval build      # v1 indexes are refused; this writes v2
+make eval
+```

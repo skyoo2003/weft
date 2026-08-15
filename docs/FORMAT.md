@@ -1,11 +1,24 @@
-# On-disk format, version 1
+# On-disk format, version 2
 
-`pkg/engine/segment.go` and `pkg/engine/persist.go` are what the bytes actually
-obey. Where this document and those files disagree, the document is wrong.
+`pkg/engine/segment.go`, `pkg/engine/seek.go` and `pkg/engine/persist.go` are what
+the bytes actually obey. Where this document and those files disagree, the
+document is wrong.
 
-Milestone 2 writes this format; milestone 3 extends it. It is written down
-because a format is the one thing in weft that cannot be quietly rewritten — code
-is replaceable, a file on a user's disk demands a migration.
+Milestone 2 wrote version 1; milestone 3 replaced it. It is written down because a
+format is the one thing in weft that cannot be quietly rewritten — code is
+replaceable, a file on a user's disk demands a migration.
+
+**Version 1 is refused, not migrated.** `Open` reports `ErrBadVersion` for it. The
+reason is not technical: weft has no users, and the only v1 directory that existed
+was rebuildable from its sources. That argument rests on a user count and is
+therefore available exactly once — [D-007](DECISIONS.md) records it, and §7 says
+what a future version owes instead.
+
+What v1 could not express, and why the change was bytes rather than code: its
+`docs` section was a bare run of variable-length records and its key map was
+derived by reading all of them, so neither a `DocID` nor a `Key` could reach its
+document without decoding every document in front of it. No arrangement of a lazy
+reader fixes that.
 
 ---
 
@@ -19,12 +32,24 @@ dir/
     docs                every document, in DocID order
     postings            the term dictionary, block-structured
     terms               term → absolute offset into postings
+    docoff              DocID → (offset into docs, token count)   ← v2
+    keys                sorted Key → DocID                        ← v2
 ```
 
-Version 1 writes **exactly one segment per generation**, and each commit rewrites
-the whole corpus. The manifest nevertheless stores a *list* of segments, so
-milestone 3's incremental segments extend the contents of this format rather than
-the format itself.
+A commit writes **one segment holding what was added since the last commit**, and
+leaves the previous generations' files untouched. A segment stores ids local to
+itself, counting from zero, and the manifest says where it sits in the index — so
+a segment's bytes do not depend on what was committed before it, which is what
+lets an old generation survive a new one byte for byte.
+
+`Index.Merge` collapses the oldest run of segments into one when the count passes
+eight. Merging *adjacent* segments is concatenation: every document keeps the id it
+had, so nothing is renumbered. That is not a convenience — `engine.TopK` breaks
+ties on `DocID`, so a merge that moved ids would move rankings.
+
+The manifest storing a *list* is version 1's doing, from [D-003](DECISIONS.md).
+Incremental commit extends its contents and not its shape, which is the one thing
+about v1 that survived contact with this milestone.
 
 A segment directory the manifest does not name does not exist. Nothing reads it,
 and `Commit` deletes it on its way past. `Open` leaves it alone: "unnamed" is also
@@ -38,12 +63,13 @@ Every file, the manifest included, wears the same frame:
 | Field | Bytes | Notes |
 | --- | --- | --- |
 | magic | 4 | `weft` |
-| format version | uvarint | `1`; one byte until version 128 |
+| format version | uvarint | `2`; one byte until version 128 |
 | kind | 1 | see below |
 | payload | — | section-specific, below |
 | checksum | 4 | CRC-32 Castagnoli, little-endian, over everything above |
 
-`kind` is `1` meta, `2` docs, `3` postings, `4` terms, `5` manifest. It exists
+`kind` is `1` meta, `2` docs, `3` postings, `4` terms, `5` manifest, `6` docoff,
+`7` keys. It exists
 because a checksum tells intact bytes from damaged ones and nothing more: without
 a kind byte, a healthy `docs` file copied over `meta` would be parsed rather than
 refused.
@@ -54,6 +80,31 @@ Readers verify in this order, and the order is deliberate:
 2. **checksum** — so a flipped bit in the version byte cannot masquerade as a version mismatch.
 3. **version** — checked only once the bytes are known intact.
 4. **kind** — catches an intact file standing at the wrong path.
+
+**`Open` skips step 2, and `Scrub` is where it went.** The frame checksum covers
+every byte of a file, so computing it costs a full read — the cost lazy loading
+exists to remove. One consequence follows and is not hidden: on the `Open` path a
+damaged version byte reports `ErrBadVersion` rather than `ErrCorrupt`, because
+nothing has told the reader those bytes are damaged. `Scrub` runs all four steps
+in order and calls it corruption.
+
+### Unit checksums
+
+Each `docs` record, each `postings` block and each `terms` entry carries its own
+CRC-32C, four bytes, immediately after it. A reader that touches one unit verifies
+one unit, which is what makes lazy reading and integrity compatible.
+
+Every unit checksum is **seeded** with what names the unit — a `DocID` for a
+record, its own absolute file offset for a block, its index for a terms entry —
+folded in as eight little-endian bytes before the unit's own content. The seed is
+the part that matters. A document record does not carry its `DocID`; its position
+did, and `docoff` is what turns an id into that position. Trust the table and one
+damaged entry yields a healthy record decoded under someone else's id — a
+plausible wrong answer rather than an error. Binding the id in makes the record
+prove which document it is.
+
+The frame checksum still covers the unit checksums, so `Scrub` catches damage
+anywhere including in the checksums themselves.
 
 `segHeaderLen` is 6 (4 + 1 + 1). The terms index stores absolute file offsets, so
 this constant is part of the format, not an implementation convenience.
@@ -71,10 +122,24 @@ this constant is part of the format, not an implementation convenience.
 ### MANIFEST
 
 ```text
-generation      uvarint     strictly increasing; the segment directory is named from it
-segment count   uvarint     always 1 in version 1
-segment name    string ×n   e.g. "seg-000007"
+generation      uvarint     strictly increasing; a write names its directory from it
+segment count   uvarint
+  segment name  string      e.g. "seg-000007"
+  base          uvarint     the first DocID this segment owns
+  count         uvarint     how many documents it holds
 ```
+
+The bases must tile `[0, total)` contiguously and in ascending order. A list that
+did not would give two segments overlapping ids, and a reader would answer with
+whichever it walked into first — a wrong document, not an error — so this is
+checked while the list is read rather than afterwards.
+
+Some published segment must be named for the current generation, and none may be
+named for the next one: each write clears `seg-<gen+1>` before using it, so a
+manifest already naming it would aim that removal at live data. Version 1 could say
+something stronger — the *last* segment is the generation's — because a commit
+published exactly one; a merge publishes its result at the front, since it replaces
+the oldest run.
 
 Segment names come off disk and are therefore validated, not trusted: a name must
 start with `seg-`, contain no path separator, and equal its own basename. A
@@ -173,6 +238,44 @@ This is milestone 3's seek structure and no query uses it yet. It is nevertheles
 cannot be read without it. That is deliberate — an index nothing reads is an index
 that rots, and this one cannot.
 
+### docoff (v2)
+
+```text
+document count  uvarint
+  offset        uint64 LE   absolute file offset of the record in docs
+  token count   uint64 LE   the same number the record itself carries
+```
+
+Fixed width, sixteen bytes an entry, and that is the whole point: entry *i* is at a
+computable position, so `Doc(id)` is arithmetic plus one record decode. A uvarint
+table would have to be walked from the front, which is the cost being removed.
+
+Eight bytes for the offset rather than four, because a 656 MB `docs` file already
+sits one order of magnitude from a `uint32` ceiling and raising it later is a
+migration. The token count rides along rather than being read out of the record,
+because BM25 asks for a length once per posting and reaching it through the record
+would make every posting cost a key, a text and a vector.
+
+The record carries the length too, and the two are compared — a copy nobody checks
+is what [D-001](DECISIONS.md) is about.
+
+### keys (v2)
+
+```text
+key count       uvarint
+  offset        uint64 LE ×n   absolute file offset of each entry, in key order
+  key           string          the entries themselves, ascending
+  document id   uvarint         segment-local
+```
+
+The offset table makes `Resolve` a binary search rather than a map rebuilt by
+reading every document. Ascending order is what the search rests on, so an unsorted
+table does not fail — it answers wrongly — and the decoder checks it.
+
+Offsets are computed forward rather than patched back in: an entry's encoded length
+is known from the key and the id, and the table's own size from the count. A writer
+that had to seek backwards could not stream, and merge cannot buffer a corpus.
+
 ## 5. What a reader rejects
 
 Bytes from disk are a trust boundary. Every failure is an error wrapping
@@ -183,7 +286,7 @@ plausible but breaks an invariant a scorer relies on.
 | --- | --- |
 | Checksum mismatch, truncation, trailing bytes | Damage, or a file this encoder did not write |
 | Wrong magic, wrong kind, unknown version | Foreign file, misplaced file, future format |
-| Version 1 written in more than one byte | `binary.Uvarint` decodes `0x81 0x00` as 1 too. The header would be seven bytes while `segHeaderLen`, and every offset the terms index records against it, still says six |
+| The version written in more than one byte | `binary.Uvarint` decodes `0x82 0x00` as 2 too. The header would be seven bytes while `segHeaderLen`, and every offset the terms index records against it, still says six |
 | A section file the manifest names but that is not on disk | Damage, reported as `ErrCorrupt` and never as `fs.ErrNotExist`, so a caller's "nothing committed yet" branch cannot overwrite a damaged index |
 | Empty or duplicate key | `Add` refuses both; a restored index must not hold what a live one cannot |
 | NaN or infinite vector component | `scorer/vector` skips re-checking documents because `ErrNonFiniteVector` promised this |
@@ -199,8 +302,20 @@ plausible but breaks an invariant a scorer relies on.
 | A block whose first DocID does not exceed the previous block's last | The block continued a delta chain instead of starting absolute |
 | A segment directory or section file that resolves outside the index directory | Both readers work through an `os.Root`, so a symlink planted where a segment belongs is refused by the OS, not by a check that a rename could race |
 | An entry of the wrong kind at any path in the layout: a plain file or a symlink where the manifest names a segment directory, a directory or a symlink where one of its section files belongs, a directory or a symlink at `MANIFEST` itself | An entry of the wrong kind is a foreign or damaged layout, and every path gets the same judgement — including the entry point, whose raw `EISDIR` would otherwise be neither `ErrCorrupt` nor `fs.ErrNotExist`, leaving a caller with no branch to take. Reported as `ErrCorrupt` rather than the raw `ENOTDIR`, `EISDIR` or path-escape error, alongside the missing-directory and missing-file cases. The kind is asked with `Lstat`, not `Stat`, because `Stat` follows the very link in question. An entry of the right kind that is genuinely there and still will not open is the filesystem refusing us, not corruption, and reports as itself |
-| A manifest whose generation already names the segment the next commit would write | `Commit` clears a half-written segment directory before writing it; aimed at the live segment that clears the published commit |
+| A manifest whose generation already names the segment the next write would produce | `Commit` and `Merge` both clear a half-written segment directory before writing it; aimed at a live segment that clears published data |
+| A manifest naming no segment for its own generation | The generation counter and the directory would have stopped describing each other |
+| Segment bases that do not tile `[0, total)` contiguously and in order | Two segments would own the same ids, and a reader would answer with whichever it walked into first: a wrong document, not an error |
+| A `docoff` or `keys` count disagreeing with `meta` | The seek tables and the statistics BM25 trusts would be describing different corpora |
+| A unit whose checksum does not match, seeded with what names it | Covers damage no semantic rule can see — a flipped byte of document text is invisible to every other check here — and covers a record reached through a damaged offset, which would otherwise decode healthily under someone else's id |
 | A generation of `0` or `MaxUint64` | The counter advances one commit at a time from a first commit that publishes `1`, so neither end is a state a writer produced. `0` describes a commit that never happened: accepting it would load a foreign layout, and let the next `Commit` publish over it and then sweep away a `seg-000000` weft never wrote. `MaxUint64` is what `Commit`'s `generation + 1` would wrap to zero on, aiming the pre-write `RemoveAll` at `seg-000000` and then publishing a generation below the one it replaced |
+
+**What only `Scrub` checks.** `Open` verifies the frame header, the manifest and
+`meta`, and each unit as it is read. Everything else in the table above — the
+whole-file checksums, every document, every posting list, both seek tables in full
+— is `Scrub`'s. The gap that leaves is real and worth stating: a unit nothing ever
+reads is never verified, so rot in a document no query reaches sits there until
+somebody runs `Scrub`. Milestone 2 got this free because `Open` read every byte;
+milestone 3 buys it explicitly.
 
 **What a reader deliberately does not check** is that a term matches the text of
 the documents it names: nothing re-tokenizes `Text` to compare per-document term
@@ -215,7 +330,7 @@ a full re-tokenization of the corpus on every `Open`.
 
 ## 6. Atomicity and durability
 
-`Commit` writes the segment's four files, fsyncs each, fsyncs the segment
+`Commit` writes the segment's six files, fsyncs each, fsyncs the segment
 directory, fsyncs the index directory so the segment directory's own entry is
 durable before anything names it, then renames a temporary manifest over
 `MANIFEST` and fsyncs the index directory again. Syncing only the inside of the
@@ -303,11 +418,20 @@ Two things that follows from, and one it does not:
    retyped field, a reordered field, a relaxed invariant.
 3. **The frame does not change.** Magic, version and kind must stay where they
    are, or a future reader cannot even reach the version in order to reject it.
-4. **Milestone 3 does not need a bump for multiple segments.** The manifest
-   already carries a list, and the segment format is per-segment.
+4. **Multiple segments needed no bump, and lazy reading did.** The manifest
+   already carried a list and the segment format is per-segment, so incremental
+   commit and merge changed contents rather than shape — [D-003](DECISIONS.md)
+   designed for that and it held. What forced version 2 was smaller and inside a
+   single segment: `docs` was positional and the key map was derived, so neither a
+   `DocID` nor a `Key` could reach its document without decoding the corpus.
 5. **Migration, when it comes, reads the old version and writes the new one.**
-   There is no in-place upgrade path, and version 1 has no ancestor to migrate
-   from.
+   There is no in-place upgrade path.
+6. **Version 2 skipped that, and no later version may.** v1 is refused rather than
+   converted, on the single ground that weft had no users and the one v1 directory
+   in existence was rebuildable. That is an argument about a user count, so it
+   expires the moment somebody has an index they cannot rebuild —
+   [D-007](DECISIONS.md). A version 3 owes either a converter or a reader that
+   understands both.
 
 ## 8. Known limits
 
