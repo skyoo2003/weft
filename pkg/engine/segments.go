@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 )
 
 // errSegmentGone is a manifest naming a segment that is not there — the
@@ -46,6 +47,13 @@ type segment struct {
 	postings []byte // postings payload
 	offs     docOffsets
 	keys     keyTable
+
+	// ivf is the approximate vector index, or the zero value for a segment that
+	// carries no partition — one written before ivfMinDocs was reached, one
+	// holding no vectors, and one written by format version 2, which had no such
+	// section at all. All three are the same case to every reader: nearest
+	// answers with every id this segment holds.
+	ivf ivfSection
 
 	// terms maps a term to the extent of its postings entry, both offsets
 	// absolute into the postings file.
@@ -90,19 +98,50 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 		}
 	}()
 
-	rs := make([]*segReader, len(segSections))
-	for i, sec := range segSections {
+	// meta first, alone, because its frame is what says which sections this
+	// segment has. Two format versions are accepted and they differ by exactly
+	// one file, so "open the list and see what is there" would read a v3 segment
+	// missing its partition as a v2 segment — damage reported as an older
+	// vintage. The version decides the list; the list decides what must exist.
+	metaR, metaB, err := openSection(segRoot, metaFile, kindMeta, true)
+	if err != nil {
+		return nil, err
+	}
+	s.maps = append(s.maps, metaB)
+
+	secs := segSectionsFor(metaR.version)
+	rs := make([]*segReader, len(secs))
+	rs[0] = metaR
+	for i, sec := range secs[1:] {
 		r, b, err := openSection(segRoot, sec.name, sec.kind, sec.eager)
 		if err != nil {
 			return nil, err
 		}
 		s.maps = append(s.maps, b)
-		rs[i] = r
+		// Every section of one segment was written by one commit, so they all
+		// carry one version. Without this a segment whose meta says 3 and whose
+		// docs says 2 passes every frame check on its own while describing
+		// nothing a writer produced — and the section list above was chosen from
+		// one of those two numbers.
+		if r.version != metaR.version {
+			return nil, fmt.Errorf("%s: format version %d beside %s at version %d: %w",
+				sec.name, r.version, metaFile, metaR.version, ErrCorrupt)
+		}
+		rs[i+1] = r
 	}
-	metaR, docsR, postR, termsR, docoffR, keysR := rs[0], rs[1], rs[2], rs[3], rs[4], rs[5]
+	docsR, postR, termsR, docoffR, keysR := rs[1], rs[2], rs[3], rs[4], rs[5]
 
 	if s.count, s.totalLen, s.vecDim, err = decodeMeta(metaR); err != nil {
 		return nil, err
+	}
+	// The partition is read after meta because it is checked against it: the
+	// centroids are as wide as the corpus's vectors, and a list's ids are ranged
+	// against the segment's document count. A v2 segment has no such section and
+	// leaves the zero value, which every reader treats as no partition.
+	if len(rs) > 6 {
+		if s.ivf, err = parseIVF(rs[6], s.count, s.vecDim); err != nil {
+			return nil, err
+		}
 	}
 	s.docs, s.postings = docsR.b, postR.b
 
@@ -148,7 +187,89 @@ func (s *segment) close() error {
 	}
 	s.maps, s.docs, s.postings = nil, nil, nil
 	s.offs, s.keys, s.terms = docOffsets{}, keyTable{}, nil
+	// The centroids are the one thing here on the Go heap rather than in a
+	// mapping, and the offset table and payload point into one that is about to
+	// go — reading through an unmapped region is a segmentation fault, not a
+	// panic this package could promise its way out of.
+	s.ivf = ivfSection{}
 	return first
+}
+
+// nearest is the segment's half of Index.Nearest: the segment-wide DocIDs worth
+// scoring exactly for v, ascending.
+//
+// It computes no similarity. Which documents are geometrically plausible is what
+// a partition knows; how close each one actually is belongs to the caller, and
+// D-008 records why the line is drawn there rather than one function later.
+//
+// Three cases answer with every id this segment holds, and it matters that they
+// are one branch rather than three. A segment with no partition — too small,
+// vectorless, or version 2 — has nothing to narrow with. A query whose width is
+// not this segment's cannot be compared to its centroids at all, and filtering
+// it out silently here would turn "you mixed embedding models" into an empty
+// result, which is the disguise scorer/vector's ErrDimMismatch exists to
+// prevent: handing the ids over lets the scorer decode a document and say so.
+// And a list that fails its own checksum is answered the way D-006 answers
+// damage everywhere else — as though the structure were not there. Slower, and
+// not wrong.
+func (s *segment) nearest(v []float32, k int) []DocID {
+	if s.ivf.nlist == 0 || len(v) != s.vecDim {
+		return s.allIDs()
+	}
+	order := ivfOrder(s.ivf.centroids, s.ivf.nlist, s.ivf.dim, v)
+	if order == nil {
+		return s.allIDs()
+	}
+	// nprobe lists, then as many more as it takes to have k candidates. The
+	// counts were read at Open, so widening is arithmetic on a table rather than
+	// decoding lists to find out how short the answer would have been. This is
+	// what lets "at least k" be a contract the caller never has to know nprobe
+	// to rely on.
+	probe := min(ivfNProbe, len(order))
+	have := 0
+	for _, j := range order[:probe] {
+		have += s.ivf.counts[j]
+	}
+	for have < k && probe < len(order) {
+		have += s.ivf.counts[order[probe]]
+		probe++
+	}
+
+	out := make([]DocID, 0, have)
+	for _, j := range order[:probe] {
+		ids, ok := s.ivf.list(j)
+		if !ok {
+			return s.allIDs()
+		}
+		for _, id := range ids {
+			out = append(out, s.base+id)
+		}
+	}
+	// Ascending, which is not cosmetic. The docs file is laid out in DocID order,
+	// so a caller decoding these records in order walks the mapping forwards
+	// instead of jumping between pages it has already left. Compact is the guard
+	// the sort makes free: intact lists partition the segment and cannot repeat
+	// an id, and a repeat that got past the checksums would reach the caller as a
+	// duplicate result rather than as an error.
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// allIDs is every DocID this segment holds — the answer when there is nothing to
+// narrow with.
+//
+// ponytail: it materializes the segment's whole id space, four bytes a document,
+// on a path that used to be a bare loop counter in the scorer. That is the price
+// of the scorer having one loop instead of two, and it is paid only where no
+// partition applies. If a profile ever shows it, the upgrade is an iterator
+// rather than a slice — and that is a change to Nearest's signature, which is in
+// the golden API file for a reason.
+func (s *segment) allIDs() []DocID {
+	out := make([]DocID, s.count)
+	for i := range out {
+		out[i] = s.base + DocID(i)
+	}
+	return out
 }
 
 // holds reports whether id belongs to this segment.

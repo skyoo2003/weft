@@ -4,6 +4,9 @@ package engine
 
 import (
 	"cmp"
+	"encoding/binary"
+	"fmt"
+	"hash/crc32"
 	"math"
 	"slices"
 )
@@ -382,4 +385,311 @@ func ivfOrder(cent []float32, nlist, dim int, v []float32) []int {
 		out[i] = r.list
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// the ivf section on disk
+// ---------------------------------------------------------------------------
+//
+//	nlist       uvarint          0 means no partition; the reader answers with every id
+//	dim         uvarint          centroid width; must equal meta's vector width
+//	centroids   nlist × dim × float32 LE, normalized
+//	counts      nlist × uvarint  members per list
+//	offsets     nlist × uint64 LE, absolute file offsets of the lists
+//	lists       per list: ascending segment-local DocIDs, delta uvarint,
+//	                      then a CRC-32C seeded with the list's own number
+//
+// The offset table is fixed width for the reason docoff's is: a query probes
+// nprobe lists out of up to a thousand, and reaching list j through a uvarint
+// table would mean decoding the j−1 lists in front of it — which is the corpus,
+// and the cost this section exists to remove. At eight bytes an entry it is at
+// most eight kilobytes, computed forward the way encodeKeys computes its own.
+//
+// The per-list checksum is seeded with the list number for the reason a document
+// record's is seeded with its DocID: a list carries no copy of which centroid it
+// belongs to, so a reader that followed a damaged offset would decode a perfectly
+// healthy list under the wrong centroid. That is not an error, it is a plausible
+// wrong candidate set — and a wrong candidate set is indistinguishable from
+// ordinary recall loss, which is exactly the failure this structure must not be
+// allowed to hide.
+
+// ivfListLen is the encoded size of one list, checksum included. It has to agree
+// with what encodeIVF writes below it; the decoder's offset check is what proves
+// the two still do.
+func ivfListLen(l []DocID) int {
+	n := crc32.Size
+	prev := uint64(0)
+	for i, id := range l {
+		d := uint64(id)
+		if i > 0 {
+			d -= prev
+		}
+		n += uvarintLen(d)
+		prev = uint64(id)
+	}
+	return n
+}
+
+// encodeIVF writes the partition. An empty build writes the two-uvarint header
+// and stops, which is what keeps the section list the same for every segment —
+// see segSections.
+func encodeIVF(w *segWriter, b ivfBuild) {
+	w.uvarint(uint64(b.nlist))
+	w.uvarint(uint64(b.dim))
+	if b.nlist == 0 {
+		return
+	}
+	for _, c := range b.centroids {
+		// scratch, not a local, for the reason the varint encoders give: a local
+		// escapes, and this runs nlist × dim times.
+		binary.LittleEndian.PutUint32(w.scratch[:4], math.Float32bits(c))
+		w.write(w.scratch[:4])
+	}
+	for _, l := range b.lists {
+		w.uvarint(uint64(len(l)))
+	}
+	off := w.off() + b.nlist*8
+	for _, l := range b.lists {
+		binary.LittleEndian.PutUint64(w.scratch[:8], uint64(off))
+		w.write(w.scratch[:8])
+		off += ivfListLen(l)
+	}
+	for j, l := range b.lists {
+		w.beginUnit(uint64(j))
+		prev := uint64(0)
+		for i, id := range l {
+			if i == 0 {
+				w.uvarint(uint64(id))
+			} else {
+				w.uvarint(uint64(id) - prev)
+			}
+			prev = uint64(id)
+		}
+		w.endUnit()
+	}
+}
+
+// ivfSection is the parsed ivf section: everything bounded by nlist decoded up
+// front, and the lists themselves left on disk.
+//
+// The centroids are the one thing decoded rather than left as bytes, and the
+// reason is that a query scans all of them: reading them out of the mapping
+// would mean a Float32frombits per component per query, where decoding once at
+// Open costs nlist × dim × 4 bytes of heap. That is 1.13 MB for the milestone 4
+// corpus and it is bounded by ivfMaxList × dim rather than by the corpus, so the
+// "heap does not scale with the corpus" line still holds — it scales with its
+// square root, and then stops.
+type ivfSection struct {
+	name  string
+	nlist int
+	dim   int
+
+	// docs is the segment's document count, which is what a list's ids are
+	// ranged against. A list is the one structure here whose contents name
+	// documents, and an id past the segment reaches into a neighbour's.
+	docs int
+
+	centroids []float32
+	counts    []int
+	offs      []byte // nlist × 8, LE, absolute file offsets
+	b         []byte // the whole payload, for decoding a list on request
+}
+
+// parseIVF reads the header and the two bounded tables. count and vecDim come
+// from meta, which is decoded first.
+//
+// Everything it checks is answerable from bounded data, which is what makes it
+// affordable at Open. What it does not check is any list's contents: that is the
+// size of the corpus, it belongs to Scrub, and a list that fails at the point of
+// use is answered the way D-006 answers damage elsewhere.
+func parseIVF(r *segReader, count, vecDim int) (ivfSection, error) {
+	x := ivfSection{name: r.name, docs: count}
+	nlist, err := r.intn("ivf list count", ivfMaxList)
+	if err != nil {
+		return ivfSection{}, err
+	}
+	dim, err := r.intn("ivf centroid width", maxInt)
+	if err != nil {
+		return ivfSection{}, err
+	}
+	if nlist == 0 {
+		// No partition. dim is written zero beside it, and a non-zero width with
+		// no lists to give it to describes nothing the writer produces.
+		if dim != 0 {
+			return ivfSection{}, fmt.Errorf("%s: no lists but a centroid width of %d: %w", r.name, dim, ErrCorrupt)
+		}
+		return x, r.done()
+	}
+	// The partition indexes this segment's vectors, so its width is the width
+	// meta claims. Disagreement means the two were written by different commits.
+	if dim != vecDim {
+		return ivfSection{}, fmt.Errorf("%s: centroids are %d wide, %s says the corpus is %d: %w",
+			r.name, dim, metaFile, vecDim, ErrCorrupt)
+	}
+	// In uint64: on a 32-bit build nlist·dim·4 for a wide embedding passes what
+	// an int holds, and a wrapped product would slice a region shorter than the
+	// centroids it is about to be read as.
+	need := uint64(nlist) * uint64(dim) * 4
+	if need > uint64(len(r.b)-r.off) {
+		return ivfSection{}, fmt.Errorf("%s: %d centroids of width %d do not fit in %d remaining bytes: %w",
+			r.name, nlist, dim, len(r.b)-r.off, ErrCorrupt)
+	}
+	x.nlist, x.dim = nlist, dim
+	x.centroids = make([]float32, nlist*dim)
+	for i := range x.centroids {
+		bits, err := r.u32("centroid component")
+		if err != nil {
+			return ivfSection{}, err
+		}
+		c := math.Float32frombits(bits)
+		if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
+			// A NaN centroid poisons every comparison it takes part in, and
+			// ivfOrder would sort it last rather than refuse it — so the query
+			// would silently never probe that list.
+			return ivfSection{}, fmt.Errorf("%s: centroid component %d is %v: %w", r.name, i, c, ErrCorrupt)
+		}
+		x.centroids[i] = c
+	}
+
+	x.counts = make([]int, nlist)
+	total := 0
+	for j := range nlist {
+		// A list cannot hold more documents than the segment has, and the lists
+		// together cannot either: they partition the vectors, one document to at
+		// most one list. Checked against what is left rather than against count,
+		// so the running total cannot itself overflow.
+		n, err := r.intn(fmt.Sprintf("ivf list %d length", j), count-total)
+		if err != nil {
+			return ivfSection{}, err
+		}
+		x.counts[j] = n
+		total += n
+	}
+
+	if nlist > (len(r.b)-r.off)/8 {
+		return ivfSection{}, fmt.Errorf("%s: %d list offsets do not fit in %d remaining bytes: %w",
+			r.name, nlist, len(r.b)-r.off, ErrCorrupt)
+	}
+	x.offs = r.b[r.off : r.off+nlist*8]
+	r.off += nlist * 8
+	x.b = r.b
+	// No r.done(): the lists are the rest of the payload and walking them is the
+	// read this section is lazy to avoid. Scrub is what proves they fill it.
+	return x, nil
+}
+
+// list decodes one inverted list. The bool is false for a list that does not
+// decode, which the caller answers by behaving as though there were no partition
+// at all — see segment.nearest and D-006.
+func (x ivfSection) list(j int) ([]DocID, bool) {
+	if j < 0 || j >= x.nlist {
+		return nil, false
+	}
+	off := binary.LittleEndian.Uint64(x.offs[j*8:])
+	if off < segHeaderLen || off-segHeaderLen > uint64(len(x.b)) {
+		return nil, false
+	}
+	// The next list's offset is where this one stops. Bounding the reader by it
+	// is what keeps a damaged length from reading into the list beside it — the
+	// same arithmetic docoff does for a document record, and free for the same
+	// reason: the table is fixed width.
+	end := uint64(len(x.b))
+	if j+1 < x.nlist {
+		next := binary.LittleEndian.Uint64(x.offs[(j+1)*8:])
+		if next < off || next-segHeaderLen > uint64(len(x.b)) {
+			return nil, false
+		}
+		end = next - segHeaderLen
+	}
+	r := &segReader{name: x.name, b: x.b[:end], off: int(off - segHeaderLen)}
+	ids, err := x.decodeList(r, j)
+	if err != nil {
+		return nil, false
+	}
+	return ids, true
+}
+
+// decodeList reads list j from wherever r is positioned, verifying its seeded
+// checksum. The count comes from the table parsed at Open, so a list's length is
+// not a number taken from beside the list itself.
+func (x ivfSection) decodeList(r *segReader, j int) ([]DocID, error) {
+	start := r.off
+	out := make([]DocID, 0, x.counts[j])
+	prev := uint64(0)
+	for i := range x.counts[j] {
+		d, err := r.uvarint("ivf posting delta")
+		if err != nil {
+			return nil, err
+		}
+		var id uint64
+		if i == 0 {
+			id = d
+		} else {
+			// Strictly ascending, and checked before the addition: uint64 wraps
+			// silently, and a wrapped id lands back inside the segment and passes
+			// the range check below.
+			if d == 0 {
+				return nil, fmt.Errorf("%s: list %d repeats a document; lists are strictly ascending: %w", x.name, j, ErrCorrupt)
+			}
+			if d > math.MaxUint64-prev {
+				return nil, fmt.Errorf("%s: list %d delta %d overflows past %d: %w", x.name, j, d, prev, ErrCorrupt)
+			}
+			id = prev + d
+		}
+		if id >= uint64(x.docs) {
+			return nil, fmt.Errorf("%s: list %d names document %d of a %d-document segment: %w", x.name, j, id, x.docs, ErrCorrupt)
+		}
+		prev = id
+		out = append(out, DocID(id))
+	}
+	if err := r.unit(fmt.Sprintf("ivf list %d", j), start, uint64(j)); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// scrubIVF walks every list and checks everything parseIVF is too lazy to.
+//
+// Three things, and each is damage no other check here can see. Every list
+// verifies against its own seeded checksum, so a healthy list served under
+// another centroid's number is caught. No document appears in two lists, because
+// one that did would be scored twice and reach the caller as a duplicate result.
+// And the lists sit exactly where the offset table says and fill the payload
+// between them, which is the witness the counts themselves do not carry — a
+// count that names fewer members than were written leaves the members it does
+// name intact and verifying.
+//
+// What it deliberately does not check is that every vector-bearing document
+// appears in some list. A document missing from the partition is invisible to a
+// vector query, and the cost of that is recall — the same currency IVF spends by
+// design, and not separable from it by any rule available here. Buying the check
+// would mean carrying one bit per document out of the docs walk to compare
+// against, and the answer it would give is "this index recalls slightly less
+// than it should", which is what `weft-eval recall` measures directly.
+func scrubIVF(r *segReader, count, vecDim int) error {
+	x, err := parseIVF(r, count, vecDim)
+	if err != nil {
+		return err
+	}
+	if x.nlist == 0 {
+		return nil // parseIVF already required the payload to end there
+	}
+	seen := make([]bool, count)
+	for j := range x.nlist {
+		at := uint64(segHeaderLen + r.off)
+		if off := binary.LittleEndian.Uint64(x.offs[j*8:]); off != at {
+			return fmt.Errorf("%s: list %d is recorded at offset %d, it begins at %d: %w", x.name, j, off, at, ErrCorrupt)
+		}
+		ids, err := x.decodeList(r, j)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if seen[id] {
+				return fmt.Errorf("%s: document %d is in list %d and in an earlier one: %w", x.name, id, j, ErrCorrupt)
+			}
+			seen[id] = true
+		}
+	}
+	return r.done()
 }
