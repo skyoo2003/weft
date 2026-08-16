@@ -33,9 +33,27 @@ func (s *Scorer) Name() string { return "vector" }
 
 // Candidates implements engine.Scorer.
 //
-// ponytail: brute-force full scan, O(n·d) per query. HNSW or IVF is milestone 3
-// — building an approximate index before the architecture is proven would mean
-// optimizing a structure that may not survive.
+// The loop runs over engine.Index.Nearest rather than over every DocID, which
+// is milestone 3b's repayment of the full scan this used to be. What that
+// changes here is one line: the index says which documents are geometrically
+// plausible, and every rule below about norms, widths and cancellation is
+// untouched, because the metric never left this file. Nearest returns a
+// superset — documents with no vector, with a zero vector, or held by a segment
+// with no partition are all in it — so the skips below still have work to do.
+//
+// It is an approximate index, and the honest consequence is that the top k here
+// is the top k among the candidates rather than the top k in the corpus.
+// docs/EVAL.md carries the measured recall against a brute-force scan and the
+// nDCG that survived it; a segment with no partition answers with every id, so
+// on those the result is exact.
+//
+// ponytail: a candidate costs a whole record. engine.Index.Doc decodes the key,
+// the text and the links to reach the vector, so the arithmetic fell by the
+// partition's factor and the allocation only fell by it — it did not change
+// shape. The repayment is a `vectors` section the reader can touch without the
+// rest of the record, and the trigger is a measured per-query working set more
+// than twice what §1 of the milestone 3b plan predicted; docs/FINDINGS.md
+// records which way that measurement came out.
 func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
 	// Before the early return, not after. A text-only query gives this scorer no
 	// opinion, and returning that as a success on a context that was already
@@ -65,13 +83,12 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		return nil, nil
 	}
 
-	n := s.ix.Len()
-	cands := make([]engine.Candidate, 0, n)
-	for i := range n {
+	ids := s.ix.Nearest(q.Vector, k)
+	cands := make([]engine.Candidate, 0, len(ids))
+	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		id := engine.DocID(i)
 		d, ok := s.ix.Doc(id)
 		if !ok || len(d.Vector) == 0 {
 			continue // No vector on this document: this scorer has no opinion.
