@@ -1550,3 +1550,83 @@ func TestScrubRereadsAManifestAMergeReplaced(t *testing.T) {
 		t.Fatalf("Scrub with a segment that stays missing: got %v, want ErrCorrupt", err)
 	}
 }
+
+// TestCommitRefusesADirectorySwappedUnderIt is the hole a path leaves that an
+// identity does not.
+//
+// Commit's destination has to be the directory this index's committed segments
+// came from, and the check asked that question of two path strings: it stat'd
+// the remembered path and the given one and compared what came back. Both name
+// whatever stands there now. Move the index aside, put another one under the
+// name it used to have, and the two stats agree — on the replacement — while
+// the live object goes on answering from the segments it mapped. Commit then
+// joins this index's pending documents to a history that is not its own, and a
+// reopen and the live object disagree about the corpus from then on.
+//
+// The document counts match too, because that check compares a number.
+//
+// What is remembered has to be the directory itself. The identity captured when
+// the index was opened does not follow a rename, which is exactly the property
+// the path lacks.
+func TestCommitRefusesADirectorySwappedUnderIt(t *testing.T) {
+	home := t.TempDir()
+	mine := filepath.Join(home, "index")
+	if err := os.Mkdir(mine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		ix := New()
+		addAll(t, ix, []Document{{Key: "mine-a", Text: "fusion"}, {Key: "mine-b", Text: "ranking"}})
+		defer ix.Close() //nolint:errcheck // teardown
+		if err := ix.Commit(mine); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+	}()
+
+	got, err := Open(mine)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+
+	// Somebody else's index of the same size, under the name this one had.
+	stranger := filepath.Join(home, "stranger")
+	if err := os.Mkdir(stranger, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		ix := New()
+		addAll(t, ix, []Document{{Key: "theirs-a", Text: "fusion"}, {Key: "theirs-b", Text: "ranking"}})
+		defer ix.Close() //nolint:errcheck // teardown
+		if err := ix.Commit(stranger); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+	}()
+	if err := os.Rename(mine, filepath.Join(home, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(stranger, mine); err != nil {
+		t.Fatal(err)
+	}
+
+	mustAdd(t, got, Document{Key: "mine-c", Text: "scorer"})
+	if err := got.Commit(mine); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Commit into a directory swapped under the index: got %v, want ErrCorrupt", err)
+	}
+	// The stranger is untouched: refusing happens before anything is written.
+	other, err := Open(mine)
+	if err != nil {
+		t.Fatalf("Open the stranger: %v", err)
+	}
+	defer other.Close() //nolint:errcheck // teardown
+	if other.Len() != 2 {
+		t.Errorf("the stranger holds %d documents, want 2", other.Len())
+	}
+	if _, ok := other.Resolve("mine-c"); ok {
+		t.Error("the refused Commit reached the stranger's directory")
+	}
+	// And a Merge aimed at the remembered path is refused for the same reason.
+	if err := got.Merge(); err != nil && !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Merge over a swapped directory: got %v, want nil or ErrCorrupt", err)
+	}
+}
