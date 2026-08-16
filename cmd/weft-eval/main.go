@@ -765,6 +765,11 @@ func build(ctx context.Context, args []string) error {
 	}
 
 	ix := engine.New()
+	// Commit adopts the segment it publishes, so from that point this index holds
+	// mappings — and a mapping is not memory the collector owns. Deferred here
+	// rather than after the Commit so every return path below releases it, and
+	// harmless before then: an index that never mapped anything closes free.
+	defer ix.Close() //nolint:errcheck // nothing left to do about it on the way out
 	var added, withVec, withLinks, links, dangling, repeated, dimSkipped int
 
 	// The width every vector is checked against, decided over the whole cache before
@@ -912,11 +917,20 @@ func build(ctx context.Context, args []string) error {
 	// Reopening here rather than trusting the write is the first real-corpus
 	// exercise of milestone 2's restore equivalence — until now it had only been
 	// tested on fixtures.
+	//
+	// The built index is released first. Its Commit adopted the segment it just
+	// wrote, so holding it across the reopen means two mappings of the same
+	// corpus — and on the platforms mapFile reads instead of maps, two complete
+	// copies on the heap. Nothing below reads it.
+	if err := ix.Close(); err != nil {
+		return fmt.Errorf("close before reopening: %w", err)
+	}
 	start = time.Now()
 	reopened, err := engine.Open(dir)
 	if err != nil {
 		return fmt.Errorf("reopen: %w", err)
 	}
+	defer reopened.Close() //nolint:errcheck // nothing left to do about it on the way out
 	rdocs, ravg := reopened.Stats()
 	if rdocs != docs || ravg != avgdl {
 		return fmt.Errorf("reopened index has %d documents at avgdl %v, committed %d at %v",

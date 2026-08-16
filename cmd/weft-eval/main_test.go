@@ -621,6 +621,7 @@ func TestBuildIndexesTheDominantVectorWidth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	defer ix.Close() //nolint:errcheck // teardown
 	for key, want := range map[string]int{"x": 3, "y": 3, "bad": 0} {
 		id, ok := ix.Resolve(key)
 		if !ok {
@@ -661,6 +662,7 @@ func TestBuildCountsAnEdgeOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	defer ix.Close() //nolint:errcheck // teardown
 	id, ok := ix.Resolve("a")
 	if !ok {
 		t.Fatal("a is not in the index")
@@ -779,8 +781,10 @@ func TestBuildRecordsWhatItBuiltFrom(t *testing.T) {
 	// The index still opens. provenance.json sits in the directory pkg/engine owns,
 	// and engine refuses to commit over entries it did not write — so a name it does
 	// not ignore would break the next build rather than this read.
-	if _, err := engine.Open(filepath.Join(dir, indexDir)); err != nil {
+	if reopened, err := engine.Open(filepath.Join(dir, indexDir)); err != nil {
 		t.Errorf("open after writing provenance: %v", err)
+	} else {
+		reopened.Close() //nolint:errcheck // teardown
 	}
 	if err := build(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
 		t.Errorf("rebuild over an index carrying provenance: %v", err)

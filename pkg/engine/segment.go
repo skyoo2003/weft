@@ -1056,11 +1056,21 @@ func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, 
 		if err != nil {
 			return 0, err
 		}
-		if _, err := post.intn("block minDocLen", maxInt); err != nil {
+		// Re-derived like the two beside it, not read and dropped. D-001 wrote
+		// these three fields before any query used them, and the standing hazard
+		// of that trade is a field that rots unread — the answer being that every
+		// decoder rebuilds them from the block's own contents. This one was the
+		// exception: advancing the reader past it was all decoding took, so a
+		// block whose minimum disagreed with the documents its postings name
+		// stayed wrong through every Lookup and Merge that touched it. docoff
+		// makes the token count arithmetic, and the frequency bound below reads
+		// it anyway.
+		minDL, err := post.intn("block minDocLen", maxInt)
+		if err != nil {
 			return 0, err
 		}
 
-		gotMaxTF := 0
+		gotMaxTF, gotMinDL := 0, maxInt
 		for j := range cnt {
 			delta, err := post.uvarint("posting docID delta")
 			if err != nil {
@@ -1099,13 +1109,15 @@ func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, 
 			// Every occurrence of this term was one of the document's tokens, so
 			// its length is the ceiling. Read from docoff, which is arithmetic
 			// on a mapped table — the record itself stays on disk.
-			if dl := offs.docLen(DocID(id)); freq > dl {
+			dl := offs.docLen(DocID(id))
+			if freq > dl {
 				return 0, fmt.Errorf("%s: term %q occurs %d times in document %d, which holds %d tokens: %w",
 					post.name, term, freq, id, dl, ErrCorrupt)
 			}
 			yield(Posting{Doc: DocID(id), Freq: freq})
 			n++
 			gotMaxTF = max(gotMaxTF, freq)
+			gotMinDL = min(gotMinDL, dl)
 		}
 		// prev is the last posting this block decoded — every iteration above
 		// assigns it and a block holds at least one posting. The accumulated
@@ -1115,6 +1127,9 @@ func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, 
 		}
 		if gotMaxTF != maxTF {
 			return 0, fmt.Errorf("%s: term %q block %d records maxTF %d, contents say %d: %w", post.name, term, b, maxTF, gotMaxTF, ErrCorrupt)
+		}
+		if gotMinDL != minDL {
+			return 0, fmt.Errorf("%s: term %q block %d records minDocLen %d, contents say %d: %w", post.name, term, b, minDL, gotMinDL, ErrCorrupt)
 		}
 		if err := post.unit(fmt.Sprintf("term %q block %d", term, b), blockStart, uint64(segHeaderLen+blockStart)); err != nil {
 			return 0, err

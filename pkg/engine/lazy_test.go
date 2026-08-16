@@ -1362,3 +1362,49 @@ func TestLookupRefusesAPartialAnswer(t *testing.T) {
 		t.Fatalf("Scrub with a damaged posting block: got %v, want ErrCorrupt", err)
 	}
 }
+
+// TestALyingBlockMinimumIsRefused is the third block-max statistic, which the
+// lazy decoder read and threw away.
+//
+// D-001 wrote maxDocID, maxTF and minDocLen into every block before any query
+// used them, on the argument that retrofitting them is a format migration while
+// writing them costs three varints — and the standing hazard of that argument is
+// a field that rots unread. The answer was that every decoder re-derives them
+// from the block's own contents. Two of the three were. The third was read to
+// advance the reader and discarded, so a block whose minimum disagreed with the
+// documents its postings name stayed wrong through every Lookup and every Merge
+// that touched it, until somebody ran Scrub.
+//
+// docoff is what makes re-deriving it as cheap as the other two: the token count
+// is arithmetic on a mapped table, and the decoder already reads it for the
+// frequency bound beside this one.
+func TestALyingBlockMinimumIsRefused(t *testing.T) {
+	dir, segDir, ix := commitSeeded(t)
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Document 0 is "fusion ranking", two tokens, so the block holding its only
+	// posting has minDocLen 2. This says 1 — the block's checksum is computed
+	// over the lie rather than corrupted, so nothing but re-derivation catches
+	// it, and maxDocID and maxTF still agree with the contents.
+	rewriteSection(t, filepath.Join(segDir, postingsFile), kindPostings, func(w *segWriter) {
+		// cnt, maxDocID, maxTF, minDocLen, then delta and freq.
+		postingsPayload(w, 1, []uint64{1, 0, 1, 1, 0, 1})
+	})
+	rewriteSection(t, filepath.Join(segDir, termsFile), kindTerms, func(w *segWriter) {
+		termsPayload(w, 1, termEntry{term: "fusion", off: segHeaderLen + 1})
+	})
+
+	got, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+
+	if pl := got.Lookup("fusion"); len(pl) != 0 {
+		t.Errorf("Lookup returned %+v from a block recording minDocLen 1 over a 2-token document", pl)
+	}
+	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Scrub with a lying block minimum: got %v, want ErrCorrupt", err)
+	}
+}

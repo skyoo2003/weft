@@ -343,7 +343,14 @@ func (ix *Index) Close() error {
 	// than "this index is finished" and would have Len report a corpus whose
 	// front half is gone.
 	ix.docs, ix.byKey, ix.postings, ix.docLen = nil, nil, nil, nil
-	ix.base, ix.totalLen, ix.dir = 0, 0, ""
+	ix.base, ix.totalLen = 0, 0
+	// The remembered directory and its identity go together, and for the same
+	// reason vecDim goes below: a closed index is documented as usable again,
+	// and state describing a corpus it no longer holds is what makes that false.
+	// Keeping the identity left a reused index unable to commit anywhere — the
+	// old directory failed the count check, Close having just zeroed the count,
+	// and every other directory failed the destination check.
+	ix.dir, ix.dirID = "", nil
 	// vecDim goes with them. It is the width the corpus established, and keeping
 	// it past a Close that dropped that corpus would have a closed index refuse
 	// an Add for mismatching a vector it no longer holds.

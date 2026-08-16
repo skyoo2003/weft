@@ -1630,3 +1630,47 @@ func TestCommitRefusesADirectorySwappedUnderIt(t *testing.T) {
 		t.Fatalf("Merge over a swapped directory: got %v, want nil or ErrCorrupt", err)
 	}
 }
+
+// TestACloseFreesTheIndexToCommitElsewhere is the other half of what Close
+// resets.
+//
+// Close drops the segments, the pending documents and the vector width, and the
+// last of those is there because a closed index is documented as usable again:
+// keeping a width past the corpus that established it would refuse an Add for
+// mismatching a vector the index no longer holds. The remembered directory is
+// the same kind of state and was not reset, so a reused index was stuck — its
+// identity still named the old directory, which made a Commit anywhere else
+// fail the destination check and a Commit back to the old one fail the count
+// check, because Close had zeroed the count.
+func TestACloseFreesTheIndexToCommitElsewhere(t *testing.T) {
+	first, _, ix := commitSeeded(t)
+	if err := ix.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reused, the way the vecDim reset already promises it can be.
+	mustAdd(t, ix, Document{Key: "after", Text: "fusion"})
+	second := t.TempDir()
+	if err := ix.Commit(second); err != nil {
+		t.Fatalf("Commit into a fresh directory after Close: %v", err)
+	}
+	defer ix.Close() //nolint:errcheck // teardown
+
+	got, err := Open(second)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer got.Close() //nolint:errcheck // teardown
+	if got.Len() != 1 {
+		t.Errorf("the reused index committed %d documents, want 1", got.Len())
+	}
+	// And the directory it was closed out of is untouched.
+	old, err := Open(first)
+	if err != nil {
+		t.Fatalf("Open the closed-out directory: %v", err)
+	}
+	defer old.Close() //nolint:errcheck // teardown
+	if old.Len() != 4 {
+		t.Errorf("the old directory holds %d documents, want 4", old.Len())
+	}
+}
