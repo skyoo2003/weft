@@ -1,0 +1,9 @@
+kind: Added
+body: '`weft-eval recall` and `make recall` measure what nDCG cannot see about an approximate
+  vector index: overlap with a brute-force scan, candidates scored per query, latency both
+  ways, and the working set a query actually reaches in bytes and in distinct pages. A
+  partition that loses half the true neighbours holds nDCG steady when the neighbours it
+  lost were unjudged, which on 50 queries against 171,332 documents is most of them.'
+time: 2026-08-17T00:00:03.000000000+09:00
+custom:
+  Issue: 11

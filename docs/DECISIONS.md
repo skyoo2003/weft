@@ -471,3 +471,101 @@ full. D-003 was watching the seam between segments. The problem was inside one.
 Somebody turns up holding a v1 index they cannot rebuild. Then refusing was the wrong
 call, and the fix is a converter shipped separately rather than a reader carrying two
 formats. Record it here if it happens.
+
+---
+
+## D-008 — The engine knows the geometry, the scorer keeps the metric; v3 pays its debt with a reader
+
+**Status:** accepted, 2026-08-17
+**Context:** [FORMAT.md](FORMAT.md) §4 and §7.7, [FINDINGS milestone 3b](FINDINGS.md),
+D-006 and D-007 above, `pkg/engine/ivf.go`, `pkg/scorer/vector/vector.go`
+
+### Question
+
+Milestone 3a mapped the index and left half its outcome sentence false: `scorer/vector`
+scanned every document on every query, so 434 MiB of vectors moved from the Go heap into
+the page cache without getting smaller. Removing the scan means an approximate index, and
+that raises two questions at once.
+
+**Where does the approximate index live**, given that milestone 1's hypothesis is that a
+scorer needs no private store? And **what does it return** — candidates, or scores?
+
+Separately: FORMAT.md §7.6 obliged a version 3 to bring either a converter or a reader
+that understands both versions, because D-007's "refuse rather than migrate" argument was
+spent on v1. Which?
+
+### Decision
+
+**The partition lives in `pkg/engine`, and `Index.Nearest` returns `[]DocID` and no
+score.** The engine knows *which documents are close enough to be worth looking at*; the
+scorer knows *how close each one is*.
+
+**Format v3 brings the reader.** v2 segments open, report no partition, and answer with
+every id they hold.
+
+### Why the partition is engine's
+
+The hypothesis milestone 1 registered is that a scorer does not need its own copy of the
+corpus. The partition is not a copy of the corpus and it is not a scorer's private
+structure — it is **a section of the segment format**: written by the writer, mapped by
+the reader, framed and checksummed like every other section, walked by `Scrub`. Putting it
+in `scorer/vector` would have given that scorer the private store the hypothesis forbids,
+and would have meant a second writer for a directory with one.
+
+### Why it returns no score
+
+Because the alternative moves half a scorer into the engine to save it a loop.
+`scorer/vector` holds rules that are about cosine and about nothing else: a zero-norm
+document has no direction, a non-finite query is an error rather than an empty result, a
+document of the wrong width is `ErrDimMismatch` and not a skip, and the scan polls its
+context every 1024 components. Returning `[]Candidate` would have moved all four across
+the boundary, and then the engine would define what "similar" means for every caller.
+
+**The measurement that says the line is in the right place is the diff on the far side of
+it: seven lines**, four removed and three added, all in the loop header. Every one of
+`scorer/vector`'s twelve contract tests passed unmodified. Had the line been drawn wrong,
+those rules would have had to move and the diff would have said so.
+
+Two consequences are accepted rather than hidden. `Nearest` returns a **superset** —
+documents with no vector, with a zero vector, or in a segment with no partition are all in
+it — so the scorer's skips still do work. And a query of the wrong width gets **every** id
+rather than none, because narrowing there would turn "you mixed embedding models" into a
+thin result instead of an error.
+
+### Why the reader rather than a converter
+
+Because it was nearly free, and a converter was not. A segment without a partition has to
+be readable whatever happens: the pending segment has none, a segment below 4,096
+documents has none, and a partition that fails its checksum is treated as none (D-006). So
+"a v2 segment is a segment with no partition" reuses a branch that already had to exist,
+where a converter would have been a command to write, a rebuild to run, and a directory in
+two states while it ran.
+
+`Merge` then does the conversion as a side effect: it rewrites the run it collapses with
+the current writer, so a v2 generation becomes v3 through maintenance an index already
+performs. The rule this generalizes to is in FORMAT.md §7.7 — **append a section rather
+than changing one, and the old version stays readable by construction**. A version that
+retypes or reorders an existing field gets no such discount and still owes the converter.
+
+### The cost, measured
+
+`nprobe` had to be raised from the plan's proposed 8 to **64** to hold the quality bar that
+was fixed before any of this was built: `text+vector` 0.6211 against a 0.6233 baseline,
+inside the registered 0.005. recall@10 against a brute-force scan is 0.992, a query is
+4.6× faster, and it touches 210 MiB of a 626 MiB `docs` section where the plan predicted
+12 MiB. [FINDINGS milestone 3b §3](FINDINGS.md) has why the prediction missed and what
+would actually fix it.
+
+### What would show this decision was wrong
+
+Three things, and each has a number attached.
+
+1. **A scorer needs the candidates in rank order, or needs the centroid distances.** Then
+   `Nearest` widens to `[]Candidate`, half a scorer is inside the engine, and the size of
+   that diff is the honest price of this record. Nothing needs it today.
+2. **A second metric arrives** — dot product on unnormalized vectors, say — and finds the
+   partition unusable because it was trained on L2-normalized vectors. Spherical k-means is
+   a commitment to cosine, and it is made here rather than in the scorer that uses it.
+3. **Somebody has to read a v2 index this build cannot open.** The reader is only cheap
+   while the two versions differ by an appended section; the moment a v4 changes a field,
+   this record stops being precedent.

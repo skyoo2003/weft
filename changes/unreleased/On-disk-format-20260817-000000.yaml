@@ -1,0 +1,13 @@
+kind: On-disk format
+body: 'Version 3. One new section, ivf, holding an IVF-flat partition of a segment''s
+  vectors: spherical k-means centroids and the segment-local DocIDs assigned to each,
+  each inverted list sealed with a CRC-32C seeded with its own list number. Version
+  2 indexes are read without conversion — a v2 segment reports no partition and answers
+  with every id it holds, which is the same fallback a pending segment and a segment
+  below 4,096 documents already need, so it costs a branch that had to exist anyway.
+  Index.Merge upgrades a v2 generation to v3 as a side effect of the maintenance an
+  index already performs. Version 1 is still refused. This discharges the obligation
+  FORMAT.md section 7.6 placed on a version 3 (docs/DECISIONS.md D-008).'
+time: 2026-08-17T00:00:00.000000000+09:00
+custom:
+  Issue: 11

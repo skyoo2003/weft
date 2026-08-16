@@ -1,18 +1,29 @@
-# On-disk format, version 2
+# On-disk format, version 3
 
-`pkg/engine/segment.go`, `pkg/engine/seek.go` and `pkg/engine/persist.go` are what
-the bytes actually obey. Where this document and those files disagree, the
-document is wrong.
+`pkg/engine/segment.go`, `pkg/engine/seek.go`, `pkg/engine/ivf.go` and
+`pkg/engine/persist.go` are what the bytes actually obey. Where this document and
+those files disagree, the document is wrong.
 
-Milestone 2 wrote version 1; milestone 3 replaced it. It is written down because a
-format is the one thing in weft that cannot be quietly rewritten — code is
-replaceable, a file on a user's disk demands a migration.
+Milestone 2 wrote version 1; milestone 3a replaced it with version 2; milestone 3b
+appended one section and made it version 3. It is written down because a format is
+the one thing in weft that cannot be quietly rewritten — code is replaceable, a
+file on a user's disk demands a migration.
 
-**Version 1 is refused, not migrated.** `Open` reports `ErrBadVersion` for it. The
-reason is not technical: weft has no users, and the only v1 directory that existed
-was rebuildable from its sources. That argument rests on a user count and is
-therefore available exactly once — [D-007](DECISIONS.md) records it, and §7 says
-what a future version owes instead.
+**Versions 2 and 3 are both read. Version 1 is refused, not migrated.** `Open`
+reports `ErrBadVersion` for v1. That reason is not technical: weft has no users,
+and the only v1 directory that existed was rebuildable from its sources. That
+argument rests on a user count and is therefore available exactly once —
+[D-007](DECISIONS.md) records it, and §7 says what it obliged version 3 to bring
+instead.
+
+**What version 3 brought is the reader, not a converter.** v3 is v2 plus the `ivf`
+section and nothing else, and the fallback a segment without a partition needs —
+*every id is a candidate* — is the same one a pending segment and a segment below
+4,096 documents already need. So reading v2 costs a branch that had to exist
+anyway. `Index.Merge` is the converter in practice: it rewrites the run it
+collapses with the current writer, so a v2 generation is upgraded by the
+maintenance an index already performs, with no migration command and no directory
+that has to be rebuilt.
 
 What v1 could not express, and why the change was bytes rather than code: its
 `docs` section was a bare run of variable-length records and its key map was
@@ -34,7 +45,14 @@ dir/
     terms               term → absolute offset into postings
     docoff              DocID → (offset into docs, token count)   ← v2
     keys                sorted Key → DocID                        ← v2
+    ivf                 centroids + inverted lists                ← v3
 ```
+
+**The version decides the section list.** A v2 segment has six files, a v3 segment
+has seven, and every frame inside one segment must declare the same version. A v3
+segment missing `ivf` is damage, not an older segment; a v2 segment with an `ivf`
+file beside it has a file nothing names. `meta` is opened first for exactly this
+reason — its frame is what says which list applies.
 
 A commit writes **one segment holding what was added since the last commit**, and
 leaves the previous generations' files untouched. A segment stores ids local to
@@ -63,13 +81,13 @@ Every file, the manifest included, wears the same frame:
 | Field | Bytes | Notes |
 | --- | --- | --- |
 | magic | 4 | `weft` |
-| format version | uvarint | `2`; one byte until version 128 |
+| format version | uvarint | `3` when written, `2` or `3` when read; one byte until version 128 |
 | kind | 1 | see below |
 | payload | — | section-specific, below |
 | checksum | 4 | CRC-32 Castagnoli, little-endian, over everything above |
 
 `kind` is `1` meta, `2` docs, `3` postings, `4` terms, `5` manifest, `6` docoff,
-`7` keys. It exists
+`7` keys, `8` ivf. It exists
 because a checksum tells intact bytes from damaged ones and nothing more: without
 a kind byte, a healthy `docs` file copied over `meta` would be parsed rather than
 refused.
@@ -282,6 +300,59 @@ Offsets are computed forward rather than patched back in: an entry's encoded len
 is known from the key and the id, and the table's own size from the count. A writer
 that had to seek backwards could not stream, and merge cannot buffer a corpus.
 
+### ivf (v3)
+
+```text
+list count      uvarint     nlist; 0 means no partition, and then dim is 0 too
+centroid width  uvarint     dim; must equal meta's vector width
+  centroid      float32 × dim, LE, L2-normalized      × nlist
+  member count  uvarint                                × nlist
+  list offset   uint64 LE   absolute file offset       × nlist
+per list, in list order:
+  DocID         uvarint     absolute for the first, then a delta ≥ 1
+  checksum      4           CRC-32C seeded with the list's own number
+```
+
+An IVF-flat partition of the segment's vectors: spherical k-means centroids, and
+the segment-local DocIDs assigned to each. `Index.Nearest` ranks the centroids by
+inner product with a query, reads the best `nprobe` lists, and returns their
+members as the documents worth scoring exactly. **No score is stored and none is
+computed here** — the metric belongs to the caller, which is [D-008](DECISIONS.md).
+
+Four decisions here are load-bearing:
+
+- **The section is always written**, `nlist = 0` when the segment holds fewer than
+  4,096 documents or no vectors. A section list that varied with the corpus would
+  make the rejection table above say "may or may not be here", and every reader
+  and the first-commit ownership check would have to know which.
+- **Spherical, not plain L2.** Vectors are normalized before training and the
+  assignment maximizes an inner product. Ranking is by cosine, and partitioning by
+  raw L2 would gather the documents with the largest norms into one list
+  regardless of direction — losing exactly the neighbours a cosine query wants.
+- **The offset table is fixed width**, for the reason `docoff`'s is: a query
+  probes a few lists out of up to a thousand, and reaching list *j* through a
+  uvarint table would mean decoding the *j−1* lists in front of it, which is the
+  corpus. At eight bytes an entry it is at most eight kilobytes. Offsets are
+  computed forward, never patched back in, so the writer still streams.
+- **Each list's checksum is seeded with its own number.** A list carries no copy
+  of which centroid it belongs to, so a reader following a damaged offset would
+  decode a *healthy* list under the wrong centroid. That is not an error, it is a
+  plausible wrong candidate set — and a wrong candidate set is indistinguishable
+  from ordinary recall loss, which is the one failure an approximate index must
+  not be allowed to hide.
+
+`nlist` is `min(⌈√count⌉, 1024)`, from the document count rather than the vector
+count. `nprobe` is a constant 64 and is not configurable; `Nearest` raises it on
+its own when a query would otherwise return fewer than *k* candidates, so "at
+least k" is a contract rather than a tuning exercise. Both numbers are the
+reader's policy and neither is stored, so changing `nprobe` needs no rebuild.
+
+**Damage in a list costs speed, not availability.** A list that fails its own
+checksum makes the whole segment behave as though it had no partition: every id
+becomes a candidate, the answer becomes exact, and the query becomes slow. That is
+[D-006](DECISIONS.md)'s rule where absence is the safest answer, and `Scrub` is
+what names the damage.
+
 ## 5. What a reader rejects
 
 Bytes from disk are a trust boundary. Every failure is an error wrapping
@@ -313,6 +384,10 @@ plausible but breaks an invariant a scorer relies on.
 | Segment bases that do not tile `[0, total)` contiguously and in order | Two segments would own the same ids, and a reader would answer with whichever it walked into first: a wrong document, not an error |
 | A `docoff` or `keys` count disagreeing with `meta` | The seek tables and the statistics BM25 trusts would be describing different corpora |
 | A unit whose checksum does not match, seeded with what names it | Covers damage no semantic rule can see — a flipped byte of document text is invisible to every other check here — and covers a record reached through a damaged offset, which would otherwise decode healthily under someone else's id |
+| Two sections of one segment declaring different format versions | Two versions are accepted, so "every frame says the same number" stopped being enforced by the version check itself. A segment whose `meta` says 3 and whose `docs` says 2 passes every frame check individually and describes nothing a writer produced — and the section list was chosen from one of those two numbers |
+| A v3 segment with no `ivf` file, or a `nlist` above 1024, or centroids not as wide as `meta`'s vectors, or a member count above the segment's document count, or the counts summing past it | The version fixes the section list, and the rest are states the writer cannot produce: one document belongs to at most one list, so the counts partition the segment |
+| A non-finite centroid component | It would poison every comparison it takes part in, and the ranking sorts NaN last rather than refusing it — so the query would silently never probe that list |
+| An `ivf` list not strictly ascending, naming a document past the segment, or failing its seeded checksum | Refused **by `Scrub`**. On the read path the same conditions make the segment answer as though it had no partition, because a slow exact answer beats an error — see D-006 |
 | A generation of `0` or `MaxUint64` | The counter advances one commit at a time from a first commit that publishes `1`, so neither end is a state a writer produced. `0` describes a commit that never happened: accepting it would load a foreign layout, and let the next `Commit` publish over it and then sweep away a `seg-000000` weft never wrote. `MaxUint64` is what `Commit`'s `generation + 1` would wrap to zero on, aiming the pre-write `RemoveAll` at `seg-000000` and then publishing a generation below the one it replaced |
 
 **What only `Scrub` checks.** `Open` verifies the frame header, the manifest and
@@ -322,6 +397,15 @@ whole-file checksums, every document, every posting list, both seek tables in fu
 reads is never verified, so rot in a document no query reaches sits there until
 somebody runs `Scrub`. Milestone 2 got this free because `Open` read every byte;
 milestone 3 buys it explicitly.
+
+**One thing nothing checks, stated plainly.** No reader verifies that every
+vector-bearing document appears in some `ivf` list. A document missing from the
+partition is invisible to a vector query, and the cost of that is recall — the
+same currency an approximate index spends by design, and not separable from it by
+any rule available on either path. Buying the check would mean carrying one bit
+per document out of the `docs` walk, and the answer it would give is "this index
+recalls slightly less than it should", which `weft-eval recall` measures directly
+against a brute-force scan.
 
 **What a reader deliberately does not check** is that a term matches the text of
 the documents it names: nothing re-tokenizes `Text` to compare per-document term
@@ -438,14 +522,26 @@ Two things that follows from, and one it does not:
    expires the moment somebody has an index they cannot rebuild —
    [D-007](DECISIONS.md). A version 3 owes either a converter or a reader that
    understands both.
+7. **Version 3 paid that debt with the reader, and it was nearly free.** v3
+   appends `ivf` and changes nothing else, and a segment without a partition has
+   to be readable regardless — a pending segment has none, a segment below 4,096
+   documents has none, and a damaged partition is treated as none. So "v2 is a
+   segment with no partition" reuses a branch that already existed, where a
+   converter would have been a command, a rebuild, and a directory in two states
+   while it ran. `Merge` then upgrades in the background, because it rewrites the
+   run it collapses with the current writer. The lesson for version 4 is the one
+   that made this cheap: **append a section rather than changing one**, and the
+   old version stays readable by construction. A version that retypes or reorders
+   an existing field gets no such discount and owes the converter.
 
 ## 8. Known limits
 
 | Limit | Value | Where it goes |
 | --- | --- | --- |
 | Documents per index | 2³²−1 | `DocID` is uint32; `Add` refuses past it |
-| Segments per generation | 1 | Milestone 3 |
-| Commit cost | O(corpus) — the whole corpus is rewritten | Milestone 3 |
-| Load cost | O(corpus) — `Open` reads everything into memory | Milestone 3's lazy loading, which the terms index exists for |
 | Deletion | Not supported | Tombstones and generations ([FINDINGS §4.3](FINDINGS.md)) |
-| DocID namespacing | None — a DocID means nothing outside its index | Milestone 3, when multiple segments force it ([FINDINGS §3.4](FINDINGS.md)) |
+| DocID namespacing | None — a DocID means nothing outside its index | Unresolved; a DocID is meaningful only inside one index directory |
+| Vector search is approximate | recall@10 = 0.992 against a brute-force scan on the evaluation corpus | The screw is `nprobe`, and it is not exposed. [EVAL §5](EVAL.md) carries the curve |
+| A vector query's working set | 210 MiB per query of a 626 MiB `docs` section | The partition cut the arithmetic 5.6× and the bytes 3.0×. Why the second number is so much worse than the first, and what would actually fix it, is [FINDINGS milestone 3b](FINDINGS.md) |
+| Build cost | +68 s on the 171,332-document evaluation corpus, for the partition | Constant per commit and per merge, not per query. Below 4,096 documents it is not paid at all |
+| `nlist` ceiling | 1024 | The assignment pass is linear in it |

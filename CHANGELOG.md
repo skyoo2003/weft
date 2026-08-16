@@ -21,14 +21,27 @@ Entries are written with [changie](https://changie.dev) as the change is made, n
 ### Exported API
 
 - Baseline. The surface at this tag is whatever pkg/engine/testdata/engine_api.txt and public_api.txt record at the tagged commit; every later release states its diff against them rather than restating the whole surface. ([#9](https://github.com/skyoo2003/weft/issues/9))
+- Three additions, no changes: Scrub(dir) verifies every byte of a committed index, which Open no longer does; Index.Close releases the mappings an opened index holds; Index.Merge collapses the oldest segments once the count passes eight. The six read methods a scorer calls are untouched, which is the milestone 3 claim. ([#9](https://github.com/skyoo2003/weft/issues/9))
+- engine.Index.Nearest(v []float32, k int) []DocID returns the DocIDs worth scoring exactly for a query vector, at least k of them when the index holds that many vectors. It computes no score: the engine knows which documents are geometrically plausible, and the metric stays with the caller (docs/DECISIONS.md D-008). The result is ascending, free of repeats, and a superset — documents with no vector and documents in a segment with no partition are included, so a caller still skips what it cannot score. It is not a promise that the exact top k are among them; docs/EVAL.md section 5.14 publishes the measured recall against a brute-force scan. ([#11](https://github.com/skyoo2003/weft/issues/11))
 
 ### On-disk format
 
 - Version 1, described in docs/FORMAT.md. Nothing to migrate from — this is the first tag. ([#9](https://github.com/skyoo2003/weft/issues/9))
+- Version 2. Version 1 indexes are refused with ErrBadVersion and are not migrated — weft has no users and the only v1 directory in existence is rebuildable, which is an argument available exactly once (docs/DECISIONS.md D-007). New sections docoff and keys let a DocID or a Key reach its document without decoding the documents in front of it; per-unit checksums let one record, block or entry be verified without reading the whole file; the manifest's segment entries now carry (name, base, count). ([#9](https://github.com/skyoo2003/weft/issues/9))
+- Version 3. One new section, ivf, holding an IVF-flat partition of a segment's vectors: spherical k-means centroids and the segment-local DocIDs assigned to each, each inverted list sealed with a CRC-32C seeded with its own list number. Version 2 indexes are read without conversion — a v2 segment reports no partition and answers with every id it holds, which is the same fallback a pending segment and a segment below 4,096 documents already need, so it costs a branch that had to exist anyway. Index.Merge upgrades a v2 generation to v3 as a side effect of the maintenance an index already performs. Version 1 is still refused. This discharges the obligation FORMAT.md section 7.6 placed on a version 3 (docs/DECISIONS.md D-008). ([#11](https://github.com/skyoo2003/weft/issues/11))
 
 ### Minimum Go
 
 - 1.26. This is the floor, not a tested ceiling — newer is untested rather than unsupported, and the gate pins this one line rather than a matrix. ([#9](https://github.com/skyoo2003/weft/issues/9))
+
+### Added
+
+- `weft-eval recall` and `make recall` measure what nDCG cannot see about an approximate vector index: overlap with a brute-force scan, candidates scored per query, latency both ways, and the working set a query actually reaches in bytes and in distinct pages. A partition that loses half the true neighbours holds nDCG steady when the neighbours it lost were unjudged, which on 50 queries against 171,332 documents is most of them. ([#11](https://github.com/skyoo2003/weft/issues/11))
+
+### Changed
+
+- Open maps segments instead of decoding them, so opening an index costs the vocabulary rather than the corpus — 54 ms against 979 ms on a 171,332-document index. Commit writes only what was added since the last one; on a 7.2 MB corpus a commit after one Add writes 245 bytes, and previous generations are left untouched. Whole-file verification moved from Open into Scrub: damage inside a unit is still refused when that unit is read, and damage in bytes no decoder reaches now needs Scrub to find. ([#9](https://github.com/skyoo2003/weft/issues/9))
+- scorer/vector no longer scans the whole corpus. Its loop now reads engine.Index.Nearest, which on the evaluation corpus scores 30,549 documents of 171,332 per query and returns a query 4.6 times faster. The consequence a caller has to know about is that vector results are now approximate: recall@10 against an exact scan is 0.992 and nDCG@10 for the text+vector arm moved 0.6233 to 0.6211. Nothing about the scorer's contract changed — zero norms, non-finite queries, ErrDimMismatch and context polling all behave exactly as before, and all twelve of its existing tests pass unmodified. A segment with no partition is still scored exactly. ([#11](https://github.com/skyoo2003/weft/issues/11))
 
 ### Security
 
