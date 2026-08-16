@@ -1,0 +1,8 @@
+kind: Exported API
+body: 'Three additions, no changes: Scrub(dir) verifies every byte of a committed
+  index, which Open no longer does; Index.Close releases the mappings an opened index
+  holds; Index.Merge collapses the oldest segments once the count passes eight. The
+  six read methods a scorer calls are untouched, which is the milestone 3 claim.'
+time: 2026-08-15T12:00:01.000000000+09:00
+custom:
+  Issue: 9

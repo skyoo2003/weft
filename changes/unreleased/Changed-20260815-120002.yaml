@@ -1,0 +1,11 @@
+kind: Changed
+body: 'Open maps segments instead of decoding them, so opening an index costs the
+  vocabulary rather than the corpus — 54 ms against 979 ms on a 171,332-document
+  index. Commit writes only what was added since the last one; on a 7.2 MB corpus a
+  commit after one Add writes 245 bytes, and previous generations are left untouched.
+  Whole-file verification moved from Open into Scrub: damage inside a unit is still
+  refused when that unit is read, and damage in bytes no decoder reaches now needs
+  Scrub to find.'
+time: 2026-08-15T12:00:02.000000000+09:00
+custom:
+  Issue: 9

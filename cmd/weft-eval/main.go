@@ -765,6 +765,11 @@ func build(ctx context.Context, args []string) error {
 	}
 
 	ix := engine.New()
+	// Commit adopts the segment it publishes, so from that point this index holds
+	// mappings — and a mapping is not memory the collector owns. Deferred here
+	// rather than after the Commit so every return path below releases it, and
+	// harmless before then: an index that never mapped anything closes free.
+	defer ix.Close() //nolint:errcheck // nothing left to do about it on the way out
 	var added, withVec, withLinks, links, dangling, repeated, dimSkipped int
 
 	// The width every vector is checked against, decided over the whole cache before
@@ -875,9 +880,9 @@ func build(ctx context.Context, args []string) error {
 		log.Printf("  repeated   %d references collapsed into an edge that already existed (or into a self-edge)", repeated)
 	}
 
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
+	// No MkdirAll here: the next two steps clear this directory and Commit
+	// creates it, owner-only, on its way in.
+	//
 	// The old account of this index goes before the new index does.
 	//
 	// A rebuild replaces the segments and then records what they came from, and the
@@ -890,6 +895,19 @@ func build(ctx context.Context, args []string) error {
 	if err := os.Remove(filepath.Join(dir, provenanceFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove stale %s: %w", provenanceFile, err)
 	}
+	// Clear any previous index before committing over it. A commit is
+	// incremental now — it appends a segment to whatever the directory already
+	// holds — so committing a freshly built index into a populated directory is
+	// refused rather than silently overlapping the DocIDs. This command builds
+	// an index from the sources named in provenance.json, which is a
+	// replacement and not an addition, so it says so.
+	//
+	// Ordered after the provenance removal on purpose: the window a crash can
+	// land in already leaves an index that cannot say what it holds, and
+	// widening it to also leave no index is no worse.
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("clear %s before rebuilding: %w", dir, err)
+	}
 	start := time.Now()
 	if err := ix.Commit(dir); err != nil {
 		return err
@@ -899,11 +917,20 @@ func build(ctx context.Context, args []string) error {
 	// Reopening here rather than trusting the write is the first real-corpus
 	// exercise of milestone 2's restore equivalence — until now it had only been
 	// tested on fixtures.
+	//
+	// The built index is released first. Its Commit adopted the segment it just
+	// wrote, so holding it across the reopen means two mappings of the same
+	// corpus — and on the platforms mapFile reads instead of maps, two complete
+	// copies on the heap. Nothing below reads it.
+	if err := ix.Close(); err != nil {
+		return fmt.Errorf("close before reopening: %w", err)
+	}
 	start = time.Now()
 	reopened, err := engine.Open(dir)
 	if err != nil {
 		return fmt.Errorf("reopen: %w", err)
 	}
+	defer reopened.Close() //nolint:errcheck // nothing left to do about it on the way out
 	rdocs, ravg := reopened.Stats()
 	if rdocs != docs || ravg != avgdl {
 		return fmt.Errorf("reopened index has %d documents at avgdl %v, committed %d at %v",

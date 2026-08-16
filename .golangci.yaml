@@ -107,15 +107,24 @@ linters:
           - lll
         path: _test\.go$
 
-      # G115 flags every uint64 -> int in the decoder. Each one is already
-      # bounded: segReader.intn compares against the limit in uint64 before
-      # converting, and str checks the length against what is left of the
-      # buffer. Those checks are what these files are about, so the finding is
-      # backwards here — it fires precisely where the guard is.
+      # G115 flags every width change in the decoder, and in the encoder that
+      # feeds it. Each one is already bounded, by one of the two guards these
+      # files exist to apply.
+      #
+      # Reading, the finding is backwards — it fires precisely where the guard
+      # is. segReader.intn compares against the limit in uint64 before
+      # converting and str checks the length against what is left of the
+      # buffer; readManifest refuses a segment base that runs past the document
+      # ceiling two lines above converting it, and keyTable.at range-checks an
+      # offset against the section before seeking to it.
+      #
+      # Writing, every id and count converted is a position in a collection Add
+      # has already capped at maxDocCount — a DocID that did not fit is a
+      # document the index refused to hold.
       - linters:
           - gosec
         text: "G115"
-        path: pkg/engine/(segment|index)\.go$
+        path: pkg/engine/(segment|segments|index|merge|persist|seek)\.go$
 
       # decodeDocs and decodePostings are branchy and long because every branch
       # is a corruption check on a file weft did not write. Splitting them to
@@ -124,6 +133,21 @@ linters:
           - gocyclo
           - funlen
         path: pkg/engine/segment\.go$
+
+      # readManifest is that shape one file over, on the most reachable file in
+      # the format: the manifest is what a doctored directory presents first,
+      # and it names the segment paths every later read follows. Every branch
+      # refuses something — a name carrying a path separator, a base that does
+      # not continue the one before it, a count that runs past the document
+      # ceiling — so the complexity is the refusal count, not tangled control
+      # flow, and the refusals have to stay next to the reads that produce what
+      # they refuse. funlen is paired here for the reason it is paired above: it
+      # counts the same guards a second time, as statements rather than as
+      # branches, and reaching its number means deleting the same checks.
+      - linters:
+          - gocyclo
+          - funlen
+        path: pkg/engine/persist\.go$
 
       # cmd/weft is a demo whose corpus is a literal table. Wrapping those rows
       # or lifting their keys into constants makes the data harder to read,

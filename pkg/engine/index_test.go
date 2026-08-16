@@ -444,3 +444,59 @@ func mustAdd(t *testing.T, ix *Index, d Document) DocID {
 	}
 	return id
 }
+
+// TestCorpusTokenTotalsDoNotWrap pins the one collection statistic assembled
+// from numbers each of which is separately legal.
+//
+// A segment's token total is ranged against maxInt when it is decoded, and that
+// is all a segment can be asked for: it knows nothing about the segments beside
+// it. Incremental commit is what makes the sum a different quantity from any of
+// its terms — eight segments of a few hundred million tokens each are ordinary,
+// and on a 32-bit build their sum is not an int.
+//
+// A wrapped total is negative, and a negative total is a negative average
+// length, which BM25 normalizes every score by. Nothing downstream can notice:
+// AvgDocLen is documented to return 0 for "no normalization" and anything else
+// is taken at face value.
+func TestCorpusTokenTotalsDoNotWrap(t *testing.T) {
+	// Two segments, each holding a total the decoder would accept on its own.
+	// Constructed rather than committed because the arithmetic is what is being
+	// tested, and a corpus of 2^63 tokens is not a fixture.
+	ix := &Index{segs: []*segment{
+		{count: 1, totalLen: maxInt},
+		{count: 1, totalLen: maxInt},
+	}}
+	got := ix.AvgDocLen()
+	if got <= 0 {
+		t.Fatalf("AvgDocLen = %v across two segments of maxInt tokens; BM25 divides by this", got)
+	}
+	if want := float64(maxInt); got != want {
+		t.Errorf("AvgDocLen = %v, want %v", got, want)
+	}
+	if _, avg := ix.Stats(); avg != got {
+		t.Errorf("Stats reported %v where AvgDocLen reported %v", avg, got)
+	}
+}
+
+// TestAddStopsAtThePlatformCeiling pins Add's ceiling to the decoder's.
+//
+// maxDocCount is what every reader ranges a document count against, and it is
+// the narrower of DocID's width and the platform's int. Add compared against
+// DocID's width alone, so on a 32-bit build the two disagree: an index of maxInt
+// documents accepted another, Len and Stats overflowed, and the Commit that
+// followed published a manifest no reopen would accept — a writer call that
+// succeeds and leaves an index that cannot be read back.
+//
+// The two constants are equal on a 64-bit build, so this distinguishes nothing
+// there. It is the assertion that is right on both.
+func TestAddStopsAtThePlatformCeiling(t *testing.T) {
+	// A base rather than documents: the ceiling is about the collection size,
+	// and maxDocCount of them is not a fixture.
+	ix := &Index{base: DocID(maxDocCount)}
+	if _, err := ix.Add(Document{Key: "one", Text: "a"}); err == nil {
+		t.Fatal("Add accepted a document past the count every decoder refuses")
+	}
+	if ix.Len() != maxDocCount {
+		t.Errorf("a refused Add left the index at %d documents, want %d", ix.Len(), maxDocCount)
+	}
+}

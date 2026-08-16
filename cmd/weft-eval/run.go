@@ -272,6 +272,11 @@ var armOrder = []string{armTextBase, armVecBase, armTextGraph, armVecGraph, armV
 // openIndex opens the committed index under dir and, unless anySnapshot, checks that
 // it is the one docs/EVAL.md publishes numbers from.
 //
+// The caller must Close what comes back. Milestone 3 made Open return mappings
+// rather than a decoded copy, and a mapping is not memory the collector owns —
+// on the platforms mapFile reads instead of maps it is a whole corpus on the
+// heap, and every command below this is also called in-process by a test.
+//
 // The snapshot check the callers run covers queries.jsonl and qrels/test.tsv, which
 // are the files *they* read. The index is a third input and nothing verified it: an
 // index built from another corpus revision that kept the same document keys satisfies
@@ -382,6 +387,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer ix.Close() //nolint:errcheck // nothing left to do about it on the way out
 	qs, err := loadQueries(*data)
 	if err != nil {
 		return err
@@ -499,6 +505,7 @@ func sweep(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer ix.Close() //nolint:errcheck // nothing left to do about it on the way out
 	qs, err := loadQueries(*data)
 	if err != nil {
 		return err
@@ -707,6 +714,7 @@ func weights(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer ix.Close() //nolint:errcheck // nothing left to do about it on the way out
 	qs, err := loadQueries(*data)
 	if err != nil {
 		return err
@@ -832,6 +840,7 @@ func diagnose(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer ix.Close() //nolint:errcheck // nothing left to do about it on the way out
 	qs, err := loadQueries(*data)
 	if err != nil {
 		return err
