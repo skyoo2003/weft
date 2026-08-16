@@ -108,6 +108,13 @@ moved to 65,536-document corpora, where `nlist` is 256 — and the scorer test's
 baseline changed from a figure derived from the corpus's shape to a **measured full
 scan of the same index**, which is a stronger comparison than the one it replaced.
 
+The `GOOS=windows go build` gate earned its place here: `weft-eval recall` first
+reached for `syscall.Getrusage`, which does not exist on Windows, and the gate
+caught it. `maxRSS` is now split across `rusage_unix.go` and `rusage_other.go`, the
+same shape as `pkg/engine`'s mmap, and reports 0 where the call does not exist
+rather than substituting a differently-defined number a reader would compare
+against the figures in EVAL.
+
 ### Task 6 — documentation
 
 [FORMAT.md](../FORMAT.md) v3 with the `ivf` spec, the §5 rejection rows and §7.7's
