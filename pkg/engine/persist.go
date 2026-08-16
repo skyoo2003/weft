@@ -175,16 +175,11 @@ func (ix *Index) Commit(dir string) error {
 	// the ones on disk, and the next Merge writes the disagreement down.
 	//
 	// By identity rather than by string, because the same directory reached
-	// through two paths is still the same directory. An index with nothing
+	// through two paths is still the same directory — and because two different
+	// directories reached through the same path are not. An index with nothing
 	// committed has no directory yet and may pick any.
-	if ix.dir != "" {
-		same, err := sameDir(ix.dir, dir)
-		if err != nil {
-			return fmt.Errorf("commit %s: %w", dir, err)
-		}
-		if !same {
-			return fmt.Errorf("commit %s: this index holds the segments of %s: %w", dir, ix.dir, ErrCorrupt)
-		}
+	if err := ix.sameDir(root); err != nil {
+		return fmt.Errorf("commit %s: %w", dir, err)
 	}
 
 	// The manifest is the authority on what is already stored, and the index in
@@ -267,8 +262,7 @@ func (ix *Index) Commit(dir string) error {
 	if err := ix.adopt(root, published[len(published)-1]); err != nil {
 		return fmt.Errorf("commit %s: %w", seg, err)
 	}
-	// Absolute, for the reason openIndex gives.
-	if ix.dir, err = filepath.Abs(dir); err != nil {
+	if err := ix.rememberDir(root, dir); err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
 
@@ -366,7 +360,6 @@ const openAttempts = 3
 // mapGeneration maps every segment one manifest names, in order.
 func mapGeneration(root *os.Root, dir string, segs []segInfo) (*Index, error) {
 	ix := New()
-	var err error
 	for _, info := range segs {
 		s, err := openSegment(root, info.name, info.base)
 		if err != nil {
@@ -403,11 +396,7 @@ func mapGeneration(root *os.Root, dir string, segs []segInfo) (*Index, error) {
 			ix.vecDim = s.vecDim
 		}
 	}
-	// Absolute, because this is remembered and used later: Merge reopens it and
-	// Commit stats it, and a relative path stops naming this index the moment the
-	// process changes directory. The mappings would still be valid, so the
-	// failure would be caused by nothing but the deferred resolution.
-	if ix.dir, err = filepath.Abs(dir); err != nil {
+	if err := ix.rememberDir(root, dir); err != nil {
 		ix.Close() //nolint:errcheck // already returning an error
 		return nil, err
 	}
@@ -695,18 +684,48 @@ func scrubDocs(docsR *segReader, offs docOffsets, seg string, found map[string]s
 	return docLen, totalLen, vecDim, docsR.done()
 }
 
-// sameDir reports whether two paths name the same directory. Both must exist:
-// Commit creates its destination before asking.
-func sameDir(a, b string) (bool, error) {
-	fa, err := os.Stat(a)
-	if err != nil {
-		return false, err
+// sameDir reports whether root is the directory this index's committed segments
+// came from, and requires ix.mu.
+//
+// It asks the open root rather than a path, which is what makes the answer about
+// the directory being written into rather than about whatever the name resolves
+// to a moment later. The remembered side is the identity captured when this
+// index was opened or adopted: a path stops naming a directory the moment
+// somebody renames it, and stat'ing the same stale path twice compares the
+// replacement with itself and agrees.
+//
+// An index with nothing committed has no directory yet and may pick any.
+func (ix *Index) sameDir(root *os.Root) error {
+	if ix.dirID == nil {
+		return nil
 	}
-	fb, err := os.Stat(b)
+	fi, err := root.Stat(".")
 	if err != nil {
-		return false, err
+		return err
 	}
-	return os.SameFile(fa, fb), nil
+	if !os.SameFile(ix.dirID, fi) {
+		return fmt.Errorf("this index holds the segments of another directory, which used to be %s: %w", ix.dir, ErrCorrupt)
+	}
+	return nil
+}
+
+// rememberDir records a directory and its identity. Requires ix.mu.
+//
+// Absolute, because this is remembered and used later: Merge reopens it, and a
+// relative path stops naming this index the moment the process changes
+// directory. The mappings would still be valid, so the failure would be caused
+// by nothing but the deferred resolution.
+func (ix *Index) rememberDir(root *os.Root, dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	fi, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	ix.dir, ix.dirID = abs, fi
+	return nil
 }
 
 // readManifest reads and decodes dir's manifest. Segment names come off disk,

@@ -270,6 +270,13 @@ func (ix *Index) Merge() error {
 		return fmt.Errorf("merge: %w", err)
 	}
 	defer root.Close()
+	// The same question Commit asks of its destination, for the same reason: the
+	// remembered path names whatever stands there now, and a merge aimed at a
+	// stranger's directory would rewrite that stranger's oldest generations from
+	// this index's segments.
+	if err := ix.sameDir(root); err != nil {
+		return fmt.Errorf("merge %s: %w", ix.dir, err)
+	}
 
 	gen, live, err := readManifest(root)
 	if err != nil {

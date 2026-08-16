@@ -5,6 +5,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"slices"
 	"strings"
@@ -70,7 +71,16 @@ type Index struct {
 	// dir is the directory the committed segments live in, set by Open and by a
 	// successful Commit. Merge needs it: it publishes a new manifest, and an
 	// index that was never written anywhere has nothing to merge.
-	dir string
+	//
+	// dirID is that directory's identity, taken when it was opened. A path is
+	// not one: it names whatever stands there now, so an index moved aside and
+	// replaced under its old name leaves the string pointing at a stranger, and
+	// a check that stats the string twice compares the stranger with itself and
+	// agrees. Commit would then join this index's pending documents to a history
+	// that is not its own. The identity does not follow a rename, which is the
+	// property being bought.
+	dir   string
+	dirID fs.FileInfo
 
 	// segs are the committed segments: mapped, immutable, sorted by base, and
 	// covering [0, base) between them. Reads route here when the answer is not
