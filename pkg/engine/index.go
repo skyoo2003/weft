@@ -415,6 +415,66 @@ func (ix *Index) Lookup(term string) []Posting {
 	return ix.lookupAt(term)
 }
 
+// Nearest returns the DocIDs worth scoring exactly for v, at least k of them
+// when the index holds that many vectors. It computes no score: the metric
+// belongs to the caller.
+//
+// That division is the milestone's design decision and D-008 records it. The
+// index knows the geometry — which documents are close enough to be worth
+// looking at — because the partition is a section of the segment format and
+// lives where the format does. How close each one actually is stays with
+// whoever defines "close": scorer/vector computes cosine, and every rule it
+// holds about zero norms, non-finite components and mixed widths stays there
+// untouched. Returning scores here would have moved half of a scorer into the
+// engine to save it a loop.
+//
+// Three things the result is, and one it is not:
+//
+//   - Ascending and free of repeats. The docs file is in DocID order, so a
+//     caller decoding these records walks the mapping forwards.
+//   - At least k when there are k vectors, whatever the partition's shape. A
+//     segment widens its own probe until it has them, which is why no caller
+//     ever has to know what nprobe is.
+//   - A superset, not an answer. Documents with no vector, with a zero vector,
+//     or in a segment with no partition are all in here. The caller is expected
+//     to skip what it cannot score, which scorer/vector already did.
+//
+// It is not a promise that the exact top k are among them. This is an
+// approximate index and its recall is measured rather than asserted —
+// `weft-eval recall` against a brute-force scan is what publishes the number.
+// A segment that carries no partition answers with every id it holds, so the
+// answer there is exact by construction: format version 2 segments, segments
+// below ivfMinDocs, and the pending in-memory segment.
+//
+// ponytail: the whole walk runs under one read lock and cannot be cancelled,
+// because Query carries no context here and Nearest is called from inside a
+// scorer that polls its own. The uncancellable part is the centroid scan,
+// nlist × dim multiply-accumulates — 2.7e6 on the milestone 4 corpus, against
+// the 1.14e8 the scan it replaces used to run between polls. Give it a context
+// when a profile shows a query waiting on it, which would be a signature change
+// and therefore a visible one.
+func (ix *Index) Nearest(v []float32, k int) []DocID {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+
+	var out []DocID
+	for _, s := range ix.segs {
+		out = append(out, s.nearest(v, k)...)
+	}
+	// The pending segment last, which keeps the whole list ascending for free:
+	// segments are ordered by base and pending starts past all of them. Same
+	// arrangement as lookupAt, for the same reason.
+	//
+	// All of it, unpartitioned. Nothing has been committed for these documents
+	// yet, so there is no inverted list to consult — and a query that skipped
+	// them would make a vector search silently stale by one commit's worth of
+	// ingest. What bounds the cost is that a commit is what empties this.
+	for i := range ix.docs {
+		out = append(out, DocID(uint64(ix.base)+uint64(i)))
+	}
+	return out
+}
+
 // DocLen is the token count of a document, or 0 for an unknown id. The bound is
 // compared in uint64 for the reason given on Doc.
 func (ix *Index) DocLen(id DocID) int {
