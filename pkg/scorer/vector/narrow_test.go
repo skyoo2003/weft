@@ -86,13 +86,18 @@ func committedVectorIndex(t *testing.T, n, dim, groups int) *engine.Index {
 // much it narrows on the real citation corpus is `weft-eval recall`'s question —
 // this one only refuses the case where the partition is written, read, and then
 // not actually used.
+// The corpus is large because nprobe is a constant. nlist grows as √n, so a
+// fixed 64 lists is most of a small segment and a fraction of a large one — that
+// is the whole reason the constant is a constant, and it means a small corpus
+// cannot show narrowing even when the partition is working perfectly. At 65,536
+// documents nlist is 256, so a query probes a quarter of the lists.
 func TestTheScanIsNarrowedByTheIndex(t *testing.T) {
 	if testing.Short() {
-		t.Skip("commits an 8192-document corpus")
+		t.Skip("commits a 65,536-document corpus")
 	}
 	const (
-		n   = 8192
-		dim = 64
+		n   = 65536
+		dim = 32
 	)
 	ix := committedVectorIndex(t, n, dim, 40)
 	s := New(ix)
@@ -107,7 +112,22 @@ func TestTheScanIsNarrowedByTheIndex(t *testing.T) {
 		t.Fatalf("Candidates: %v", err)
 	}
 
-	const queries = 20
+	// The baseline is a real full scan of the same index rather than a figure
+	// derived from the corpus's shape: decoding one record allocates its key, its
+	// text, its vector and its links, and only measuring it says what all four
+	// come to. This is exactly the loop Candidates used to run.
+	var b0, b1 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&b0)
+	for i := range ix.Len() {
+		if _, ok := ix.Doc(engine.DocID(i)); !ok {
+			t.Fatalf("Doc(%d) is missing", i)
+		}
+	}
+	runtime.ReadMemStats(&b1)
+	fullScan := b1.TotalAlloc - b0.TotalAlloc
+
+	const queries = 5
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
@@ -119,15 +139,10 @@ func TestTheScanIsNarrowedByTheIndex(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	perQuery := (after.TotalAlloc - before.TotalAlloc) / queries
 
-	// A full scan decodes every document, and decoding one allocates its vector,
-	// so a full scan cannot cost less than the corpus's vector bytes. Half of
-	// that is a bound only a narrowed scan can be under, and in practice the
-	// measurement lands far below it.
-	corpusVectorBytes := uint64(n) * uint64(dim) * 4
-	t.Logf("%d B allocated per query, against %d B of vectors in the corpus (%.1f%%)",
-		perQuery, corpusVectorBytes, 100*float64(perQuery)/float64(corpusVectorBytes))
-	if perQuery > corpusVectorBytes/2 {
-		t.Errorf("a query allocated %d B against %d B of corpus vectors — the scan is still touching everything",
-			perQuery, corpusVectorBytes)
+	t.Logf("%d B allocated per query, against %d B for a full scan of the same index (%.1f%%)",
+		perQuery, fullScan, 100*float64(perQuery)/float64(fullScan))
+	if perQuery > fullScan/2 {
+		t.Errorf("a query allocated %d B against %d B for a full scan — the scan is still touching everything",
+			perQuery, fullScan)
 	}
 }

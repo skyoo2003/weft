@@ -79,7 +79,32 @@ const (
 	// raises it on its own when a query would otherwise come back with fewer
 	// than k candidates, so "at least k" is a contract rather than a tuning
 	// exercise.
-	ivfNProbe = 8
+	//
+	// 64 is measured, not chosen. The milestone plan fixed the quality bar before
+	// anything was built — `text+vector` within 0.005 of milestone 4's 0.6233 —
+	// and 8, the value the plan proposed, missed it by 0.0230. The plan's own
+	// registered response was to raise this constant and re-measure, which
+	// produced the curve docs/EVAL.md prints:
+	//
+	//	nprobe    8      16      32      64     128     256
+	//	nDCG   0.6003  0.6095  0.6174  0.6211  0.6205  0.6233
+	//
+	// 64 is the smallest measured value that clears the bar. Two things in that
+	// curve are worth more than the number. It is not monotone — 128 scores below
+	// 64 — because adding candidates reshuffles ties as well as adding neighbours,
+	// which is a reminder that recall and nDCG are different quantities. And 64
+	// of nlist=414 is 15% of the lists, where the IVF literature expects one to
+	// ten: this corpus does not cluster tightly, and docs/FINDINGS.md records that
+	// as a finding about the data rather than a tuning result.
+	//
+	// A constant rather than a fraction of nlist, and that is the load-bearing
+	// part. nlist grows as √n, so a constant probes a shrinking share of the
+	// corpus as it grows — 15% at 171k documents, 2% at ten million. A fraction
+	// would scan a fixed share of the corpus at every size, which is a full scan
+	// with a discount rather than an index. The cost of the constant is at the
+	// other end: a segment with fewer than 64 lists is scanned nearly whole, and
+	// the answer there is simply exact.
+	ivfNProbe = 64
 
 	// ivfSample is how many vectors training looks at. Lloyd's cost is
 	// S·nlist·d per iteration, so this is what keeps training from scaling with

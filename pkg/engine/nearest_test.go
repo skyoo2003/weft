@@ -83,9 +83,19 @@ func TestNearestOffersAtLeastK(t *testing.T) {
 // `weft-eval recall`; what this pins is that there is one at all, which is the
 // difference between an index that has a partition and one that writes a
 // section nothing reads.
+//
+// The corpus is large because nprobe is a constant. nlist grows as √n, so a
+// fixed 64 lists is most of a small segment and a fraction of a large one — that
+// is the whole reason the constant is a constant, and it means a small corpus
+// cannot show narrowing even when the partition is working perfectly. At 65,536
+// documents nlist is 256, so the probe is a quarter of the lists and there is
+// something to measure.
 func TestNearestNarrowsTheScan(t *testing.T) {
+	if testing.Short() {
+		t.Skip("commits a 65,536-document corpus")
+	}
 	const dim = 8
-	ix, _ := commitVectors(t, ivfMinDocs*2, dim, 40)
+	ix, _ := commitVectors(t, ivfMinDocs*16, dim, 40)
 	defer ix.Close() //nolint:errcheck // teardown
 
 	q := make([]float32, dim)
