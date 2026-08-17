@@ -229,9 +229,6 @@ func (s *segment) nearest(v []float32, k int) []DocID {
 		return s.allIDs()
 	}
 	order := ivfOrder(s.ivf.centroids, s.ivf.nlist, s.ivf.dim, v)
-	if order == nil {
-		return s.allIDs()
-	}
 	// nprobe lists, then as many more as it takes to have k candidates. The
 	// counts were read at Open, so widening is arithmetic on a table rather than
 	// decoding lists to find out how short the answer would have been. This is

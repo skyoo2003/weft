@@ -216,6 +216,51 @@ reviewer.
 6. **Neither the build nor `Nearest` can be cancelled.** `Commit` takes no context and
    the milestone was allowed one new exported name. [FINDINGS §4.3](../FINDINGS.md).
 
+## Complexity pass
+
+A review for over-engineering ran against the finished branch. It raised eight cuts;
+five were applied and three were withdrawn on inspection. **No RED gate applies to
+any of them: none changes observable behaviour.** What replaces it is stated per
+change below — an equality proof, a characterization test that passes against both
+implementations, or the real-corpus measurement reproducing to the published digit.
+
+| Cut | Change | What stands in for RED |
+| --- | --- | --- |
+| `ivfNList`'s integer square root | 16 lines of `math.Sqrt` plus two correction loops became one `math.Ceil(math.Sqrt(...))` | Exhaustive equality against the old body for every `count` in `[0, 5,000,000)` and at `2^20`…`2^62`: **0 mismatches**. IEEE-754 requires `sqrt` to be correctly rounded and `maxDocCount` is `2^32−1`, so `√(k²)` is exactly `k`. The table in `TestIVFListCountFollowsSqrt` gained 4095, `2^20`, `2^20+1` and `maxDocCount` |
+| `ivfOrder`'s four guards | Deleted, with the precondition moved into the doc comment, and the `order == nil` fallback in `segment.nearest` with them | Unreachable: `parseIVF` allocates exactly `nlist × dim` centroids and rejects a header disagreeing with `meta`, and `nearest` has already returned for a segment with no vectors, no partition, or a query of another width |
+| `workingSet`'s page set | `map[int64]struct{}` became a running counter, paid for by the ascending id order `Nearest` guarantees | New `cmd/weft-eval/recall_test.go:TestWorkingSetCountsDistinctPages`: 7 layouts — inside one page, across a boundary, across three, sharing the page between two records, a gap, an out-of-range id, no candidates. **PASS against the map first, PASS against the counter after** |
+| `splitmix` in the tests | Deleted for `math/rand/v2` on a fixed seed, as `internal/eval/bootstrap.go` already uses | Test-only, and the corpus values change: every `TestIVF*` assertion including the recall floor re-run and PASS. The production claim is untouched — `ivf.go` still holds no generator, which is what `TestIVFTrainingIsDeterministic` asserts |
+| The `unparam` exclusion's rationale | Four lines of prose defending it cut to one; the exclusion itself kept | `unparam` flags exactly two helpers, `topByCosine`'s `k` and `commitGenerations`' `dim`, and both callers hold the same value as a local constant — dropping the parameter would split one fact across two places. `make lint`: **0 issues** |
+
+Withdrawn after checking, and each is a claim about this branch worth keeping:
+
+1. **Replace `recordExtents` with an average record size.** It would delete about 100
+   lines that re-derive the record layout, and it cannot produce the number FINDINGS
+   §3 reasons about. A uniform average gives 114 MiB of records and 232 MiB of pages
+   against the measured 124.1 and 210.1 — and it inverts the page multiplier, which
+   is 1.68 pages per record measured against 1.94 modelled. The gap is candidates
+   sharing pages, and only real offsets can see it.
+2. **Delete `maxRSS`.** The suggested replacement, `/usr/bin/time -l`, reports one
+   peak for the process and the plan asked for before and after. 51 lines for a
+   figure the report already labels as both passes' bound is a fair complaint about
+   its value, not about its implementation.
+3. **Remove `ivfListLen`.** It mirrors `encodeIVF`'s widths, but `segWriter` streams
+   through a `bufio.Writer` with a running CRC and cannot seek, so the offset table
+   cannot be back-patched. Computing it forward is what `encodeKeys` already does,
+   and the decoder's offset check is what proves the two still agree.
+
+Re-measured on the evaluation index after all five, and every published figure
+reproduces: `recall@10` **0.9920**, worst query 0.800, **30,549.5** candidates
+(17.83%), **124.1 MiB** of records, **210.1 MiB** of pages across 53,773 distinct
+pages, 123 ms against 570 ms. No number in [FINDINGS](../FINDINGS.md),
+[EVAL](../EVAL.md) or [FORMAT](../FORMAT.md) moved, so none was edited.
+
+Gates after the pass: `make all`, `make lint` (0 issues), `make arch`, `make deps`,
+`make fuzz` (6.7M execs, no panics), `GOOS=windows go build ./...`,
+`GOOS=linux GOARCH=386 go build ./...` and `GOARCH=386 go vet` on the three touched
+packages — all PASS. `GOARCH=386 go vet ./...` still fails the way it fails on
+`main`, in `pkg/fusion`'s `1 << 40` test constant; see the gaps above.
+
 ## Merge evidence
 
 Checkpoint commits on `m3b-ivf`, in order, each reachable from `HEAD`:
@@ -230,6 +275,10 @@ e8bb03a  feat(engine): format v3 — the ivf section, and a reader for v2 and v3
 1695f07  test: add reproducer for the scorer/vector full scan                    RED   task 4
 5d839f8  fix(scorer/vector): repay ponytail:36 — the loop reads Index.Nearest    GREEN task 4
 ```
+
+Docs, lint and measurement fixes follow those, and the branch tip is the complexity
+pass above — `refactor: take the five cuts a review for over-engineering found`,
+whose evidence is that table rather than a RED/GREEN pair.
 
 If these are squashed, this file is the surviving record of what was RED, what turned
 it GREEN, and what was measured rather than assumed.

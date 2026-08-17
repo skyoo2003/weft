@@ -97,11 +97,8 @@ linters:
     rules:
       # Test files are allowed the shapes that make a test readable: an ignored
       # error on a cleanup call, a constant repeated across table rows, a long
-      # table row, and a helper parameter every caller happens to pass the same
-      # value for. That last one is what unparam calls dead flexibility and a
-      # test calls its subject — `commitGenerations(t, dir, sizes, dim, 12)` says
-      # at the call site what width the corpus is, and folding dim into the
-      # helper would move that fact away from the test that turns on it.
+      # table row, and a helper parameter every caller passes the same value for —
+      # `dim` names the corpus width at the call site of the test that turns on it.
       - linters:
           - errcheck
           - gosec

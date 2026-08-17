@@ -375,19 +375,26 @@ func vLen(v int64) int64 {
 // is in DocID order and the list is in centroid order — so each one drags in at
 // least one whole page whether or not it fills it. Page-granularity rounding, not
 // vector bytes, is what a paging system actually charges.
+// A running count rather than a set of page numbers, and the ascending id order
+// is what pays for it: offsets ascend with ids, so the only page a record can
+// already have been charged for is the one its predecessor ended on. Nearest
+// documents that ordering and sorts to guarantee it. The set was a map entry per
+// page per query — tens of thousands of them at the operating point — to answer
+// a question two ints answer.
 func workingSet(e extents, ids []engine.DocID) (bytes, pages int) {
-	seen := make(map[int64]struct{}, len(ids)*2)
+	charged := int64(-1) // the highest page number already counted
 	for _, id := range ids {
 		i := int(id)
 		if i < 0 || i >= len(e.off) {
 			continue
 		}
 		bytes += int(e.size[i])
-		first := e.off[i] / recallPageSize
+		first := max(e.off[i]/recallPageSize, charged+1)
 		last := (e.off[i] + e.size[i] - 1) / recallPageSize
-		for p := first; p <= last; p++ {
-			seen[p] = struct{}{}
+		if last >= first {
+			pages += int(last - first + 1)
 		}
+		charged = max(charged, last)
 	}
-	return bytes, len(seen)
+	return bytes, pages
 }

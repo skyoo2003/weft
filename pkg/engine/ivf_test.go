@@ -9,6 +9,7 @@ import (
 	"hash/crc32"
 	"maps"
 	"math"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -31,26 +32,15 @@ import (
 // unwritable. The design answer is not a fixed seed but no seed at all; there
 // is no RNG in ivf.go to fix.
 
-// splitmix is the test's own source of arbitrary-but-fixed numbers.
+// unit returns a float in [-1, 1) from r.
 //
-// It lives here rather than in math/rand because the production code has no
-// RNG and this file is what proves it: a generator visible only to the test
-// cannot be reached from ivf.go by accident. Splitmix64, whose constants are
-// published, so a reader can check that the corpus below is what it says.
-type splitmix uint64
-
-func (s *splitmix) next() uint64 {
-	*s += 0x9E3779B97F4A7C15
-	z := uint64(*s)
-	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
-	z = (z ^ (z >> 27)) * 0x94D049BB133111EB
-	return z ^ (z >> 31)
-}
-
-// unit returns a float in [-1, 1).
-func (s *splitmix) unit() float32 {
-	return float32(int64(s.next()>>11))/float32(int64(1)<<52) - 1
-}
+// The generator is math/rand/v2 on a fixed seed, which is reproducible across
+// builds and machines and is all a synthetic corpus needs. It is emphatically
+// not what ivf.go does, and the gap is this file's subject: the production code
+// has no generator at all, so its determinism does not rest on anybody
+// remembering not to change a seed. TestIVFTrainingIsDeterministic is where that
+// difference is asserted rather than described.
+func unit(r *rand.Rand) float32 { return r.Float32()*2 - 1 }
 
 // clusteredCorpus builds n vectors of width dim drawn from groups well
 // separated centres, with membership taken from the generator rather than from
@@ -61,24 +51,24 @@ func (s *splitmix) unit() float32 {
 // cover a fraction of the clusters. That would be a property of this corpus and
 // not of the algorithm, which is the wrong thing for a recall test to measure.
 func clusteredCorpus(n, dim, groups int) [][]float32 {
-	g := splitmix(1)
+	g := rand.New(rand.NewPCG(1, 1))
 	centres := make([][]float32, groups)
 	for c := range centres {
 		v := make([]float32, dim)
 		for j := range v {
-			v[j] = g.unit()
+			v[j] = unit(g)
 		}
 		centres[c] = v
 	}
 	out := make([][]float32, n)
 	for i := range out {
-		c := centres[int(g.next()%uint64(groups))]
+		c := centres[g.IntN(groups)]
 		v := make([]float32, dim)
 		for j := range v {
 			// Noise well below the spread between centres, so a nearest
 			// neighbour by cosine is nearly always a cluster sibling and a
 			// partition that finds the cluster finds the neighbours.
-			v[j] = c[j] + g.unit()*0.12
+			v[j] = c[j] + unit(g)*0.12
 		}
 		out[i] = v
 	}
@@ -204,15 +194,15 @@ func TestIVFRecallOnClusteredCorpus(t *testing.T) {
 		t.Fatalf("a %d-document corpus was not partitioned", len(vs))
 	}
 
-	g := splitmix(99)
+	g := rand.New(rand.NewPCG(99, 99))
 	hits, want := 0, 0
 	const queries = 40
 	for range queries {
 		// A query near a document rather than a centroid: this is what a caller
 		// does, and it is the case where the query sits between two lists.
-		q := slices.Clone(vs[int(g.next()%uint64(len(vs)))])
+		q := slices.Clone(vs[g.IntN(len(vs))])
 		for j := range q {
-			q[j] += g.unit() * 0.05
+			q[j] += unit(g) * 0.05
 		}
 
 		exact := topByCosine(vs, q, allIDsOf(vs), k)
@@ -321,11 +311,19 @@ func TestIVFListCountFollowsSqrt(t *testing.T) {
 	}{
 		{0, 1},
 		{1, 1},
+		// Around a perfect square, which is the case a float root has to get
+		// right: 4096 is 64 lists and not 65, one document fewer is still 64,
+		// and one more is 65.
+		{4095, 64},
 		{4096, 64},
 		{4097, 65},
 		{10000, 100},
 		{148232, 386},
+		// The clamp: the perfect square where it first binds, and past it.
+		{1 << 20, ivfMaxList},
+		{(1 << 20) + 1, ivfMaxList},
 		{1 << 30, ivfMaxList},
+		{maxDocCount, ivfMaxList},
 	}
 	for _, tc := range tests {
 		if got := ivfNList(tc.count); got != tc.want {
@@ -599,11 +597,11 @@ func TestTheTwoReadersRankTheSame(t *testing.T) {
 		vs[i] = d.Vector
 	}
 
-	g := splitmix(4242)
+	g := rand.New(rand.NewPCG(4242, 4242))
 	for range 20 {
-		q := slices.Clone(vs[int(g.next()%uint64(len(vs)))])
+		q := slices.Clone(vs[g.IntN(len(vs))])
 		for j := range q {
-			q[j] += g.unit() * 0.05
+			q[j] += unit(g) * 0.05
 		}
 		exact := topByCosine(vs, q, v2.segs[0].nearest(q, k), k)
 		approx := topByCosine(vs, q, v3.segs[0].nearest(q, k), k)
@@ -724,11 +722,11 @@ func TestADamagedIVFListFallsBackToTheWholeSegment(t *testing.T) {
 	// on the query — so the assertion is over enough queries to reach it, and
 	// what it demands is that reaching it never returns fewer than the whole
 	// segment and never panics.
-	g := splitmix(5)
+	g := rand.New(rand.NewPCG(5, 5))
 	fellBack := false
 	for range 200 {
 		for j := range q {
-			q[j] = g.unit()
+			q[j] = unit(g)
 		}
 		n := len(got.segs[0].nearest(q, 10))
 		if n == got.Len() {

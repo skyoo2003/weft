@@ -162,28 +162,21 @@ type ivfBuild struct {
 	lists [][]DocID
 }
 
-// ivfNList is how many lists a segment of count documents gets: √count, clamped.
+// ivfNList is how many lists a segment of count documents gets: ⌈√count⌉,
+// clamped to at least one and at most ivfMaxList.
 //
 // The square root is the standard choice, and the reason is that it balances the
 // two halves of a query — scanning nlist centroids against scanning nprobe lists
-// of count/nlist members each. Computed in integers rather than through
-// math.Ceil, because the perfect squares are exactly the sizes a test pins and a
-// float sqrt that lands a half-ulp low turns 4096 into 65 lists.
+// of count/nlist members each.
+//
+// A float root rather than an integer one, and the perfect squares are why that
+// is exact rather than merely short. IEEE-754 requires sqrt to be correctly
+// rounded and an int is exact in a float64 below 2^53, so √(k²) is k and the
+// ceiling leaves it there — 4096 gives 64, not 65. Above 2^20 the clamp answers
+// before rounding could matter, and maxDocCount stops the corpus twelve orders
+// short of where a float64 stops being exact.
 func ivfNList(count int) int {
-	if count <= 1 {
-		return 1
-	}
-	// The product is compared in uint64: on a 32-bit build n·n for a corpus of
-	// maxInt documents passes what an int holds, and a wrapped product would
-	// stop the loop early and hand back a root that is not one.
-	n := uint64(math.Sqrt(float64(count)))
-	for n*n < uint64(count) {
-		n++
-	}
-	for n > 1 && (n-1)*(n-1) >= uint64(count) {
-		n--
-	}
-	return min(int(n), ivfMaxList)
+	return min(max(int(math.Ceil(math.Sqrt(float64(count)))), 1), ivfMaxList)
 }
 
 // buildIVF partitions count documents' vectors, read through vecAt.
@@ -411,10 +404,14 @@ func ivfNormalizeSum(dst []float32, sum []float64) {
 // Scores go through cmp.Compare rather than >, the same choice TopK makes and
 // for the same reason — a NaN sorts to the bottom rather than landing wherever
 // the comparison happened to reach it.
+//
+// The shape is a precondition rather than a check, because there is nowhere for
+// a bad one to come from. parseIVF allocates exactly nlist × dim centroids and
+// refuses a section whose header does not agree with meta; segment.nearest is
+// the only caller and it has already returned for a segment with no vectors, no
+// partition, or a query of another width. A guard here would be four conditions
+// none of which can be false, on the per-query path.
 func ivfOrder(cent []float32, nlist, dim int, v []float32) []int {
-	if nlist <= 0 || dim <= 0 || len(v) != dim || len(cent) < nlist*dim {
-		return nil
-	}
 	type ranked struct {
 		list int
 		dot  float64
