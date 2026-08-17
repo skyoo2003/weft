@@ -2,14 +2,14 @@
 
 //go:build unix
 
-package main
+package loadgen
 
 import (
 	"runtime"
 	"syscall"
 )
 
-// maxRSS is the process's peak resident set, in bytes.
+// MaxRSS is the process's peak resident set, in bytes.
 //
 // It is the OS's own number and it is a high-water mark rather than a current
 // reading, which is what the working-set question wants: a scan that touched the
@@ -25,7 +25,9 @@ import (
 // The two conversions look unnecessary and are not: Maxrss is int64 on the
 // 64-bit targets and int32 on linux/386 and linux/arm, so unconvert is right
 // about the machine it ran on and wrong about the build.
-func maxRSS() int64 {
+// MaxRSS is exported because recall.go reads it too; one implementation of a
+// platform quirk is the point of it living here.
+func MaxRSS() int64 {
 	var ru syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
 		return 0
@@ -58,17 +60,17 @@ func maxRSS() int64 {
 // Process-wide and monotonic, so a run's figure is always a difference between two
 // snapshots — see sub. Reading them costs one syscall, which is why this is called
 // once around a run rather than once around a request.
-func procFaults() procFaultCounts {
+func ProcFaults() FaultCounts {
 	var ru syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
-		return procFaultCounts{}
+		return FaultCounts{}
 	}
-	// int64 conversions for the same reason maxRSS needs them: these fields are
+	// int64 conversions for the same reason MaxRSS needs them: these fields are
 	// int64 on 64-bit unix and int32 on linux/386 and linux/arm.
-	return procFaultCounts{
-		minor:  int64(ru.Minflt), //nolint:unconvert // int32 on 32-bit unix
-		major:  int64(ru.Majflt), //nolint:unconvert // int32 on 32-bit unix
-		nvcsw:  int64(ru.Nvcsw),  //nolint:unconvert // int32 on 32-bit unix
-		nivcsw: int64(ru.Nivcsw), //nolint:unconvert // int32 on 32-bit unix
+	return FaultCounts{
+		Minor:  int64(ru.Minflt), //nolint:unconvert // int32 on 32-bit unix
+		Major:  int64(ru.Majflt), //nolint:unconvert // int32 on 32-bit unix
+		Nvcsw:  int64(ru.Nvcsw),  //nolint:unconvert // int32 on 32-bit unix
+		Nivcsw: int64(ru.Nivcsw), //nolint:unconvert // int32 on 32-bit unix
 	}
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-package main
+package loadgen
 
 import (
 	"context"
@@ -51,8 +51,8 @@ func TestQuantileAtTheBoundaries(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := quantile(tc.sorted, tc.q); got != tc.want {
-				t.Errorf("quantile(%v, %v) = %v, want %v", tc.sorted, tc.q, got, tc.want)
+			if got := Quantile(tc.sorted, tc.q); got != tc.want {
+				t.Errorf("Quantile(%v, %v) = %v, want %v", tc.sorted, tc.q, got, tc.want)
 			}
 		})
 	}
@@ -92,8 +92,8 @@ func TestQuantileIsNotPrintedWhenTooThin(t *testing.T) {
 		{0, 0.50, false},
 	}
 	for _, tc := range tests {
-		if got := printableQuantile(tc.n, tc.q); got != tc.want {
-			t.Errorf("printableQuantile(%d, %v) = %v, want %v", tc.n, tc.q, got, tc.want)
+		if got := Printable(tc.n, tc.q); got != tc.want {
+			t.Errorf("Printable(%d, %v) = %v, want %v", tc.n, tc.q, got, tc.want)
 		}
 	}
 }
@@ -127,7 +127,7 @@ func TestOpenLoopDoesNotLetTheServerSlowTheLoad(t *testing.T) {
 		}
 	}
 
-	samples, shed := driveOpenLoop(context.Background(), rate, n, 256, do)
+	samples, shed := Drive(context.Background(), rate, n, 256, do)
 	if len(samples)+shed != n {
 		t.Fatalf("samples %d + shed %d != %d requested", len(samples), shed, n)
 	}
@@ -137,7 +137,7 @@ func TestOpenLoopDoesNotLetTheServerSlowTheLoad(t *testing.T) {
 	// above the one it must beat.
 	var slow int
 	for _, s := range samples {
-		if s.lat >= stall/2 {
+		if s.Lat >= stall/2 {
 			slow++
 		}
 	}
@@ -158,7 +158,7 @@ func TestOpenLoopDoesNotLetTheServerSlowTheLoad(t *testing.T) {
 func TestOpenLoopShedsRatherThanBlocks(t *testing.T) {
 	const n = 60
 	start := time.Now()
-	samples, shed := driveOpenLoop(context.Background(), 1000, n, 2, func(int) {
+	samples, shed := Drive(context.Background(), 1000, n, 2, func(int) {
 		time.Sleep(30 * time.Millisecond)
 	})
 	elapsed := time.Since(start)
@@ -183,7 +183,7 @@ func TestOpenLoopRespectsCancellation(t *testing.T) {
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
 
 	start := time.Now()
-	samples, _ := driveOpenLoop(ctx, 100, 10000, 64, func(int) {})
+	samples, _ := Drive(ctx, 100, 10000, 64, func(int) {})
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("10000 samples at 100/s ran %v after cancellation at 50ms", elapsed)
 	}
@@ -212,15 +212,15 @@ func TestOpenLoopRespectsCancellation(t *testing.T) {
 //
 // What this still does not capture is stated in the report beside the number: mark
 // assist is not stop-the-world, so a request charged zero pause can still have spent
-// its time marking. That is why gcCPUShare is reported alongside and why the smoke
+// its time marking. That is why GCCPUShare is reported alongside and why the smoke
 // run's 0.05% STW sat under a doubled median.
 func TestGCPauseIsChargedPerSampleNotClassified(t *testing.T) {
-	in := []benchSample{
-		{lat: 10 * time.Millisecond, gcPause: 0},
-		{lat: 90 * time.Millisecond, gcPause: 30 * time.Millisecond},
-		{lat: 20 * time.Millisecond, gcPause: 2 * time.Millisecond},
+	in := []Sample{
+		{Lat: 10 * time.Millisecond, GCPause: 0},
+		{Lat: 90 * time.Millisecond, GCPause: 30 * time.Millisecond},
+		{Lat: 20 * time.Millisecond, GCPause: 2 * time.Millisecond},
 	}
-	raw, exGC := splitByGC(in)
+	raw, exGC := SplitByGC(in)
 	if len(raw) != 3 || len(exGC) != 3 {
 		t.Fatalf("split %d raw / %d ex-GC, want 3/3: every sample appears in both", len(raw), len(exGC))
 	}
@@ -239,12 +239,12 @@ func TestGCPauseIsChargedPerSampleNotClassified(t *testing.T) {
 	// rounding and a pause straddling the boundary can cross over. Clamping at zero
 	// rather than letting a negative latency into a distribution that gets sorted
 	// and quantiled.
-	if _, ex := splitByGC([]benchSample{{lat: time.Millisecond, gcPause: 5 * time.Millisecond}}); ex[0] != 0 {
+	if _, ex := SplitByGC([]Sample{{Lat: time.Millisecond, GCPause: 5 * time.Millisecond}}); ex[0] != 0 {
 		t.Errorf("over-charged sample = %v, want 0 rather than a negative latency", ex[0])
 	}
 
-	if r, e := splitByGC(nil); len(r) != 0 || len(e) != 0 {
-		t.Errorf("splitByGC(nil) = %v, %v; want empty", r, e)
+	if r, e := SplitByGC(nil); len(r) != 0 || len(e) != 0 {
+		t.Errorf("SplitByGC(nil) = %v, %v; want empty", r, e)
 	}
 }
 
@@ -259,9 +259,9 @@ func TestGCPauseIsChargedPerSampleNotClassified(t *testing.T) {
 // obvious conclusion being that the collector is cheap here, which the assist number
 // contradicts.
 func TestGCCPUShareIsAFraction(t *testing.T) {
-	share := gcCPUShare()
+	share := GCCPUShare()
 	if share < 0 || share > 1 {
-		t.Errorf("gcCPUShare() = %v, want a fraction in [0,1]", share)
+		t.Errorf("GCCPUShare() = %v, want a fraction in [0,1]", share)
 	}
 }
 
@@ -270,7 +270,7 @@ func TestGCCPUShareIsAFraction(t *testing.T) {
 // in place would reorder samples whose order still carries the send sequence.
 func TestSummarizeDoesNotMutateTheCaller(t *testing.T) {
 	in := []time.Duration{3, 1, 2}
-	summarize(in)
+	Summarize(in)
 	if in[0] != 3 || in[1] != 1 || in[2] != 2 {
 		t.Errorf("summarize sorted the caller's slice: %v", in)
 	}
@@ -317,12 +317,12 @@ func TestSaturationIsTheFirstRungPastTwiceTheUnloadedMedian(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sat := saturationRate(tc.rates, tc.p50s, unloaded)
+			sat := SaturationRate(tc.rates, tc.p50s, unloaded)
 			if sat != tc.wantSat {
-				t.Errorf("saturationRate = %v, want %v", sat, tc.wantSat)
+				t.Errorf("SaturationRate = %v, want %v", sat, tc.wantSat)
 			}
-			if hl := headlineRate(tc.rates, sat); hl != tc.wantHL {
-				t.Errorf("headlineRate = %v, want %v", hl, tc.wantHL)
+			if hl := HeadlineRate(tc.rates, sat); hl != tc.wantHL {
+				t.Errorf("HeadlineRate = %v, want %v", hl, tc.wantHL)
 			}
 		})
 	}

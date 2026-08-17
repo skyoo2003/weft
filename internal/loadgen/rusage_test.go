@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-package main
+package loadgen
 
 import (
 	"runtime"
@@ -21,8 +21,8 @@ import (
 // written about it and fail this one, which is the failure mode worth catching:
 // a working-set verdict resting on a number that never changes.
 func TestProcFaultsCountsMinorFaultsOnTouch(t *testing.T) {
-	before := procFaults()
-	if before == (procFaultCounts{}) {
+	before := ProcFaults()
+	if before == (FaultCounts{}) {
 		// The non-unix stub reports zeros by design, the same way maxRSS does.
 		// Nothing below can distinguish that from a broken read, so say so
 		// rather than assert against a platform that has no answer.
@@ -39,12 +39,12 @@ func TestProcFaultsCountsMinorFaultsOnTouch(t *testing.T) {
 	}
 	runtime.KeepAlive(buf)
 
-	after := procFaults()
-	if after.minor <= before.minor {
+	after := ProcFaults()
+	if after.Minor <= before.Minor {
 		t.Errorf("minor faults %d -> %d after touching %d MiB; the counter is not moving",
-			before.minor, after.minor, n>>20)
+			before.Minor, after.Minor, n>>20)
 	}
-	if after.major < before.major {
+	if after.Major < before.Major {
 		t.Errorf("fault counters went backwards: %+v -> %+v", before, after)
 	}
 }
@@ -56,10 +56,10 @@ func TestProcFaultsCountsMinorFaultsOnTouch(t *testing.T) {
 // runtime itself before the first request is sent, and a report quoting the
 // absolute number would attribute all of that to the load.
 func TestProcFaultsSubIsPerField(t *testing.T) {
-	a := procFaultCounts{minor: 100, major: 20, nvcsw: 7, nivcsw: 3}
-	b := procFaultCounts{minor: 40, major: 5, nvcsw: 2, nivcsw: 1}
-	got := a.sub(b)
-	want := procFaultCounts{minor: 60, major: 15, nvcsw: 5, nivcsw: 2}
+	a := FaultCounts{Minor: 100, Major: 20, Nvcsw: 7, Nivcsw: 3}
+	b := FaultCounts{Minor: 40, Major: 5, Nvcsw: 2, Nivcsw: 1}
+	got := a.Sub(b)
+	want := FaultCounts{Minor: 60, Major: 15, Nvcsw: 5, Nivcsw: 2}
 	if got != want {
 		t.Errorf("sub = %+v, want %+v", got, want)
 	}
