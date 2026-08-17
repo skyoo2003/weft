@@ -35,3 +35,40 @@ func maxRSS() int64 {
 	}
 	return int64(ru.Maxrss) * 1024 //nolint:unconvert // int32 on 32-bit unix
 }
+
+// procFaults reads the counters that say what a load test was waiting on.
+//
+// Unlike Maxrss these need no unit branch: all four are plain counts on every
+// unix. What they are counts *of* is the part worth stating, because milestone
+// 5's verdict turns on telling them apart.
+//
+//	minor   a page the kernel already had — the mapping was in the page cache,
+//	        and the cost is a trap and a PTE write, hundreds of nanoseconds
+//	major   a page the kernel had to fetch — the cost is the storage device,
+//	        four to five orders of magnitude more
+//	nvcsw   the process yielded: it blocked on something and gave up its core
+//	nivcsw  the scheduler took the core away, which is what over-subscription
+//	        looks like from inside the process
+//
+// A tail dominated by major faults is a storage problem, a tail dominated by
+// nivcsw is a concurrency problem, and a tail with neither is the collector's or
+// the code's. That is the whole discrimination the plan's section 1 asks for, and
+// none of it is visible in latency alone.
+//
+// Process-wide and monotonic, so a run's figure is always a difference between two
+// snapshots — see sub. Reading them costs one syscall, which is why this is called
+// once around a run rather than once around a request.
+func procFaults() procFaultCounts {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		return procFaultCounts{}
+	}
+	// int64 conversions for the same reason maxRSS needs them: these fields are
+	// int64 on 64-bit unix and int32 on linux/386 and linux/arm.
+	return procFaultCounts{
+		minor:  int64(ru.Minflt), //nolint:unconvert // int32 on 32-bit unix
+		major:  int64(ru.Majflt), //nolint:unconvert // int32 on 32-bit unix
+		nvcsw:  int64(ru.Nvcsw),  //nolint:unconvert // int32 on 32-bit unix
+		nivcsw: int64(ru.Nivcsw), //nolint:unconvert // int32 on 32-bit unix
+	}
+}

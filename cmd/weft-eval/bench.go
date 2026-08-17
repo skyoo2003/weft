@@ -147,6 +147,35 @@ func splitByGC(samples []benchSample) (free, hit []time.Duration) {
 	return free, hit
 }
 
+// procFaultCounts is what the kernel says a run was doing, beside what the
+// latency distribution says it cost. Both platform files return it, which is why
+// it lives here rather than behind a build tag.
+//
+// The fields are documented where they are read, in rusage_unix.go. What belongs
+// here is why the type exists at all: latency alone cannot separate a query
+// waiting on a disk from a query waiting on a core from a query doing arithmetic,
+// and milestone 5's section 1 makes a prediction that needs exactly that
+// separation.
+type procFaultCounts struct {
+	minor, major  int64
+	nvcsw, nivcsw int64
+}
+
+// sub returns the counts accumulated between two snapshots.
+//
+// Every figure the report prints is a difference. The absolute counters include
+// mapping the index, loading the query set and starting the Go runtime — all of it
+// before the first request is sent — so a report quoting them raw would charge the
+// load with the process's whole history.
+func (c procFaultCounts) sub(prev procFaultCounts) procFaultCounts {
+	return procFaultCounts{
+		minor:  c.minor - prev.minor,
+		major:  c.major - prev.major,
+		nvcsw:  c.nvcsw - prev.nvcsw,
+		nivcsw: c.nivcsw - prev.nivcsw,
+	}
+}
+
 // gcCycleMetric is the completed-collection counter. Read through runtime/metrics
 // rather than runtime.ReadMemStats, which stops the world to answer: an instrument
 // that pauses the program once per request would be measuring pauses it caused.

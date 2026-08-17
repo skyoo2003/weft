@@ -16,3 +16,12 @@ package main
 // The same split as pkg/engine's mmap: unix does the real thing, everything else
 // stays buildable.
 func maxRSS() int64 { return 0 }
+
+// procFaults reports nothing where getrusage does not exist, for the reason
+// above: a zero prints as absent, and absent is the honest answer.
+//
+// The bench report reads this to decide whether a tail is storage or scheduling.
+// On a platform that cannot answer, that question stays open rather than being
+// answered from a fabricated zero — the report prints the counters only when they
+// moved, so a run here shows a latency distribution and no fault line.
+func procFaults() procFaultCounts { return procFaultCounts{} }
