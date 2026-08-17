@@ -96,8 +96,12 @@ linters:
       - builtin$
     rules:
       # Test files are allowed the shapes that make a test readable: an ignored
-      # error on a cleanup call, a constant repeated across table rows, and a
-      # long table row.
+      # error on a cleanup call, a constant repeated across table rows, a long
+      # table row, and a helper parameter every caller happens to pass the same
+      # value for. That last one is what unparam calls dead flexibility and a
+      # test calls its subject — `commitGenerations(t, dir, sizes, dim, 12)` says
+      # at the call site what width the corpus is, and folding dim into the
+      # helper would move that fact away from the test that turns on it.
       - linters:
           - errcheck
           - gosec
@@ -105,6 +109,7 @@ linters:
           - funlen
           - gocyclo
           - lll
+          - unparam
         path: _test\.go$
 
       # G115 flags every width change in the decoder, and in the encoder that
@@ -121,10 +126,25 @@ linters:
       # Writing, every id and count converted is a position in a collection Add
       # has already capped at maxDocCount — a DocID that did not fit is a
       # document the index refused to hold.
+      #
+      # ivf.go is the same file in both directions: parseIVF sizes the centroid
+      # region in uint64 before it slices anything, decodeList refuses a document
+      # id against the segment's own count, and encodeIVF writes nlist, dim and
+      # list lengths that buildIVF derived from a corpus already capped.
       - linters:
           - gosec
         text: "G115"
-        path: pkg/engine/(segment|segments|index|merge|persist|seek)\.go$
+        path: pkg/engine/(segment|segments|index|merge|persist|seek|ivf)\.go$
+
+      # weft-eval measures rather than parses, and every conversion in its extent
+      # derivation is a length or a timestamp that Go itself produced: uvLen is
+      # handed what len() returned, and vLen zigzags a Unix time. There is no file
+      # on the other side of these to lie about a width — a negative length here
+      # would be a broken runtime, not a doctored index.
+      - linters:
+          - gosec
+        text: "G115"
+        path: cmd/weft-eval/recall\.go$
 
       # decodeDocs and decodePostings are branchy and long because every branch
       # is a corruption check on a file weft did not write. Splitting them to

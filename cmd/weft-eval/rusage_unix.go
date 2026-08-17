@@ -17,13 +17,17 @@ import (
 //
 // Ru_maxrss is bytes on Darwin and kilobytes on Linux, a portability trap the
 // standard library does not paper over.
+//
+// The two conversions look unnecessary and are not: Maxrss is int64 on the
+// 64-bit targets and int32 on linux/386 and linux/arm, so unconvert is right
+// about the machine it ran on and wrong about the build.
 func maxRSS() int64 {
 	var ru syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
 		return 0
 	}
 	if runtime.GOOS == "darwin" {
-		return int64(ru.Maxrss)
+		return int64(ru.Maxrss) //nolint:unconvert // int32 on 32-bit unix
 	}
-	return int64(ru.Maxrss) * 1024
+	return int64(ru.Maxrss) * 1024 //nolint:unconvert // int32 on 32-bit unix
 }
