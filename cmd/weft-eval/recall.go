@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"math"
@@ -90,6 +91,12 @@ func recall(ctx context.Context, args []string) error {
 		return err
 	}
 
+	// The baseline, before recordExtents. That derivation walks every document in
+	// the corpus, so a mark taken after it is already at the full-scan high water —
+	// and ru_maxrss is a high-water mark nothing can lower, which is what makes a
+	// "before" reading taken too late not a baseline but a second copy of "after".
+	rssBefore := maxRSS()
+
 	ext, err := recordExtents(ix, filepath.Join(*data, indexDir))
 	if err != nil {
 		return err
@@ -99,6 +106,7 @@ func recall(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	st.rssBefore = rssBefore
 	docs, _ := ix.Stats()
 	// Nothing to divide by. Every exact scan came back empty, which on a corpus
 	// that has documents means their vectors are not the width the queries carry —
@@ -141,23 +149,30 @@ func measureRecall(ctx context.Context, ix *engine.Index, ext extents, qs []quer
 		all[i] = engine.DocID(i)
 	}
 
-	st.rssBefore = maxRSS()
 	for _, q := range qs {
 		if err := ctx.Err(); err != nil {
 			return recallStats{}, err
 		}
+		// The partitioned pass first, and the order is a measurement decision rather
+		// than a tidy one. Both passes read the same docs file, and the exact scan
+		// reads all of it — so running it first leaves every page the partitioned
+		// query wants already resident, and the speedup printed below becomes a
+		// pure-CPU ratio in a report whose stated subject is what a paging system
+		// charges. This way the partitioned arm pays its own faults, and the arm it
+		// is graded against is the one that gets a warm subset of a corpus it was
+		// going to read whole regardless.
+		start := time.Now()
+		ids := ix.Nearest(q.vec, k)
+		approx := scoreTopK(ix, q.vec, ids, k)
+		st.ivfTime += time.Since(start)
+
 		// The exact answer recall is measured against: cosine over every document,
 		// no partition consulted. Scored here rather than through scorer/vector,
 		// which now reads Index.Nearest — asking it for the exact answer would be
 		// asking the approximation to grade itself.
-		start := time.Now()
+		start = time.Now()
 		exact := scoreTopK(ix, q.vec, all, k)
 		st.bruteTime += time.Since(start)
-
-		start = time.Now()
-		ids := ix.Nearest(q.vec, k)
-		approx := scoreTopK(ix, q.vec, ids, k)
-		st.ivfTime += time.Since(start)
 
 		overlap := 0
 		for _, id := range exact {
@@ -207,8 +222,10 @@ func (st recallStats) print(k, docs int, total int64) {
 	// a brute-force scan of the whole corpus beside every partitioned query, so
 	// this is the bound the two passes reached together — not the partition's
 	// working set. The two figures above it are the partition's, and that they are
-	// derived rather than observed is exactly why they are the ones published.
-	fmt.Printf("  %-34s %12s\n", "MaxRSS before", mib(float64(st.rssBefore)))
+	// derived rather than observed is exactly why they are the ones published. The
+	// "before" mark is taken before the extent derivation, which walks the corpus
+	// too; taken after it, it would be a second copy of the "after".
+	fmt.Printf("  %-34s %12s\n", "MaxRSS at startup", mib(float64(st.rssBefore)))
 	fmt.Printf("  %-34s %12s\n", "MaxRSS after (both passes)", mib(float64(st.rssAfter)))
 	fmt.Println()
 }
@@ -290,21 +307,38 @@ func vecNorm(v []float32) float64 {
 // The offsets are re-derived from the documents rather than read out of the
 // docoff table, because docoff is engine's and this is a tool. Every field's
 // encoded width is fixed by docs/FORMAT.md section 4, so the derivation is exact
-// as long as that document is — and a drift would show up as a total that
-// disagrees with the section's own size on disk, which is printed beside it.
+// as long as that document is — and recordExtents ends by comparing what it
+// derived against the docs file's own size on disk, which is the only witness a
+// re-derivation has. Without that comparison a version that adds or retypes a
+// record field shifts every page boundary here and nothing fails: the published
+// figure stays plausible and is wrong.
+//
+// The offsets are absolute into the file, not into the payload, because pages are
+// a property of the file: the frame header and the section's own document count
+// stand in front of record 0, and a boundary counted from zero instead sits ten
+// bytes off every record in the corpus.
 //
 // Exact for one segment, which is what the derivation assumes and what
 // recordExtents therefore checks. DocIDs run on across a directory's segments
-// but the docs files do not: each starts its own payload at offset zero, so a
+// but the docs files do not: each starts its own payload at the same place, so a
 // second segment's records would be laid out here on top of the first's, counted
 // as sharing pages they cannot share, and the working set would print under the
 // truth. `weft-eval build` publishes one commit and so one segment; an index
 // holding more is refused rather than measured wrong.
 type extents struct {
-	off   []int64 // one per DocID, ascending
+	off   []int64 // one per DocID, absolute into the docs file, ascending
 	size  []int64 // int64 rather than int32: a record is whatever a caller put in it
-	total int64
+	total int64   // the records' bytes, checksums included; not the file's size
 }
+
+// The docs file's framing, from docs/FORMAT.md section 3: four bytes of magic, a
+// one-byte version, a one-byte kind, then the payload, then the frame's own
+// CRC-32C. Constants rather than engine's, because engine keeps them unexported —
+// and the size check below is what catches it if they ever stop agreeing.
+const (
+	segFrameHeader = 4 + 1 + 1
+	segFrameCRC    = 4
+)
 
 func recordExtents(ix *engine.Index, path string) (extents, error) {
 	ents, err := os.ReadDir(path)
@@ -312,9 +346,11 @@ func recordExtents(ix *engine.Index, path string) (extents, error) {
 		return extents{}, fmt.Errorf("read the index directory: %w", err)
 	}
 	segs := 0
+	seg := ""
 	for _, e := range ents {
 		if strings.HasPrefix(e.Name(), segDirPrefix) {
 			segs++
+			seg = e.Name()
 		}
 	}
 	if segs != 1 {
@@ -325,7 +361,9 @@ func recordExtents(ix *engine.Index, path string) (extents, error) {
 
 	n := ix.Len()
 	e := extents{off: make([]int64, n), size: make([]int64, n)}
-	var at int64
+	// Record 0 does not start at zero: the frame header comes first, and then the
+	// document count the docs section opens with.
+	at := int64(segFrameHeader) + uvLen(uint64(n))
 	for i := range n {
 		d, ok := ix.Doc(engine.DocID(i))
 		if !ok {
@@ -343,27 +381,38 @@ func recordExtents(ix *engine.Index, path string) (extents, error) {
 		e.off[i], e.size[i] = at, sz
 		at += sz
 	}
-	e.total = at
+	e.total = at - e.off[0]
+
+	// The witness. Every byte of the file is accounted for — frame, count, records,
+	// frame checksum — so a disagreement means this tool's copy of the record
+	// layout and engine's have drifted, and every page figure below it is wrong by
+	// an unknown amount. Refused rather than printed.
+	fi, err := os.Stat(filepath.Join(path, seg, "docs"))
+	if err != nil {
+		return extents{}, fmt.Errorf("stat the docs section: %w", err)
+	}
+	if want := at + segFrameCRC; want != fi.Size() {
+		return extents{}, fmt.Errorf("the record layout in this tool sums the %s docs section to %d bytes and the file "+
+			"is %d: the derivation in recall.go has drifted from docs/FORMAT.md section 4, so every working-set figure "+
+			"below would be wrong by an unknown amount", seg, want, fi.Size())
+	}
 	return e, nil
 }
 
 func strLen(n int) int64 { return uvLen(uint64(n)) + int64(n) }
 
+// uvLen and vLen take the width from the encoder rather than re-deriving it. The
+// writer they mirror does the same — segWriter.uvarint is PutUvarint's return
+// value — and that is the point: a hand-rolled zigzag is one more place for this
+// tool's arithmetic to disagree with the bytes it is measuring.
 func uvLen(v uint64) int64 {
-	n := int64(1)
-	for v >= 0x80 {
-		v >>= 7
-		n++
-	}
-	return n
+	var b [binary.MaxVarintLen64]byte
+	return int64(binary.PutUvarint(b[:], v))
 }
 
 func vLen(v int64) int64 {
-	u := uint64(v) << 1
-	if v < 0 {
-		u = ^u
-	}
-	return uvLen(u)
+	var b [binary.MaxVarintLen64]byte
+	return int64(binary.PutVarint(b[:], v))
 }
 
 // workingSet is how many bytes of records a candidate list reaches, and how many

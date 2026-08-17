@@ -95,7 +95,11 @@ func TestNearestNarrowsTheScan(t *testing.T) {
 		t.Skip("commits a 65,536-document corpus")
 	}
 	const dim = 8
-	ix, _ := commitVectors(t, ivfMinDocs*16, dim, 40)
+	// ivfMinDocs is 4·nprobe² = 16,384, so this is the 65,536 the comment above
+	// computes nlist = 256 from. It was ivfMinDocs*16, which is 262,144 and four
+	// times the corpus the surrounding prose, the skip message and narrow_test.go
+	// all describe.
+	ix, _ := commitVectors(t, ivfMinDocs*4, dim, 40)
 	defer ix.Close() //nolint:errcheck // teardown
 
 	q := make([]float32, dim)

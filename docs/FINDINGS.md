@@ -810,6 +810,17 @@ against the plan's predicted one to two minutes. Constant per commit and per mer
 never per query, and not paid at all below 16,384 documents. The partition itself is
 1.44 MiB on disk beside a 626 MiB `docs`.
 
+The `nprobe = 64` column was re-measured after a review found `nearest` counting
+empty lists against the budget. A list `ivfRefine` left with no members still sits
+at the direction it was seeded from, so it ranks high for queries near that document
+and used to spend a probe returning nothing; the corrected budget counts only lists
+with members. **The column did not move — 30,549.5 candidates per query, measured on
+this index both before the fix and after.** That is a fact about this corpus rather
+than a verdict on the guard: it says no empty list entered any query's probed set
+here, which is what 148,232 vectors over 414 lists should do. A sparse segment, or an
+ingest that leaves centroids unclaimed, is where the guard would bind — and this
+instrument would report it as recall, never as a candidate count.
+
 That floor moved from 4,096 while this milestone ran, and the move is a second
 finding about `nprobe`. The two constants are one decision: a query scans `nlist`
 centroids and then `nprobe` lists, so with `nlist = √count` it excludes nothing at
@@ -893,20 +904,33 @@ second corpus.
 ### 4.2 `nprobe` is a constant, and small segments pay for it
 
 `nlist` grows as √n, so a constant probes a shrinking share as the corpus grows —
-15% at 171k documents, 2% at ten million. That asymptotic behaviour is the whole
-reason it is a constant and not a fraction: a fraction of `nlist` scans a fixed
-share of the corpus at every size, which is a full scan with a discount. The cost
-lands at the other end. A segment with fewer than 64 lists is scanned nearly whole,
-and the answer there is simply exact — slower than it needs to be, never wrong.
+15% at 171k documents. That asymptotic behaviour is the whole reason it is a
+constant and not a fraction: a fraction of `nlist` scans a fixed share of the
+corpus at every size, which is a full scan with a discount. It shrinks only as far
+as `ivfMaxList` lets `nlist` grow, though: past 2²⁰ documents `nlist` is pinned at
+1,024 and the share floors at 64/1024 = 6.25%, so a ten-million-document segment
+decodes 625,000 records per query rather than the 200,000 an uncapped √n implies.
+The cost lands at the other end too. A segment with fewer than 64 lists is scanned
+nearly whole, and the answer there is simply exact — slower than it needs to be,
+never wrong.
 
 ### 4.3 Training cannot be cancelled
 
 It is the longest thing a `Commit` does — 68 seconds on the evaluation corpus — and
 no context reaches it, because `Commit` takes none and the golden API file admits
-exactly one new name this milestone. `Index.Nearest` has the same gap for the same
-reason: the centroid scan runs under a read lock with no poll, 2.7e6
-multiply-accumulates where the scan it replaced ran 1.14e8 between polls. Both are
-smaller than what they replaced and neither is zero.
+exactly one new name this milestone. It is also the longest thing a `Commit` holds
+the *write* lock for: `writeSegment` runs inside it, so for those 68 seconds every
+`Search`, `Doc`, `Lookup` and `Nearest` waits. Before 3b a commit's exclusive
+window was the time to encode and fsync one generation; now it is dominated by two
+argmax passes that touch no shared state at all. Both loops are per-document
+independent and would stay bit-identical partitioned by contiguous ranges, so the
+repayment is parallelism rather than a context — but the ceiling to state is the
+one a load test will find, and it is over a minute, not the write.
+
+`Index.Nearest` has the same no-context gap for a much smaller window: the centroid
+scan is 3.2e5 multiply-accumulates (414 × 768) and the list decode is a uvarint per
+candidate, 30,549 of them, where the scan it replaced ran 1.14e8 multiply-accumulates
+between polls. Smaller than what it replaced, and not zero.
 
 ### 4.4 A document missing from every list is not detected
 

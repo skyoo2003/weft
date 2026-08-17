@@ -25,16 +25,23 @@ import (
 // is whether a scorer needs a private store — not whether engine may hold a
 // structure the format defines. docs/FINDINGS.md carries the tension in full.
 //
-// The arithmetic this is bought with, at the milestone 4 scale of N = 148,232
-// vectors of width 768:
+// The arithmetic this is bought with, at the milestone 4 scale of C = 171,332
+// documents of which V = 148,232 carry a vector of width d = 768, so nlist is
+// ⌈√C⌉ = 414 and nprobe is 64:
 //
-//	build   N·nlist·d assignment + S·nlist·d·5 training ≈ 7.4e10 MAC, one or two minutes
-//	query   nlist·d + nprobe·(N/nlist)·d ≈ 2.7e6 MAC, against 1.14e8 for a full scan
+//	build   C·nlist·d assignment + S·nlist·d·5 training ≈ 8.6e10 MAC, about a minute
+//	query   nlist·d + nprobe·(V/nlist)·d ≈ 1.8e7 MAC, against 1.14e8 for a full scan
 //
-// So a query's arithmetic falls by ~42x and its record decodes by ~48x, and a
-// commit or a merge grows by a constant of a minute or two. The trade closes
-// only once nlist is comfortably past nprobe, which is what ivfMinDocs is
-// derived from; below it no partition is built.
+// The assignment pass is charged per document and not per vector, because it
+// walks the corpus to find out which documents have one; nlist comes from the
+// document count for the same reason.
+//
+// So a query's arithmetic falls by ~6x and its record decodes by about the same,
+// and a commit or a merge grows by a constant minute. Both figures are measured
+// rather than predicted — `weft-eval recall` puts the decodes at 5.6x, and
+// docs/FINDINGS.md prints the rest. The trade closes only once nlist is
+// comfortably past nprobe, which is what ivfMinDocs is derived from; below it no
+// partition is built.
 //
 // Two disciplines the rest of the file obeys without saying so again:
 //
@@ -115,11 +122,19 @@ const (
 	//
 	// A constant rather than a fraction of nlist, and that is the load-bearing
 	// part. nlist grows as √n, so a constant probes a shrinking share of the
-	// corpus as it grows — 15% at 171k documents, 2% at ten million. A fraction
-	// would scan a fixed share of the corpus at every size, which is a full scan
-	// with a discount rather than an index. The cost of the constant is at the
-	// other end: a segment with fewer than 64 lists is scanned nearly whole, and
-	// the answer there is simply exact.
+	// corpus as it grows — 15% at 171k documents. A fraction would scan a fixed
+	// share of the corpus at every size, which is a full scan with a discount
+	// rather than an index.
+	//
+	// The shrinking stops where ivfMaxList does, and that bound is twelve lines up
+	// rather than somewhere else. Past 2^20 documents nlist is pinned at 1,024, so
+	// the share floors at 64/1024 = 6.25% and stays there: at ten million documents
+	// a query still decodes 625,000 records, not the 200,000 an uncapped √n would
+	// give. Raising the cap is the answer if a corpus ever gets there, and what it
+	// buys back is measured against a linear assignment pass — see ivfMaxList.
+	//
+	// The cost of the constant is at the other end: a segment with fewer than 64
+	// lists is scanned nearly whole, and the answer there is simply exact.
 	ivfNProbe = 64
 
 	// ivfSample is how many vectors training looks at. Lloyd's cost is
@@ -272,8 +287,11 @@ func ivfSeedCentroids(sample []float32, nlist, dim int) []float32 {
 //
 // A centroid with no members keeps its previous position. Reseeding it — from
 // the largest cluster, say — is the usual repair and it needs a choice this file
-// has no deterministic way to make cheaply; an empty list simply never comes
-// back as a candidate, which costs nothing but the centroid scan it sits in.
+// has no deterministic way to make cheaply. What it costs instead is the centroid
+// scan it sits in, and nothing more, because segment.nearest counts only lists
+// with members against nprobe: an empty centroid parked at a real document's
+// direction ranks high for a query near that document, and charging it a probe
+// would quietly shrink the only screw on recall.
 func ivfRefine(cent, sample []float32, nlist, dim int) {
 	ns := len(sample) / dim
 	// float64 accumulators, for the reason scorer/vector's dot gives: a centroid
@@ -342,6 +360,13 @@ func ivfNearestCentroid(cent []float32, nlist, dim int, v []float32) int {
 // ivfDot accumulates in float64 for the reason scorer/vector's dot does: the
 // inputs are float32 and the widths are in the hundreds, so repeated float32
 // rounding would cost real precision. No context poll — see the file comment.
+//
+// arm64 compiles this to one FMADDD where amd64 emits a multiply and an add, and
+// here that is free rather than a determinism hazard: two float32 values widened
+// to float64 have a product of at most 48 significand bits, which float64 holds
+// exactly, so there is no intermediate rounding for the fusion to skip. Every
+// architecture gets the same sum. ivfNormalizeSum below squares float64s and does
+// not have that luxury.
 func ivfDot(a, b []float32) float64 {
 	var sum float64
 	for i, c := range a {
@@ -375,10 +400,19 @@ func ivfNormalize(dst, v []float32) bool {
 
 // ivfNormalizeSum writes the unit-length direction of a float64 accumulator into
 // a float32 centroid, leaving it untouched if the accumulator has no direction.
+//
+// The square goes through an explicit conversion, which is the one thing that
+// stops a compiler fusing it into the addition. Unlike ivfDot's, this product is
+// float64 × float64 and does not fit a float64 exactly, so a fused multiply-add
+// rounds once where a separate multiply and add round twice — and arm64 emits
+// FMADDD here while amd64 emits MULSD and ADDSD. The norm then differs by an ULP
+// between architectures, and this is the only float64 multiply on the path from a
+// corpus to the bytes on disk, which is the property FINDINGS publishes a sha256
+// for. One conversion is cheaper than an asterisk on that claim.
 func ivfNormalizeSum(dst []float32, sum []float64) {
 	var sq float64
 	for _, c := range sum {
-		sq += c * c
+		sq += float64(c * c)
 	}
 	n := math.Sqrt(sq)
 	if n == 0 || math.IsNaN(n) || math.IsInf(n, 0) {
@@ -412,24 +446,17 @@ func ivfNormalizeSum(dst []float32, sum []float64) {
 // partition, or a query of another width. A guard here would be four conditions
 // none of which can be false, on the per-query path.
 func ivfOrder(cent []float32, nlist, dim int, v []float32) []int {
-	type ranked struct {
-		list int
-		dot  float64
-	}
-	all := make([]ranked, nlist)
+	dots := make([]float64, nlist)
+	out := make([]int, nlist)
 	for j := range nlist {
-		all[j] = ranked{j, ivfDot(cent[j*dim:(j+1)*dim], v)}
+		dots[j], out[j] = ivfDot(cent[j*dim:(j+1)*dim], v), j
 	}
-	slices.SortFunc(all, func(a, b ranked) int {
-		if c := cmp.Compare(b.dot, a.dot); c != 0 {
+	slices.SortFunc(out, func(a, b int) int {
+		if c := cmp.Compare(dots[b], dots[a]); c != 0 {
 			return c
 		}
-		return cmp.Compare(a.list, b.list)
+		return cmp.Compare(a, b)
 	})
-	out := make([]int, nlist)
-	for i, r := range all {
-		out[i] = r.list
-	}
 	return out
 }
 
@@ -459,20 +486,33 @@ func ivfOrder(cent []float32, nlist, dim int, v []float32) []int {
 // ordinary recall loss, which is exactly the failure this structure must not be
 // allowed to hide.
 
-// ivfListLen is the encoded size of one list, checksum included. It has to agree
-// with what encodeIVF writes below it; the decoder's offset check is what proves
-// the two still do.
-func ivfListLen(l []DocID) int {
-	n := crc32.Size
+// ivfDeltas hands each id in l to f as the number the encoding writes for it: the
+// id itself for the first, the gap from its predecessor for the rest.
+//
+// One walker rather than one per caller, because ivfListLen has to agree with
+// encodeIVF byte for byte — the offset table is computed from the first and filled
+// by the second — and the drift if they stop agreeing is the invisible kind. Every
+// list would fail its own seeded checksum, the reader would fall back to the whole
+// segment, and the answer would stay correct at exactly the cost this section
+// exists to remove. Only Scrub would say so.
+func ivfDeltas(l []DocID, f func(delta uint64)) {
 	prev := uint64(0)
 	for i, id := range l {
 		d := uint64(id)
 		if i > 0 {
 			d -= prev
 		}
-		n += uvarintLen(d)
+		f(d)
 		prev = uint64(id)
 	}
+}
+
+// ivfListLen is the encoded size of one list, checksum included. It has to agree
+// with what encodeIVF writes below it; the decoder's offset check is what proves
+// the two still do.
+func ivfListLen(l []DocID) int {
+	n := crc32.Size
+	ivfDeltas(l, func(d uint64) { n += uvarintLen(d) })
 	return n
 }
 
@@ -502,15 +542,7 @@ func encodeIVF(w *segWriter, b ivfBuild) {
 	}
 	for j, l := range b.lists {
 		w.beginUnit(uint64(j))
-		prev := uint64(0)
-		for i, id := range l {
-			if i == 0 {
-				w.uvarint(uint64(id))
-			} else {
-				w.uvarint(uint64(id) - prev)
-			}
-			prev = uint64(id)
-		}
+		ivfDeltas(l, w.uvarint)
 		w.endUnit()
 	}
 }
@@ -521,10 +553,11 @@ func encodeIVF(w *segWriter, b ivfBuild) {
 // The centroids are the one thing decoded rather than left as bytes, and the
 // reason is that a query scans all of them: reading them out of the mapping
 // would mean a Float32frombits per component per query, where decoding once at
-// Open costs nlist × dim × 4 bytes of heap. That is 1.13 MB for the milestone 4
-// corpus and it is bounded by ivfMaxList × dim rather than by the corpus, so the
-// "heap does not scale with the corpus" line still holds — it scales with its
-// square root, and then stops.
+// Open costs nlist × dim × 4 bytes of heap. That is 1.21 MiB for the milestone 4
+// corpus — 414 × 768 × 4, nlist from the document count as ivfNList takes it —
+// and it is bounded by ivfMaxList × dim rather than by the corpus, so the "heap
+// does not scale with the corpus" line still holds: it scales with its square
+// root, and then stops.
 type ivfSection struct {
 	name  string
 	nlist int
@@ -566,17 +599,29 @@ func parseIVF(r *segReader, count, vecDim int) (ivfSection, error) {
 		}
 		return x, r.done()
 	}
+	// Lists but no width. buildIVF returns no partition at all for dim <= 0, so
+	// this describes nothing the writer produces — and it is not caught by the
+	// comparison below, because a segment holding no vectors claims width zero in
+	// meta too and the two agree. Every centroid in such a section would tie at
+	// an inner product of zero, which makes the probe set arbitrary rather than
+	// ranked.
+	if dim == 0 {
+		return ivfSection{}, fmt.Errorf("%s: %d lists whose centroids have no width: %w", r.name, nlist, ErrCorrupt)
+	}
 	// The partition indexes this segment's vectors, so its width is the width
 	// meta claims. Disagreement means the two were written by different commits.
 	if dim != vecDim {
 		return ivfSection{}, fmt.Errorf("%s: centroids are %d wide, %s says the corpus is %d: %w",
 			r.name, dim, metaFile, vecDim, ErrCorrupt)
 	}
-	// In uint64: on a 32-bit build nlist·dim·4 for a wide embedding passes what
-	// an int holds, and a wrapped product would slice a region shorter than the
-	// centroids it is about to be read as.
-	need := uint64(nlist) * uint64(dim) * 4
-	if need > uint64(len(r.b)-r.off) {
+	// Division rather than multiplication, and that is the whole of the guard.
+	// dim comes off meta ranged only against maxInt, so nlist·dim·4 overflows
+	// uint64 for a wide enough claim — at nlist 1024 and dim 2^52 it wraps to
+	// exactly zero — and the wrapped product passes this check. What follows is
+	// make([]float32, nlist*dim) on a product that overflowed an int too, which
+	// panics in a package whose first line promises it never does. A quotient
+	// cannot wrap, and nlist is at least one here.
+	if uint64(dim) > uint64(len(r.b)-r.off)/4/uint64(nlist) {
 		return ivfSection{}, fmt.Errorf("%s: %d centroids of width %d do not fit in %d remaining bytes: %w",
 			r.name, nlist, dim, len(r.b)-r.off, ErrCorrupt)
 	}

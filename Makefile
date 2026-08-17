@@ -174,7 +174,7 @@ recall:
 	@if [ ! -d $(EVAL_DATA)/index ]; then \
 		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; \
 	else \
-		go run ./cmd/weft-eval recall; \
+		go run ./cmd/weft-eval recall -data $(EVAL_DATA); \
 	fi
 
 # Everything milestone 4 publishes: the degeneracy diagnostic, the frozen arms, the

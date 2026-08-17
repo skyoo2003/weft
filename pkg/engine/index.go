@@ -448,9 +448,13 @@ func (ix *Index) Lookup(term string) []Posting {
 //
 // ponytail: the whole walk runs under one read lock and cannot be cancelled,
 // because Query carries no context here and Nearest is called from inside a
-// scorer that polls its own. The uncancellable part is the centroid scan,
-// nlist × dim multiply-accumulates — 2.7e6 on the milestone 4 corpus, against
-// the 1.14e8 the scan it replaces used to run between polls. Give it a context
+// scorer that polls its own. Two things are inside that window and the second is
+// the larger: the centroid scan, nlist × dim multiply-accumulates, 3.2e5 on the
+// milestone 4 corpus; and the decode of up to nprobe inverted lists per segment,
+// which is a uvarint and a bounds check per candidate — 30,549 of them at the
+// same operating point, and a corpus-sized slice on the paths with no partition
+// to narrow with. Against the 1.14e8 multiply-accumulates the scan it replaces
+// used to run between polls, both are small; neither is zero. Give it a context
 // when a profile shows a query waiting on it, which would be a signature change
 // and therefore a visible one.
 func (ix *Index) Nearest(v []float32, k int) []DocID {

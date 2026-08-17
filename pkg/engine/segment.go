@@ -124,7 +124,8 @@ type segSection struct {
 	//
 	// What stays lazy is re-deriving each offset from the document it points at,
 	// which scrubDocs does as it walks. That one is the size of the corpus, and
-	// it is Scrub's. Scrub verifies all six frames besides.
+	// it is Scrub's. Scrub verifies every frame the segment's version owes
+	// besides — six for a v2 segment, seven for a v3 one.
 	eager bool
 }
 
@@ -164,13 +165,41 @@ var segSections = []segSection{
 // rather than an older segment, and a v2 segment with an ivf file beside it is
 // a file nothing names.
 //
-// Two versions, so a prefix is the whole rule; a third that removed a section
-// rather than appending one would need a list per version instead.
+// A count per version rather than a prefix of the newest one, and that is not
+// bookkeeping. "Everything before the last entry" reads as v2's list only while
+// v3 is the newest: a version 4 appending an eighth section — the very migration
+// §7.7 of FORMAT.md recommends — would hand v2 seven sections and have openSegment
+// demand an ivf file from a milestone 3a segment. Adding a version is one line
+// here; one that removes or reorders a section needs a list rather than a length.
+//
+// The capacity is cut with the returned length, so a caller that appends to this
+// cannot write through into segSections itself — which every other reader of that
+// list, writeSegment and Commit's ownership check included, would then see.
 func segSectionsFor(version uint64) []segSection {
-	if version < formatVersion {
-		return segSections[:len(segSections)-1]
+	n := len(segSections)
+	if version < 3 {
+		n = 6 // v2: meta, docs, postings, terms, docoff, keys — ivf came with v3
 	}
-	return segSections
+	return segSections[:n:n]
+}
+
+// ivfReader is the ivf section's reader out of a list opened for one segment, or
+// nil for a version that carries no partition.
+//
+// By kind rather than by ordinal, because openSegment and scrubSegment both need
+// it and a literal index would be the same magic number in two files. Reordering
+// segSections is a refactor with no format change, and it would silently hand
+// parseIVF the keys payload — reported as damage in the ivf file, which is intact.
+func ivfReader(rs []*segReader) *segReader {
+	for i, s := range segSections {
+		if s.kind == kindIVF {
+			if i < len(rs) {
+				return rs[i]
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -233,9 +262,9 @@ func newSegWriter(root *os.Root, name string, kind byte) (*segWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 32 KiB rather than bufio's 4 KiB default: a segment writes six of these
-	// at once, so the buffers together stay under 200 KiB while cutting the
-	// write syscalls per section by eight.
+	// 32 KiB rather than bufio's 4 KiB default: a segment writes one of these per
+	// entry in segSections at once — seven since v3 — so the buffers together stay
+	// under 256 KiB while cutting the write syscalls per section by eight.
 	w := &segWriter{f: f, w: bufio.NewWriterSize(f, 1<<15)}
 	w.write(segMagic)
 	w.uvarint(formatVersion)
@@ -391,7 +420,8 @@ func (w *segWriter) close() error {
 }
 
 // writeSegment lays src down as one segment: every entry in segSections — meta,
-// docs, postings, terms, docoff and keys — its own framed file in segRoot.
+// docs, postings, terms, docoff, keys and ivf — its own framed file in segRoot.
+// Always the whole list, so the writer only ever produces the current version.
 //
 // Whatever lock src needs is the caller's to hold, and both callers hold ix.mu
 // for writing across the whole encode: the statistics in meta and the documents

@@ -20,10 +20,14 @@ instead.
 section and nothing else, and the fallback a segment without a partition needs —
 *every id is a candidate* — is the same one a pending segment and a segment below
 16,384 documents already need. So reading v2 costs a branch that had to exist
-anyway. `Index.Merge` is the converter in practice: it rewrites the run it
-collapses with the current writer, so a v2 generation is upgraded by the
-maintenance an index already performs, with no migration command and no directory
-that has to be rebuilt.
+anyway. `Index.Merge` is the only thing that upgrades one: it rewrites the run it
+collapses with the current writer, so no migration command and no rebuilt
+directory is needed. What it is not is automatic — `Merge` does nothing below nine
+segments, weft never calls it for the caller, and past the ceiling it rewrites only
+the oldest run. A v2 index of one to eight segments therefore stays v2 for as long
+as nobody adds to it, and answers vector queries with every id as a candidate. That
+is exact and slow, which is the whole reason the reader was affordable; it is not a
+background upgrade.
 
 What v1 could not express, and why the change was bytes rather than code: its
 `docs` section was a bare run of variable-length records and its key map was
@@ -324,7 +328,13 @@ Four decisions here are load-bearing:
 - **The section is always written**, `nlist = 0` when the segment holds fewer than
   16,384 documents or no vectors. A section list that varied with the corpus would
   make the rejection table above say "may or may not be here", and every reader
-  and the first-commit ownership check would have to know which.
+  and the first-commit ownership check would have to know which. `nlist = 0` means
+  *every id in the segment is a candidate* — with one exception, and it is a
+  different case rather than a fourth spelling of this one: a segment whose `meta`
+  claims no vector width at all contributes **no** candidates, because a scorer
+  skips a document with no vector before it compares widths, so those ids can
+  produce neither a score nor a width-mismatch error, only a decode of every record
+  in the segment.
 - **Spherical, not plain L2.** Vectors are normalized before training and the
   assignment maximizes an inner product. Ranking is by cosine, and partitioning by
   raw L2 would gather the documents with the largest norms into one list
@@ -346,8 +356,10 @@ count — and then clamped once more to the number of vectors training actually
 sampled, because k-means with more centroids than points has no fixed point.
 `nprobe` is a constant 64 and is not configurable; `Nearest` raises it on
 its own when a query would otherwise return fewer than *k* candidates, so "at
-least k" is a contract rather than a tuning exercise. Both numbers are the
-reader's policy and neither is stored, so changing `nprobe` needs no rebuild.
+least k" is a contract rather than a tuning exercise. `nprobe` is the reader's
+policy and is not stored, so changing it needs no rebuild. `nlist` is the
+writer's: it is the section's first field, and the centroid array and both tables
+are sized by it, so changing how it is derived rewrites every segment.
 
 **Damage in a list costs speed, not availability.** A list that fails its own
 checksum makes the whole segment behave as though it had no partition: every id
@@ -387,7 +399,8 @@ plausible but breaks an invariant a scorer relies on.
 | A `docoff` or `keys` count disagreeing with `meta` | The seek tables and the statistics BM25 trusts would be describing different corpora |
 | A unit whose checksum does not match, seeded with what names it | Covers damage no semantic rule can see — a flipped byte of document text is invisible to every other check here — and covers a record reached through a damaged offset, which would otherwise decode healthily under someone else's id |
 | Two sections of one segment declaring different format versions | Two versions are accepted, so "every frame says the same number" stopped being enforced by the version check itself. A segment whose `meta` says 3 and whose `docs` says 2 passes every frame check individually and describes nothing a writer produced — and the section list was chosen from one of those two numbers |
-| A v3 segment with no `ivf` file, or a `nlist` above 1024, or centroids not as wide as `meta`'s vectors, or a member count above the segment's document count, or the counts summing past it | The version fixes the section list, and the rest are states the writer cannot produce: one document belongs to at most one list, so the counts partition the segment |
+| A v3 segment with no `ivf` file, or a `nlist` above 1024, or centroids not as wide as `meta`'s vectors, or of no width at all beside a non-zero `nlist`, or a member count above the segment's document count, or the counts summing past it | The version fixes the section list, and the rest are states the writer cannot produce: one document belongs to at most one list, so the counts partition the segment. A width of zero is the one that the width comparison alone misses, because a segment holding no vectors claims zero in `meta` too and the two agree |
+| Centroids whose count times their width would not fit in the bytes that follow | Checked by dividing the remaining payload, not by multiplying `nlist` by a width `meta` bounds only at `maxInt`: that product wraps a `uint64`, and a wrapped product is a check that passes and an allocation that panics |
 | A non-finite centroid component | It would poison every comparison it takes part in, and the ranking sorts NaN last rather than refusing it — so the query would silently never probe that list |
 | An `ivf` list not strictly ascending, naming a document past the segment, or failing its seeded checksum | Refused **by `Scrub`**. On the read path the same conditions make the segment answer as though it had no partition, because a slow exact answer beats an error — see D-006 |
 | A generation of `0` or `MaxUint64` | The counter advances one commit at a time from a first commit that publishes `1`, so neither end is a state a writer produced. `0` describes a commit that never happened: accepting it would load a foreign layout, and let the next `Commit` publish over it and then sweep away a `seg-000000` weft never wrote. `MaxUint64` is what `Commit`'s `generation + 1` would wrap to zero on, aiming the pre-write `RemoveAll` at `seg-000000` and then publishing a generation below the one it replaced |
@@ -530,8 +543,9 @@ Two things that follows from, and one it does not:
    documents has none, and a damaged partition is treated as none. So "v2 is a
    segment with no partition" reuses a branch that already existed, where a
    converter would have been a command, a rebuild, and a directory in two states
-   while it ran. `Merge` then upgrades in the background, because it rewrites the
-   run it collapses with the current writer. The lesson for version 4 is the one
+   while it ran. `Merge` upgrades whatever run it collapses, but it only fires past
+   nine segments and only on the oldest run, so a small v2 index is not upgraded at
+   all — it is *read*, which was the debt. The lesson for version 4 is the one
    that made this cheap: **append a section rather than changing one**, and the
    old version stays readable by construction. A version that retypes or reorders
    an existing field gets no such discount and owes the converter.

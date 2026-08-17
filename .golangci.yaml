@@ -124,10 +124,12 @@ linters:
       # has already capped at maxDocCount — a DocID that did not fit is a
       # document the index refused to hold.
       #
-      # ivf.go is the same file in both directions: parseIVF sizes the centroid
-      # region in uint64 before it slices anything, decodeList refuses a document
-      # id against the segment's own count, and encodeIVF writes nlist, dim and
-      # list lengths that buildIVF derived from a corpus already capped.
+      # ivf.go is the same file in both directions: parseIVF bounds the centroid
+      # width by dividing what is left of the payload rather than multiplying by it
+      # — a product of nlist and a width meta ranged only against maxInt wraps, and
+      # G115 does not see a multiplication — decodeList refuses a document id
+      # against the segment's own count, and encodeIVF writes nlist, dim and list
+      # lengths that buildIVF derived from a corpus already capped.
       - linters:
           - gosec
         text: "G115"
@@ -135,9 +137,9 @@ linters:
 
       # weft-eval measures rather than parses, and every conversion in its extent
       # derivation is a length or a timestamp that Go itself produced: uvLen is
-      # handed what len() returned, and vLen zigzags a Unix time. There is no file
-      # on the other side of these to lie about a width — a negative length here
-      # would be a broken runtime, not a doctored index.
+      # handed what len() returned, and vLen hands a Unix time to PutVarint. There
+      # is no file on the other side of these to lie about a width — a negative
+      # length here would be a broken runtime, not a doctored index.
       - linters:
           - gosec
         text: "G115"

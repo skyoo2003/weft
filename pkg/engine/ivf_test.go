@@ -75,6 +75,17 @@ func clusteredCorpus(n, dim, groups int) [][]float32 {
 	return out
 }
 
+// zeroCorpus is n vectors of the right width and no direction — what an embedder
+// handed an empty document returns, and what Add accepts without complaint since
+// zero is finite.
+func zeroCorpus(n, dim int) [][]float32 {
+	out := make([][]float32, n)
+	for i := range out {
+		out[i] = make([]float32, dim)
+	}
+	return out
+}
+
 // vecAt is the accessor buildIVF reads a corpus through: nil for a document
 // that carries no vector.
 func vecAt(vs [][]float32) func(int) []float32 {
@@ -283,7 +294,16 @@ func TestIVFIsNotBuiltWhereItCannotPay(t *testing.T) {
 		vs    [][]float32
 	}{
 		{"one under the floor", ivfMinDocs - 1, dim, clusteredCorpus(ivfMinDocs-1, dim, 5)},
-		{"no vectors at all", ivfMinDocs * 2, 0, make([][]float32, ivfMinDocs*2)},
+		{"corpus of no width", ivfMinDocs * 2, 0, make([][]float32, ivfMinDocs*2)},
+		// A width the corpus does establish, and not one document that can be
+		// normalized to a direction. This is the case buildIVF's `len(sample) == 0`
+		// guard answers, and the row above does not reach it: with dim = 0 the first
+		// guard returns, so the second was never exercised by anything. Without it
+		// nlist is min(nlist, 0) = 0 and ivfSeedCentroids divides ns by it — an
+		// integer divide by zero inside Commit, on a corpus Add accepts, since a
+		// zero vector is finite and sets ix.vecDim like any other.
+		{"a width but no document carrying one", ivfMinDocs * 2, dim, make([][]float32, ivfMinDocs*2)},
+		{"every vector is zero, so none has a direction", ivfMinDocs * 2, dim, zeroCorpus(ivfMinDocs*2, dim)},
 		{"empty corpus", 0, dim, nil},
 	}
 	for _, tc := range tests {
@@ -642,6 +662,51 @@ func copyIndexDir(t *testing.T, src, dst string) {
 	}
 }
 
+// TestIVFHeaderIsRefusedRatherThanTrusted is the trust boundary at the two
+// numbers everything else in the section is sized from.
+//
+// FORMAT.md section 5 opens with "none is a panic", and both rows below used to be
+// one. The centroid width arrives from meta ranged only against maxInt, so
+// nlist·dim·4 computed in uint64 wraps for a wide enough claim — at nlist 1024 and
+// dim 2^52 it wraps to exactly zero, which is smaller than any payload, so the fit
+// check passes and make() is then handed a product that overflowed an int too.
+// Dividing instead of multiplying is what makes the check unwrappable.
+//
+// A width of zero is the other one, and it slips past the width comparison rather
+// than through it: a segment holding no vectors claims width zero in meta, so zero
+// equals zero and the two agree about a section the writer cannot produce.
+func TestIVFHeaderIsRefusedRatherThanTrusted(t *testing.T) {
+	tests := []struct {
+		name         string
+		nlist, dim   uint64
+		vecDim, docs int
+	}{
+		{"a width whose product with nlist wraps uint64", ivfMaxList, 1 << 52, 1 << 52, 10},
+		{"the same wrap with a single list", 1, 1 << 62, 1 << 62, 10},
+		{"lists whose centroids have no width", 3, 0, 0, 10},
+		{"a width with no lists to give it to", 0, 8, 8, 10},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var b []byte
+			b = binary.AppendUvarint(b, tc.nlist)
+			b = binary.AppendUvarint(b, tc.dim)
+			// Room for the counts and the offset table, so nothing short-circuits on
+			// truncation before the header itself is judged.
+			b = append(b, make([]byte, tc.nlist*9)...)
+
+			// Both entry points, because Open and Scrub reach parseIVF by different
+			// routes and a panic on either is a panic.
+			if _, err := parseIVF(&segReader{name: ivfFile, b: b}, tc.docs, tc.vecDim); !errors.Is(err, ErrCorrupt) {
+				t.Errorf("parseIVF accepted nlist=%d dim=%d: got %v, want ErrCorrupt", tc.nlist, tc.dim, err)
+			}
+			if err := scrubIVF(&segReader{name: ivfFile, b: b}, tc.docs, tc.vecDim); !errors.Is(err, ErrCorrupt) {
+				t.Errorf("scrubIVF accepted nlist=%d dim=%d: got %v, want ErrCorrupt", tc.nlist, tc.dim, err)
+			}
+		})
+	}
+}
+
 // TestASegmentMixingFormatVersionsIsRefused is the check the dual reader made
 // necessary.
 //
@@ -651,7 +716,11 @@ func copyIndexDir(t *testing.T, src, dst string) {
 // writer produced — and the section list is chosen from one of those numbers, so
 // the reader would be applying v3's list to v2's bytes.
 func TestASegmentMixingFormatVersionsIsRefused(t *testing.T) {
-	for _, name := range []string{docsFile, postingsFile, termsFile, docoffFile, keysFile} {
+	// ivf included, and it is the one the milestone added: it is also the only
+	// section a v2 segment does not have, so a v2-stamped ivf beside a v3 meta is
+	// the shape that would make the reader apply v3's list to a file that claims to
+	// predate it.
+	for _, name := range []string{docsFile, postingsFile, termsFile, docoffFile, keysFile, ivfFile} {
 		t.Run(name, func(t *testing.T) {
 			dir, segDir, ix := commitSeeded(t)
 			if err := ix.Close(); err != nil {

@@ -138,8 +138,8 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 	// centroids are as wide as the corpus's vectors, and a list's ids are ranged
 	// against the segment's document count. A v2 segment has no such section and
 	// leaves the zero value, which every reader treats as no partition.
-	if len(rs) > 6 {
-		if s.ivf, err = parseIVF(rs[6], s.count, s.vecDim); err != nil {
+	if ivfR := ivfReader(rs); ivfR != nil {
+		if s.ivf, err = parseIVF(ivfR, s.count, s.vecDim); err != nil {
 			return nil, err
 		}
 	}
@@ -179,6 +179,14 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 // close releases every mapping. Safe to call twice: the slice is cleared, and
 // unmapping a region a second time would be an error at best.
 func (s *segment) close() error {
+	// The partition goes before the unmap, not after, which is the order
+	// Index.Close documents for the segments themselves and for the same reason:
+	// its offset table and payload point into a mapping that is about to go, and
+	// reading through an unmapped region is a segmentation fault rather than a
+	// panic this package could promise its way out of. Every caller holds ix.mu
+	// for writing, so nothing observes the window either way — but the window is
+	// what an early return added to the loop below would open.
+	s.ivf = ivfSection{}
 	var first error
 	for _, b := range s.maps {
 		if err := unmapFile(b); err != nil && first == nil {
@@ -187,11 +195,6 @@ func (s *segment) close() error {
 	}
 	s.maps, s.docs, s.postings = nil, nil, nil
 	s.offs, s.keys, s.terms = docOffsets{}, keyTable{}, nil
-	// The centroids are the one thing here on the Go heap rather than in a
-	// mapping, and the offset table and payload point into one that is about to
-	// go — reading through an unmapped region is a segmentation fault, not a
-	// panic this package could promise its way out of.
-	s.ivf = ivfSection{}
 	return first
 }
 
@@ -229,18 +232,27 @@ func (s *segment) nearest(v []float32, k int) []DocID {
 		return s.allIDs()
 	}
 	order := ivfOrder(s.ivf.centroids, s.ivf.nlist, s.ivf.dim, v)
-	// nprobe lists, then as many more as it takes to have k candidates. The
-	// counts were read at Open, so widening is arithmetic on a table rather than
-	// decoding lists to find out how short the answer would have been. This is
-	// what lets "at least k" be a contract the caller never has to know nprobe
-	// to rely on.
-	probe := min(ivfNProbe, len(order))
-	have := 0
-	for _, j := range order[:probe] {
-		have += s.ivf.counts[j]
-	}
-	for have < k && probe < len(order) {
-		have += s.ivf.counts[order[probe]]
+	// nprobe lists with members in them, then as many more as it takes to have k
+	// candidates. The counts were read at Open, so both are arithmetic on a table
+	// rather than decoding lists to find out how short the answer would have been.
+	// That is what lets "at least k" be a contract the caller never has to know
+	// nprobe to rely on.
+	//
+	// With members in them, and that is the load-bearing word. ivfRefine leaves a
+	// centroid that claimed nothing exactly where it was seeded — at some real
+	// document's direction, so it ranks high for a query near that document — and
+	// counting it against the budget spends a probe on a list that cannot return
+	// anything. nprobe is measured, not chosen: 64 is the smallest value that
+	// cleared the quality bar, so a query that silently probes 44 lists' worth of
+	// candidates is one whose recall nothing here reports. The widening loop is no
+	// repair for it either, since it stops at k and k is already met by the lists
+	// that do have members.
+	probe, lists, have := 0, 0, 0
+	for probe < len(order) && (lists < ivfNProbe || have < k) {
+		if n := s.ivf.counts[order[probe]]; n > 0 {
+			lists++
+			have += n
+		}
 		probe++
 	}
 

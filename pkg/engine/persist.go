@@ -605,8 +605,8 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 		return 0, fmt.Errorf("%s: meta says %d documents, %s indexes %d: %w",
 			metaFile, docCount, docoffFile, offs.n, ErrCorrupt)
 	}
-	if len(rs) > 6 {
-		if err := scrubIVF(rs[6], docCount, vecDim); err != nil {
+	if ivfR := ivfReader(rs); ivfR != nil {
+		if err := scrubIVF(ivfR, docCount, vecDim); err != nil {
 			return 0, err
 		}
 	}

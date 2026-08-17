@@ -56,6 +56,21 @@ func TestWorkingSetCountsDistinctPages(t *testing.T) {
 			off:  []int64{0, 10 * p}, size: []int64{100, 100},
 			ids: []int{0, 1}, wantBytes: 200, wantPages: 2,
 		},
+		// The two cases that pin the −1 in the last-page formula. Every layout above
+		// happens to end mid-page, so all of them pass with `(off+size)/p` too — and
+		// that formula charges an extra page for every record whose end lands exactly
+		// on a boundary, which inflates the published pages/records multiplier rather
+		// than failing anywhere.
+		{
+			name: "a record filling exactly one page is one page",
+			off:  []int64{0}, size: []int64{p},
+			ids: []int{0}, wantBytes: p, wantPages: 1,
+		},
+		{
+			name: "a record ending on a boundary mid-file is one page",
+			off:  []int64{p}, size: []int64{p},
+			ids: []int{0}, wantBytes: p, wantPages: 1,
+		},
 		{
 			name: "an id past the corpus is skipped rather than counted",
 			off:  []int64{0}, size: []int64{100},
