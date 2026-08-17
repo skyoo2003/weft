@@ -7,9 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/skyoo2003/weft/internal/eval"
 	"github.com/skyoo2003/weft/pkg/engine"
 )
 
@@ -45,6 +49,12 @@ import (
 // on a 16 KiB machine can rescale it.
 const recallPageSize = 4096
 
+// segDirPrefix is what a segment directory is named with, from docs/FORMAT.md
+// section 2. Counting them is the whole of this tool's interest in the layout —
+// engine will not say how many segments an open index has, and the extent
+// derivation below is only exact for one.
+const segDirPrefix = "seg-"
+
 func recall(ctx context.Context, args []string) error {
 	var k, queries int
 	var anySnapshot bool
@@ -75,56 +85,79 @@ func recall(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// Only the queries that carry a vector. Without query-vectors.jsonl every
-	// query here would be a no-op and the command would print a perfect recall
-	// over zero measurements, which is the failure mode `run` already warns
-	// about for the vector arm.
-	type queryVec struct {
-		id  string
-		vec []float32
-	}
-	var withVec []queryVec
-	for _, q := range qs {
-		if len(q.Query.Vector) > 0 {
-			withVec = append(withVec, queryVec{q.ID, q.Query.Vector})
-		}
-	}
-	if len(withVec) == 0 {
-		return fmt.Errorf("no query carries a vector: %s is missing or empty, so there is nothing to measure "+
-			"the recall of (see docs/EVAL.md section 7)", queryVecFile)
-	}
-	if queries > 0 && queries < len(withVec) {
-		withVec = withVec[:queries]
-	}
-
-	ext, err := recordExtents(ix)
+	withVec, err := vectorQueries(qs, queries)
 	if err != nil {
 		return err
 	}
 
-	var (
-		hits, want   int
-		cands        int
-		ivfTime      time.Duration
-		bruteTime    time.Duration
-		bytesTouched int
-		pagesTouched int
-		worstRecall  = math.Inf(1)
-		worstQuery   string
-	)
-	rssBefore := maxRSS()
-	for _, q := range withVec {
+	ext, err := recordExtents(ix, filepath.Join(*data, indexDir))
+	if err != nil {
+		return err
+	}
+
+	st, err := measureRecall(ctx, ix, ext, withVec, k)
+	if err != nil {
+		return err
+	}
+	docs, _ := ix.Stats()
+	// Nothing to divide by. Every exact scan came back empty, which on a corpus
+	// that has documents means their vectors are not the width the queries carry —
+	// the mixed-embedding-model case. Printing NaN for the recall and +Inf for the
+	// worst query would publish that as a measurement.
+	if st.want == 0 {
+		return fmt.Errorf("no query produced an exact top-%d over %d documents: the corpus carries no vector "+
+			"of the queries' width, so there is no overlap to measure (see docs/EVAL.md section 7)", k, docs)
+	}
+	st.print(k, docs, ext.total)
+	return nil
+}
+
+// recallStats is one run's measurements. Sums and extremes only: every average
+// and every ratio is computed where it is printed, beside the label that says
+// what it means.
+type recallStats struct {
+	n            int
+	hits, want   int
+	cands        int
+	ivfTime      time.Duration
+	bruteTime    time.Duration
+	bytesTouched int
+	pagesTouched int
+	worstRecall  float64
+	worstQuery   string
+	rssBefore    int64
+	rssAfter     int64
+}
+
+// measureRecall runs both passes over every query: what the partition answers,
+// and the exact scan it is graded against.
+func measureRecall(ctx context.Context, ix *engine.Index, ext extents, qs []queryVec, k int) (recallStats, error) {
+	st := recallStats{n: len(qs), worstRecall: math.Inf(1)}
+	// The exact scan's id list, built once. It is every id in the index and the
+	// index does not change under this loop, so rebuilding it per query would put
+	// a corpus-sized allocation inside the very timing it is being compared with.
+	all := make([]engine.DocID, ix.Len())
+	for i := range all {
+		all[i] = engine.DocID(i)
+	}
+
+	st.rssBefore = maxRSS()
+	for _, q := range qs {
 		if err := ctx.Err(); err != nil {
-			return err
+			return recallStats{}, err
 		}
+		// The exact answer recall is measured against: cosine over every document,
+		// no partition consulted. Scored here rather than through scorer/vector,
+		// which now reads Index.Nearest — asking it for the exact answer would be
+		// asking the approximation to grade itself.
 		start := time.Now()
-		exact := bruteTopK(ix, q.vec, k)
-		bruteTime += time.Since(start)
+		exact := scoreTopK(ix, q.vec, all, k)
+		st.bruteTime += time.Since(start)
 
 		start = time.Now()
 		ids := ix.Nearest(q.vec, k)
 		approx := scoreTopK(ix, q.vec, ids, k)
-		ivfTime += time.Since(start)
+		st.ivfTime += time.Since(start)
 
 		overlap := 0
 		for _, id := range exact {
@@ -132,60 +165,84 @@ func recall(ctx context.Context, args []string) error {
 				overlap++
 			}
 		}
-		hits += overlap
-		want += len(exact)
-		cands += len(ids)
+		st.hits += overlap
+		st.want += len(exact)
+		st.cands += len(ids)
 		b, p := workingSet(ext, ids)
-		bytesTouched += b
-		pagesTouched += p
+		st.bytesTouched += b
+		st.pagesTouched += p
 		if len(exact) > 0 {
-			if r := float64(overlap) / float64(len(exact)); r < worstRecall {
-				worstRecall, worstQuery = r, q.id
+			if r := float64(overlap) / float64(len(exact)); r < st.worstRecall {
+				st.worstRecall, st.worstQuery = r, q.id
 			}
 		}
 	}
-	rssAfter := maxRSS()
+	st.rssAfter = maxRSS()
+	return st, nil
+}
 
-	n := len(withVec)
-	docs, _ := ix.Stats()
-	fmt.Printf("\nrecall@%d against a brute-force scan, %d queries with vectors, %d documents\n\n", k, n, docs)
-	fmt.Printf("  %-34s %12.4f\n", "recall@"+fmt.Sprint(k), float64(hits)/float64(want))
-	fmt.Printf("  %-34s %12.4f  (query %s)\n", "worst query", worstRecall, worstQuery)
+// print is the report, and total is the whole docs section the working set is
+// read against.
+func (st recallStats) print(k, docs int, total int64) {
+	n := float64(st.n)
+	fmt.Printf("\nrecall@%d against a brute-force scan, %d queries with vectors, %d documents\n\n", k, st.n, docs)
+	fmt.Printf("  %-34s %12.4f\n", "recall@"+fmt.Sprint(k), float64(st.hits)/float64(st.want))
+	fmt.Printf("  %-34s %12.4f  (query %s)\n", "worst query", st.worstRecall, st.worstQuery)
 	fmt.Printf("  %-34s %12.1f  of %d documents (%.2f%%)\n", "candidates per query",
-		float64(cands)/float64(n), docs, 100*float64(cands)/float64(n)/float64(docs))
+		float64(st.cands)/n, docs, 100*float64(st.cands)/n/float64(docs))
 
 	fmt.Printf("\nlatency per query\n\n")
-	fmt.Printf("  %-34s %12s\n", "partitioned", (ivfTime / time.Duration(n)).Round(time.Microsecond))
-	fmt.Printf("  %-34s %12s\n", "brute force", (bruteTime / time.Duration(n)).Round(time.Microsecond))
-	if ivfTime > 0 {
-		fmt.Printf("  %-34s %11.1fx\n", "speedup", float64(bruteTime)/float64(ivfTime))
+	fmt.Printf("  %-34s %12s\n", "partitioned", (st.ivfTime / time.Duration(st.n)).Round(time.Microsecond))
+	fmt.Printf("  %-34s %12s\n", "brute force", (st.bruteTime / time.Duration(st.n)).Round(time.Microsecond))
+	if st.ivfTime > 0 {
+		fmt.Printf("  %-34s %11.1fx\n", "speedup", float64(st.bruteTime)/float64(st.ivfTime))
 	}
 
 	fmt.Printf("\nworking set per query, docs section\n\n")
-	fmt.Printf("  %-34s %12s\n", "record bytes reached", mib(float64(bytesTouched)/float64(n)))
+	fmt.Printf("  %-34s %12s\n", "record bytes reached", mib(float64(st.bytesTouched)/n))
 	fmt.Printf("  %-34s %12s  (%.0f distinct %d B pages)\n", "pages reached",
-		mib(float64(pagesTouched)/float64(n)*recallPageSize), float64(pagesTouched)/float64(n), recallPageSize)
-	fmt.Printf("  %-34s %12s\n", "whole docs section", mib(float64(ext.total)))
-	fmt.Printf("  %-34s %12s\n", "MaxRSS before", mib(float64(rssBefore)))
-	fmt.Printf("  %-34s %12s\n", "MaxRSS after", mib(float64(rssAfter)))
+		mib(float64(st.pagesTouched)/n*recallPageSize), float64(st.pagesTouched)/n, recallPageSize)
+	fmt.Printf("  %-34s %12s\n", "whole docs section", mib(float64(total)))
+	// Labelled for what it is. MaxRSS is a high-water mark and the loop above runs
+	// a brute-force scan of the whole corpus beside every partitioned query, so
+	// this is the bound the two passes reached together — not the partition's
+	// working set. The two figures above it are the partition's, and that they are
+	// derived rather than observed is exactly why they are the ones published.
+	fmt.Printf("  %-34s %12s\n", "MaxRSS before", mib(float64(st.rssBefore)))
+	fmt.Printf("  %-34s %12s\n", "MaxRSS after (both passes)", mib(float64(st.rssAfter)))
 	fmt.Println()
-	return nil
 }
 
 func mib(b float64) string { return fmt.Sprintf("%.1f MiB", b/(1<<20)) }
 
-// bruteTopK is the exact answer recall is measured against: cosine over every
-// document in the corpus, no partition consulted.
+// queryVec is a query that can be measured: an id to name the worst one with,
+// and the vector the partition is asked about.
+type queryVec struct {
+	id  string
+	vec []float32
+}
+
+// vectorQueries keeps the queries that carry a vector, at most limit of them.
 //
-// It re-implements the metric rather than calling scorer/vector, and that is the
-// point — scorer/vector now reads Index.Nearest, so asking it for the exact
-// answer would be asking the approximation to grade itself.
-func bruteTopK(ix *engine.Index, q []float32, k int) []engine.DocID {
-	all := make([]engine.DocID, ix.Len())
-	for i := range all {
-		all[i] = engine.DocID(i)
+// Without query-vectors.jsonl every query here would be a no-op and the command
+// would print a perfect recall over zero measurements, which is the failure mode
+// `run` already warns about for the vector arm — so an empty result is an error
+// rather than a report.
+func vectorQueries(qs []eval.Query, limit int) ([]queryVec, error) {
+	var withVec []queryVec
+	for _, q := range qs {
+		if len(q.Query.Vector) > 0 {
+			withVec = append(withVec, queryVec{q.ID, q.Query.Vector})
+		}
 	}
-	return scoreTopK(ix, q, all, k)
+	if len(withVec) == 0 {
+		return nil, fmt.Errorf("no query carries a vector: %s is missing or empty, so there is nothing to measure "+
+			"the recall of (see docs/EVAL.md section 7)", queryVecFile)
+	}
+	if limit > 0 && limit < len(withVec) {
+		withVec = withVec[:limit]
+	}
+	return withVec, nil
 }
 
 // scoreTopK ranks ids by cosine against q and returns the best k, with the same
@@ -235,15 +292,39 @@ func vecNorm(v []float32) float64 {
 // encoded width is fixed by docs/FORMAT.md section 4, so the derivation is exact
 // as long as that document is — and a drift would show up as a total that
 // disagrees with the section's own size on disk, which is printed beside it.
+//
+// Exact for one segment, which is what the derivation assumes and what
+// recordExtents therefore checks. DocIDs run on across a directory's segments
+// but the docs files do not: each starts its own payload at offset zero, so a
+// second segment's records would be laid out here on top of the first's, counted
+// as sharing pages they cannot share, and the working set would print under the
+// truth. `weft-eval build` publishes one commit and so one segment; an index
+// holding more is refused rather than measured wrong.
 type extents struct {
 	off   []int64 // one per DocID, ascending
-	size  []int32
+	size  []int64 // int64 rather than int32: a record is whatever a caller put in it
 	total int64
 }
 
-func recordExtents(ix *engine.Index) (extents, error) {
+func recordExtents(ix *engine.Index, path string) (extents, error) {
+	ents, err := os.ReadDir(path)
+	if err != nil {
+		return extents{}, fmt.Errorf("read the index directory: %w", err)
+	}
+	segs := 0
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), segDirPrefix) {
+			segs++
+		}
+	}
+	if segs != 1 {
+		return extents{}, fmt.Errorf("%s holds %d segments and the working set below is derived as one contiguous "+
+			"docs section, which is exact only for one: rebuild with `weft-eval build` rather than publish a figure "+
+			"that reads low", path, segs)
+	}
+
 	n := ix.Len()
-	e := extents{off: make([]int64, n), size: make([]int32, n)}
+	e := extents{off: make([]int64, n), size: make([]int64, n)}
 	var at int64
 	for i := range n {
 		d, ok := ix.Doc(engine.DocID(i))
@@ -259,7 +340,7 @@ func recordExtents(ix *engine.Index) (extents, error) {
 		}
 		sz += vLen(d.Time.Unix()) + uvLen(uint64(d.Time.Nanosecond()))
 		sz += 4 // the record's own seeded checksum
-		e.off[i], e.size[i] = at, int32(sz)
+		e.off[i], e.size[i] = at, sz
 		at += sz
 	}
 	e.total = at
@@ -303,7 +384,7 @@ func workingSet(e extents, ids []engine.DocID) (bytes, pages int) {
 		}
 		bytes += int(e.size[i])
 		first := e.off[i] / recallPageSize
-		last := (e.off[i] + int64(e.size[i]) - 1) / recallPageSize
+		last := (e.off[i] + e.size[i] - 1) / recallPageSize
 		for p := first; p <= last; p++ {
 			seen[p] = struct{}{}
 		}
