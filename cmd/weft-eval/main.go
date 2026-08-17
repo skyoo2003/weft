@@ -85,6 +85,7 @@ const (
 	cmdRun      = "run"
 	cmdSweep    = "sweep"
 	cmdWeights  = "weights"
+	cmdRecall   = "recall"
 )
 
 func main() {
@@ -113,6 +114,8 @@ func main() {
 		err = sweep(ctx, args)
 	case cmdWeights:
 		err = weights(ctx, args)
+	case cmdRecall:
+		err = recall(ctx, args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -129,7 +132,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: weft-eval <prepare|build|diagnose|run|sweep|weights> [flags]
+	fmt.Fprint(os.Stderr, `usage: weft-eval <prepare|build|diagnose|run|sweep|weights|recall> [flags]
 
   prepare   join corpus ids to Semantic Scholar for citation edges and SPECTER
             vectors. Slow (hours, rate limited) and resumable — rerun to continue.
@@ -140,6 +143,10 @@ func usage() {
   weights   discount the graph stream in fusion and see whether that recovers it.
             Weights attach to stream position, not scorer kind, so fusion still
             does not know what it is holding.
+  recall    what the approximate vector index costs and buys: overlap with a
+            brute-force scan, candidates per query, and the working set a query
+            actually reaches. nDCG cannot see a partition losing neighbours the
+            qrels never judged; this can.
 
 Run any subcommand with -h for its flags. docs/EVAL.md is the measurement design.
 `)

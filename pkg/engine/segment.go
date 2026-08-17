@@ -31,13 +31,28 @@ import (
 // stable across versions: a future reader can only reject what it cannot
 // parse if the version is always in the same place.
 const (
-	// formatVersion 2 is milestone 3's. Version 1 wrote documents as a bare run
-	// of variable-length records and rebuilt byKey by reading all of them, so
-	// neither a DocID nor a Key could reach its document without decoding every
-	// document in front of it — no arrangement of a lazy reader fixes that, only
-	// different bytes do. v1 is refused rather than migrated; D-007 records why
-	// that argument is available exactly once.
-	formatVersion = 2
+	// formatVersion 3 is milestone 3b's: version 2 plus the ivf section, with
+	// nothing else changed. Version 2 was milestone 3a's, and version 1 wrote
+	// documents as a bare run of variable-length records and rebuilt byKey by
+	// reading all of them, so neither a DocID nor a Key could reach its document
+	// without decoding every document in front of it — no arrangement of a lazy
+	// reader fixes that, only different bytes do.
+	formatVersion = 3
+
+	// minFormatVersion is the oldest version this build reads.
+	//
+	// FORMAT.md section 7.6 required a version 3 to bring either a converter or
+	// a reader that understands both, because D-007's "refuse rather than
+	// migrate" argument rested on weft having no users and was spent on v1. This
+	// is the second of those, and it is the cheap one: the fallback a v2 segment
+	// needs — no partition, every id is a candidate — is the same one a pending
+	// segment and a segment below ivfMinDocs already need, so the branch exists
+	// whether or not v2 is readable. Merge doubles as the converter, rewriting
+	// the oldest run as v3.
+	//
+	// v1 stays refused. What no reader here can express is its layout, not its
+	// version number.
+	minFormatVersion = 2
 
 	// segHeaderLen is the frame header size while the version encodes in one
 	// byte, which it does until version 128. The terms index records absolute
@@ -51,6 +66,7 @@ const (
 	kindManifest byte = 5
 	kindDocoff   byte = 6
 	kindKeys     byte = 7
+	kindIVF      byte = 8
 
 	// blockSize is how many postings share one block and one
 	// (maxDocID, maxTF, minDocLen) header on disk. The metadata is written now
@@ -108,7 +124,8 @@ type segSection struct {
 	//
 	// What stays lazy is re-deriving each offset from the document it points at,
 	// which scrubDocs does as it walks. That one is the size of the corpus, and
-	// it is Scrub's. Scrub verifies all six frames besides.
+	// it is Scrub's. Scrub verifies every frame the segment's version owes
+	// besides — six for a v2 segment, seven for a v3 one.
 	eager bool
 }
 
@@ -118,6 +135,9 @@ type segSection struct {
 // single edit rather than four that can drift apart. Milestone 3 added docoff
 // and keys through exactly that one edit, which is the claim this list was
 // written to make good on.
+// ivf is last, and that position is load-bearing rather than chronological:
+// segSectionsFor takes a version's section list as a prefix of this one, so a
+// section appended by a later format has to be appended here too.
 var segSections = []segSection{
 	{metaFile, kindMeta, true},
 	{docsFile, kindDocs, false},
@@ -125,6 +145,61 @@ var segSections = []segSection{
 	{termsFile, kindTerms, false},
 	{docoffFile, kindDocoff, true},
 	{keysFile, kindKeys, false},
+	// ivf is lazy, and the two halves of that judgement point the same way.
+	//
+	// Cost: the section is the size of the corpus — one entry per document
+	// across the inverted lists — so verifying its frame at Open is the read
+	// this milestone's predecessor removed.
+	//
+	// Consequence: unlike meta and docoff, nothing here is a number a score is
+	// computed from. Damage in a list is a wrong candidate set, and the reader
+	// answers a list that fails its own seeded checksum by falling back to every
+	// id in the segment. That is slower and not wrong, which is the trade
+	// segSection.eager exists to record. Scrub verifies the frame and walks
+	// every list.
+	{ivfFile, kindIVF, false},
+}
+
+// segSectionsFor is the section list a segment of the given format version
+// carries. The version decides the list, so a v3 segment missing ivf is damage
+// rather than an older segment, and a v2 segment with an ivf file beside it is
+// a file nothing names.
+//
+// A count per version rather than a prefix of the newest one, and that is not
+// bookkeeping. "Everything before the last entry" reads as v2's list only while
+// v3 is the newest: a version 4 appending an eighth section — the very migration
+// §7.7 of FORMAT.md recommends — would hand v2 seven sections and have openSegment
+// demand an ivf file from a milestone 3a segment. Adding a version is one line
+// here; one that removes or reorders a section needs a list rather than a length.
+//
+// The capacity is cut with the returned length, so a caller that appends to this
+// cannot write through into segSections itself — which every other reader of that
+// list, writeSegment and Commit's ownership check included, would then see.
+func segSectionsFor(version uint64) []segSection {
+	n := len(segSections)
+	if version < 3 {
+		n = 6 // v2: meta, docs, postings, terms, docoff, keys — ivf came with v3
+	}
+	return segSections[:n:n]
+}
+
+// ivfReader is the ivf section's reader out of a list opened for one segment, or
+// nil for a version that carries no partition.
+//
+// By kind rather than by ordinal, because openSegment and scrubSegment both need
+// it and a literal index would be the same magic number in two files. Reordering
+// segSections is a refactor with no format change, and it would silently hand
+// parseIVF the keys payload — reported as damage in the ivf file, which is intact.
+func ivfReader(rs []*segReader) *segReader {
+	for i, s := range segSections {
+		if s.kind == kindIVF {
+			if i < len(rs) {
+				return rs[i]
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -187,9 +262,9 @@ func newSegWriter(root *os.Root, name string, kind byte) (*segWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 32 KiB rather than bufio's 4 KiB default: a segment writes six of these
-	// at once, so the buffers together stay under 200 KiB while cutting the
-	// write syscalls per section by eight.
+	// 32 KiB rather than bufio's 4 KiB default: a segment writes one of these per
+	// entry in segSections at once — seven since v3 — so the buffers together stay
+	// under 256 KiB while cutting the write syscalls per section by eight.
 	w := &segWriter{f: f, w: bufio.NewWriterSize(f, 1<<15)}
 	w.write(segMagic)
 	w.uvarint(formatVersion)
@@ -345,7 +420,8 @@ func (w *segWriter) close() error {
 }
 
 // writeSegment lays src down as one segment: every entry in segSections — meta,
-// docs, postings, terms, docoff and keys — its own framed file in segRoot.
+// docs, postings, terms, docoff, keys and ivf — its own framed file in segRoot.
+// Always the whole list, so the writer only ever produces the current version.
 //
 // Whatever lock src needs is the caller's to hold, and both callers hold ix.mu
 // for writing across the whole encode: the statistics in meta and the documents
@@ -367,7 +443,7 @@ func writeSegment(segRoot *os.Root, src segSource) error {
 		}
 		ws[i] = w
 	}
-	meta, docs, post, terms, docoff, keys := ws[0], ws[1], ws[2], ws[3], ws[4], ws[5]
+	meta, docs, post, terms, docoff, keys, ivf := ws[0], ws[1], ws[2], ws[3], ws[4], ws[5], ws[6]
 
 	// No locking here: Commit and Merge both hold the write lock for their whole
 	// duration and sync.RWMutex is not reentrant, so taking a read lock inside
@@ -384,6 +460,21 @@ func writeSegment(segRoot *os.Root, src segSource) error {
 		encodeDocOffsets(docoff, offs, lens)
 		encodeKeys(keys, docKeys)
 		encodePostings(post, terms, src)
+		// The partition reads the source again, on its own — twice, on a stride
+		// to train and in full to assign. That is where a commit's new minute
+		// goes, and for a merge it means the corpus is decoded once more than
+		// milestone 3a decoded it.
+		//
+		// ponytail: src.doc decodes a whole record — key, text, links — to reach
+		// its vector, so the assignment pass pays for four fields to read one.
+		// A vector-only accessor on segSource would need a partial record
+		// decoder, which is the same structure a `vectors` section would make
+		// unnecessary outright; §1 of the milestone plan names that separation
+		// and Task 5 is what measures whether it is owed. Do not build the
+		// accessor before that measurement.
+		encodeIVF(ivf, buildIVF(src.count(), vecDim, func(i int) []float32 {
+			return src.doc(i).Vector
+		}))
 	}()
 
 	for i, w := range ws {
@@ -568,6 +659,17 @@ type segReader struct {
 	name string
 	b    []byte
 	off  int
+
+	// version is the format version the frame this payload came out of declared.
+	//
+	// It rides on the reader because two versions are accepted and the section
+	// list is chosen from one of them: openSegment reads meta first, takes the
+	// list from what meta says, and then requires every other section to say the
+	// same. Without it a segment whose meta says 3 and whose docs says 2 passes
+	// every check individually while describing nothing a writer produced.
+	//
+	// Zero for a reader a test built by hand, which never asks.
+	version uint64
 
 	// scratch backs the unit checksum's seed, for the reason segWriter.scratch
 	// exists: crc32.Update takes a []byte and a local array escapes, which is a
@@ -799,8 +901,9 @@ func parseFrame(name string, b []byte, kind byte) (*segReader, error) {
 	if n <= 0 || len(segMagic)+n+1 > len(body) {
 		return nil, fmt.Errorf("%s: unreadable version: %w", name, ErrCorrupt)
 	}
-	if v != formatVersion {
-		return nil, fmt.Errorf("%s: format version %d, this build reads %d: %w", name, v, formatVersion, ErrBadVersion)
+	if v < minFormatVersion || v > formatVersion {
+		return nil, fmt.Errorf("%s: format version %d, this build reads %d through %d: %w",
+			name, v, minFormatVersion, formatVersion, ErrBadVersion)
 	}
 	// The version is one byte, and only one byte. binary.Uvarint accepts
 	// overlong encodings — 0x82 0x00 also decodes to 2 — which would make the
@@ -814,7 +917,7 @@ func parseFrame(name string, b []byte, kind byte) (*segReader, error) {
 	if got := body[len(segMagic)+n]; got != kind {
 		return nil, fmt.Errorf("%s: section kind %d where %d belongs: %w", name, got, kind, ErrCorrupt)
 	}
-	return &segReader{name: name, b: body[len(segMagic)+n+1:]}, nil
+	return &segReader{name: name, b: body[len(segMagic)+n+1:], version: v}, nil
 }
 
 // decodeMeta returns the collection statistics a segment claims. The claims

@@ -796,19 +796,21 @@ func FuzzSegmentDecoding(f *testing.F) {
 		}
 		return b[segHeaderLen : len(b)-crc32.Size]
 	}
-	f.Add(payload(metaFile), payload(docsFile), payload(postingsFile), payload(termsFile), payload(docoffFile), payload(keysFile))
-	f.Add([]byte{}, []byte{}, []byte{}, []byte{}, []byte{}, []byte{})
+	f.Add(payload(metaFile), payload(docsFile), payload(postingsFile), payload(termsFile), payload(docoffFile), payload(keysFile), payload(ivfFile))
+	f.Add([]byte{}, []byte{}, []byte{}, []byte{}, []byte{}, []byte{}, []byte{})
 
-	// All six sections, in the order and the combination Scrub reads them: the
+	// All seven sections, in the order and the combination Scrub reads them: the
 	// docs walk is driven by a fuzzed offset table, and the keys section is
 	// checked against whatever that walk collected. Four of them used to be
 	// fuzzed and the two seek sections were reachable only through a real
 	// commit, which left the decoders that read arbitrary bytes for a living
-	// unfuzzed.
-	f.Fuzz(func(t *testing.T, meta, docs, postings, terms, docoff, keys []byte) {
+	// unfuzzed. ivf joins on the same reasoning: its header sizes two tables and
+	// its offset table addresses a payload, so it is three more chances to trust
+	// a number that came off disk.
+	f.Fuzz(func(t *testing.T, meta, docs, postings, terms, docoff, keys, ivf []byte) {
 		// Errors are the expected outcome for almost every input; the
 		// assertion is the absence of panics.
-		_, _, _, _ = decodeMeta(&segReader{name: metaFile, b: meta})
+		_, _, vecDim, _ := decodeMeta(&segReader{name: metaFile, b: meta})
 		offs, _ := parseDocOffsets(&segReader{name: docoffFile, b: docoff})
 		found := map[string]scrubbedKey{}
 		docLen, _, _, err := scrubDocs(&segReader{name: docsFile, b: docs}, offs, "seg", found)
@@ -817,11 +819,22 @@ func FuzzSegmentDecoding(f *testing.F) {
 		}
 		_ = verifyKeyTable(&segReader{name: keysFile, b: keys}, "seg", len(docLen), found)
 		_ = decodePostings(&segReader{name: postingsFile, b: postings}, &segReader{name: termsFile, b: terms}, docLen)
+		// Scrub's path, which walks every list, and the read path's, which
+		// decodes one on request through the fuzzed offset table. The second is
+		// reached even when the first refused, because a reader answers a bad
+		// list by falling back rather than by stopping — so the two do not cover
+		// the same bytes.
+		_ = scrubIVF(&segReader{name: ivfFile, b: ivf}, len(docLen), vecDim)
+		if x, err := parseIVF(&segReader{name: ivfFile, b: ivf}, len(docLen), vecDim); err == nil {
+			for j := range x.nlist {
+				_, _ = x.list(j)
+			}
+		}
 	})
 }
 
 func FuzzParseSection(f *testing.F) {
-	for _, kind := range []byte{kindMeta, kindDocs, kindPostings, kindTerms, kindManifest, kindDocoff, kindKeys} {
+	for _, kind := range []byte{kindMeta, kindDocs, kindPostings, kindTerms, kindManifest, kindDocoff, kindKeys, kindIVF} {
 		root, err := os.OpenRoot(f.TempDir())
 		if err != nil {
 			f.Fatal(err)

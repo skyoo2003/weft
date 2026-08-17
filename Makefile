@@ -1,6 +1,6 @@
 .PHONY: all fmt build vet test lint lint-docs spdx fuzz arch deps run example clean \
 	changelog changelog-new changelog-check docs-site release-check \
-	eval eval-full eval-data
+	eval eval-full eval-data recall
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
@@ -159,6 +159,23 @@ EVAL_DATA ?= .eval-data
 # so a published figure can be re-derived with one command.
 eval:
 	go run ./cmd/weft-eval run
+
+# Milestone 3b. What the approximate vector index costs and what it buys, which
+# `eval` cannot say: nDCG is blind to a partition dropping neighbours the qrels
+# never judged, so recall against a brute-force scan is measured separately.
+#
+# Skipped rather than failed without the data, unlike `eval`. This target exists
+# to be run by anyone reproducing the FINDINGS numbers, and a missing multi-
+# gigabyte download is not a broken checkout.
+#
+# One shell, not two: each recipe line gets its own, so an `exit 0` in the first
+# skips nothing that follows it. Same shape as `deps` above.
+recall:
+	@if [ ! -d $(EVAL_DATA)/index ]; then \
+		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; \
+	else \
+		go run ./cmd/weft-eval recall -data $(EVAL_DATA); \
+	fi
 
 # Everything milestone 4 publishes: the degeneracy diagnostic, the frozen arms, the
 # sensitivity sweep, and the fusion weight sweep behind the README's claim that no

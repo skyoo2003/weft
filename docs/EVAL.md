@@ -351,6 +351,14 @@ in 786 ms and reopened in 479 ms with matching document count and average length
 **the first time milestone 2's restore equivalence has run on a real corpus**
 rather than on fixtures.
 
+At format v3 the same corpus commits in **68 s** and reopens in 43 ms. The commit grew
+by the whole of that difference and it is one thing: training and assigning the IVF
+partition over 148,232 vectors. It is constant per commit and per merge, never per
+query. `nlist` is 414, the partition is 1.44 MiB on disk beside a 626 MiB `docs`, and
+two independent builds produce byte-identical `ivf` sections — `sha256
+bc042260…b2b6d89` both times, which is the determinism assertion milestone 3b fixed in
+advance.
+
 ### 5.4 Query vectors, and why they had to be checked twice
 
 Document vectors are free from the batch API. Query vectors are not: SPECTER embeds
@@ -832,6 +840,60 @@ in every record it writes, and `run` refuses a query vector that names anything 
 An unrecorded model is warned about rather than refused on both sides: that is what the
 committed artifacts hold, so refusing it would refuse the published measurement rather
 than a mistake.
+
+### 5.14 The approximate vector index, and the number nDCG cannot see
+
+Milestone 3b replaced `scorer/vector`'s full scan with an IVF-flat partition, so every
+number above that involves a vector arm is now produced by an approximation. That
+raises a measurement problem this document has to answer before it prints anything:
+**nDCG cannot tell a good approximation from a bad one.** A partition that loses half
+the true neighbours holds nDCG steady if the neighbours it lost were unjudged, and 50
+queries against 171,332 documents leave most of the corpus unjudged. So recall against
+an exact scan is measured separately, by `make recall`, and reported beside it.
+
+`nprobe` is the only screw and it is not configurable. The bar was fixed before the
+index existed — `text+vector` within 0.005 of 0.6233 — and the plan registered the
+response to a miss: raise `nprobe` and re-measure. It missed at the proposed 8.
+
+| `nprobe` | 8 | 16 | 32 | **64** | 96 | 128 | 160 | 256 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `text+vector` nDCG@10 | 0.6003 | 0.6095 | 0.6174 | **0.6211** | 0.6211 | 0.6205 | 0.6233 | 0.6233 |
+
+**The curve is not monotone**, and that is worth more than the chosen value: 128 scores
+below 64. Adding candidates reshuffles ties as well as adding neighbours, so recall and
+nDCG move differently on the same run — which is the whole reason both are printed.
+
+At the shipped `nprobe = 64`, measured by `weft-eval recall` over the 50 queries that
+carry a vector:
+
+| Measurement | Brute force | `nprobe = 8` | `nprobe = 64` |
+| --- | --- | --- | --- |
+| recall@10 vs exact | 1.000 | 0.850 | **0.992** |
+| worst single query | — | 0.100 | 0.800 |
+| candidates scored per query | 171,332 | 4,361 | 30,549 |
+| query latency | 577 ms | 18.5 ms | **125 ms** |
+| distinct 4 KiB pages of `docs` reached | 626.6 MiB | 34.0 MiB | **210.1 MiB** |
+
+Two things this changes about the numbers above. **The five frozen arms were
+re-measured** and four of them moved in the fourth decimal or not at all: `text`
+0.5826 unchanged, `text+vector` 0.6233 → 0.6211, `text+graph` 0.3985 unchanged,
+`text+vector+graph` 0.5005 → 0.4983, `text+vector+graph-including-seeds` 0.5451 →
+0.5448. The binding graph verdict is unmoved at `−0.1228` `[−0.1555, −0.0905]`.
+
+**One interval crossed zero and it is not buried.** What the vector scorer contributes
+over text alone was `+0.0407` `[+0.0010, +0.0798]` and is now `+0.0386` `[−0.0015,
++0.0779]`. That claim was already a hundredth of a point from undetermined at 50
+queries, and the approximation spent it. The honest statement after this milestone is
+that the vector scorer's contribution over text is **not distinguishable from zero on
+this benchmark**. It is a small enough corpus of queries that this says as much about
+the benchmark as about the scorer, which is why §5.6's coverage note and §6 both matter
+more than the point estimate.
+
+**And the exact path is still reachable.** A segment with no partition answers with
+every id it holds, so a format v2 index — which is what this directory was until
+milestone 3b rebuilt it — is scored exactly. Run against it, `text+vector` was 0.6233:
+the same corpus, read by the same build, with the approximation switched off by the
+bytes on disk rather than by a flag.
 
 ---
 

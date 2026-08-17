@@ -729,3 +729,264 @@ first: a wrong document, not an error.
 3. **`Scrub` has no schedule and no incremental form.** It reads everything.
 4. **RSS was not measured**, only the Go heap. §3 is the argument for why the two
    differ; a load test is what would show by how much.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 3b — the vector scan
+
+**Verdict: the scan is gone and the working set is not.** The approximate index
+holds quality inside the bar that was fixed before it was built, and it costs 5.6×
+less arithmetic per query. The bytes a query touches fell by 3.0×, against a
+predicted 52×. Both halves are results, and the second is the more useful: the
+prediction was wrong in a way that names what would actually fix it. Evidence:
+`pkg/engine/ivf_test.go`, `nearest_test.go`, `pkg/scorer/vector/narrow_test.go`,
+`weft-eval recall`. The format is [FORMAT.md](FORMAT.md) §4, the decision is
+[D-008](DECISIONS.md).
+
+| Pass line | Result |
+| --- | --- |
+| `text+vector` within 0.005 of 0.6233 | **holds.** 0.6211, at `nprobe = 64`. At the plan's proposed 8 it was 0.6003 and did not |
+| Recall and working set are recorded | **holds.** recall@10 = 0.992; 210 MiB per query, against a 12 MiB prediction |
+| `pkg/fusion` unchanged; `pkg/scorer` only the repayment | **holds.** 0 lines and 7 lines |
+| Two builds write identical `ivf` bytes | **holds.** `sha256 bc042260…b2b6d89`, twice |
+| v2 segments open and rank identically | **holds.** The evaluation index was v2 and scored 0.6233 unchanged |
+
+## 1. Result
+
+`nprobe` is the only screw on recall, and the plan registered in advance what to
+do if the bar was missed: raise it and re-measure. It was missed, so here is the
+curve, all of it, including the part that is not monotone.
+
+| `nprobe` | 8 | 16 | 32 | **64** | 96 | 128 | 160 | 256 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `text+vector` nDCG@10 | 0.6003 | 0.6095 | 0.6174 | **0.6211** | 0.6211 | 0.6205 | 0.6233 | 0.6233 |
+
+Two things in that table are worth more than the chosen number. **It is not
+monotone** — 128 scores below 64 — because adding candidates reshuffles ties as
+well as adding neighbours, so recall and nDCG are different quantities measured on
+the same run. And **64 of `nlist` 414 is 15% of the lists**, where the IVF
+literature expects one to ten. That is not a tuning result, it is a statement
+about the data: this corpus does not cluster tightly, and §4.1 says what that
+might be.
+
+The five arms at `nprobe = 64`, against milestone 3a on the same corpus:
+
+| Arm | Milestone 3a | Milestone 3b |
+| --- | --- | --- |
+| `text` | 0.5826 | 0.5826 |
+| `text+vector` | 0.6233 | **0.6211** |
+| `text+graph` | 0.3985 | 0.3985 |
+| `text+vector+graph` | 0.5005 | 0.4983 |
+| `text+vector+graph-including-seeds` | 0.5451 | 0.5448 |
+
+The binding graph verdict is unmoved: `−0.1228` `[−0.1555, −0.0905]`, still
+REGRESSES. **One interval did move and it is reported rather than buried.** What
+the vector scorer contributes over text alone was `+0.0407` `[+0.0010, +0.0798]`
+and is now `+0.0386` `[−0.0015, +0.0779]` — the point estimate barely moved and
+the interval now contains zero. Milestone 4's weakest published claim was already
+one hundredth of a point from undetermined; the approximation spent that
+hundredth. Anyone quoting "the vector scorer improves over text" has to quote the
+exact version, and after this milestone the honest statement is that it is not
+distinguishable from zero at 50 queries.
+
+## 2. What the numbers are
+
+Measured by `weft-eval recall` on the evaluation index: 171,332 documents, 148,232
+of them carrying a 768-dimensional vector, `nlist` 414, 50 queries.
+
+| Measurement | Brute force | `nprobe = 8` | `nprobe = 64` |
+| --- | --- | --- | --- |
+| recall@10 vs exact | 1.000 | 0.850 | **0.992** |
+| worst query | — | 0.100 | 0.800 |
+| candidates per query | 171,332 | 4,361 (2.5%) | 30,549 (17.8%) |
+| query latency | 577 ms | 18.5 ms (31.2×) | **125 ms (4.6×)** |
+| record bytes reached | 626.6 MiB | 17.8 MiB | 124.1 MiB |
+| distinct 4 KiB pages | 626.6 MiB | 34.0 MiB | **210.1 MiB** |
+| `text+vector` nDCG@10 | 0.6233 | 0.6003 | 0.6211 |
+
+And what it costs to write: **68 seconds** added to a commit of the whole corpus,
+against the plan's predicted one to two minutes. Constant per commit and per merge,
+never per query, and not paid at all below 16,384 documents. The partition itself is
+1.44 MiB on disk beside a 626 MiB `docs`.
+
+The `nprobe = 64` column was re-measured after a review found `nearest` counting
+empty lists against the budget. A list `ivfRefine` left with no members still sits
+at the direction it was seeded from, so it ranks high for queries near that document
+and used to spend a probe returning nothing; the corrected budget counts only lists
+with members. **The column did not move — 30,549.5 candidates per query, measured on
+this index both before the fix and after.** That is a fact about this corpus rather
+than a verdict on the guard: it says no empty list entered any query's probed set
+here, which is what 148,232 vectors over 414 lists should do. A sparse segment, or an
+ingest that leaves centroids unclaimed, is where the guard would bind — and this
+instrument would report it as recall, never as a candidate count.
+
+That floor moved from 4,096 while this milestone ran, and the move is a second
+finding about `nprobe`. The two constants are one decision: a query scans `nlist`
+centroids and then `nprobe` lists, so with `nlist = √count` it excludes nothing at
+all until `√count` passes `nprobe`. 4,096 was the right floor at `nprobe = 8` and
+became exactly the break-even point when the quality bar pushed `nprobe` to 64 — a
+segment sitting at the old floor offered **100%** of itself as candidates while its
+commit paid for a training and an assignment pass. The floor is now derived,
+`4·nprobe²`, the size at which a query first touches half a segment or less:
+
+| segment | 4,096 | 8,192 | 16,384 | 32,768 | 65,536 |
+| --- | --- | --- | --- | --- | --- |
+| `nlist` | 64 | 91 | 128 | 182 | 256 |
+| candidates | 100% | 76% | 48% | 41% | 27% |
+
+Nothing published above moves with it: the evaluation corpus is one segment of
+171,332 documents and partitions under either floor. What changes is the tail of an
+incremental ingest, which now stays exact instead of paying for a partition that
+excludes nothing.
+
+Two smaller numbers, from the tests rather than the corpus. The repayment in
+`scorer/vector` is **7 lines** — four removed, three added, all in the loop header
+— and every one of the twelve existing contract tests passes unmodified, which is
+what says the metric never moved. `pkg/fusion` is **0 lines**.
+
+## 3. The prediction that was wrong
+
+The plan predicted a query would touch about 12 MiB. It touches **210 MiB**, 17.5×
+that. The arithmetic behind the prediction was not wrong; the model of what a page
+costs was.
+
+The prediction assumed the working set is the vectors a query reads: `nprobe ×
+(N/nlist) × d × 4`. At the operating point that is 30,549 × 3,072 B = 89.5 MiB
+already, so a third of the gap is simply that 64 lists are probed rather than 8.
+The rest is two multipliers the prediction had no term for:
+
+- **A candidate costs a whole record, not a vector.** `Index.Doc` decodes the key,
+  the text and the links to reach the vector. 124.1 MiB of records for 89.5 MiB of
+  vectors — a 1.4× tax.
+- **A record costs whole pages.** The candidates are scattered, because `docs` is
+  laid out in DocID order and an inverted list is in centroid order, so each 4.3 KB
+  record drags in about 1.7 pages of its own. 124.1 MiB of records becomes 210.1
+  MiB of pages — another 1.7×.
+
+**The plan named the wrong repayment, and the measurement is what shows it.** The
+registered trigger was to separate a `vectors` section from `docs` once the working
+set passed twice the prediction. It passed 8.75× over, and separating `vectors`
+would buy far less than it looks: it removes the first multiplier and leaves the
+second untouched, because a 3,072-byte vector scattered across a dense array still
+straddles about 1.7 pages. Optimistically 210 MiB → 150 MiB, for a format
+migration.
+
+**What the second multiplier names is the layout, not the section.** If `docs` were
+ordered by centroid rather than by DocID, an inverted list would be contiguous and
+30,549 candidates would read 124 MiB in a few dozen sequential runs instead of
+30,549 scattered ones — page waste near zero, and readahead working for the query
+instead of against it. That is the change worth costing, and it is expensive in a
+specific way worth writing down now: DocID is positional in `docs`, `TopK` breaks
+ties on DocID, and a merge is a concatenation precisely because adjacent segments
+keep their ids. Reordering documents touches all three. It is a milestone, not a
+repayment, and it belongs to whoever measures that 210 MiB is the binding
+constraint on a real deployment rather than a number in this table.
+
+Both are recorded as debts with their triggers stated, in `scorer/vector`'s
+`ponytail:` marker and here. Neither is scheduled — [D-002](DECISIONS.md).
+
+## 4. Known costs
+
+### 4.1 The corpus does not cluster tightly, and that is about the data
+
+15% of lists probed for 0.992 recall is far off the IVF literature's one to ten
+percent. The synthetic clustered corpus in `ivf_test.go` reaches 1.000 recall at
+`nprobe = 8` of `nlist = 91`, so the algorithm is not the problem. Two candidate
+explanations, neither tested: SPECTER2 embeddings of scientific abstracts may
+genuinely occupy a space without tight clusters, or a single Lloyd run from a
+strided seed over 20,000 samples may leave centroids a k-means++ start would beat.
+**The second is testable and was deliberately not tested**, because testing it
+means tuning the build against 50 queries, which is how a benchmark gets
+overfitted. The observable that would justify it is recall at fixed `nprobe` on a
+second corpus.
+
+### 4.2 `nprobe` is a constant, and small segments pay for it
+
+`nlist` grows as √n, so a constant probes a shrinking share as the corpus grows —
+15% at 171k documents. That asymptotic behaviour is the whole reason it is a
+constant and not a fraction: a fraction of `nlist` scans a fixed share of the
+corpus at every size, which is a full scan with a discount. It shrinks only as far
+as `ivfMaxList` lets `nlist` grow, though: past 2²⁰ documents `nlist` is pinned at
+1,024 and the share floors at 64/1024 = 6.25%, so a ten-million-document segment
+decodes 625,000 records per query rather than the 200,000 an uncapped √n implies.
+The cost lands at the other end too. A segment with fewer than 64 lists is scanned
+nearly whole, and the answer there is simply exact — slower than it needs to be,
+never wrong.
+
+### 4.3 Training cannot be cancelled
+
+It is the longest thing a `Commit` does — 68 seconds on the evaluation corpus — and
+no context reaches it, because `Commit` takes none and the golden API file admits
+exactly one new name this milestone. It is also the longest thing a `Commit` holds
+the *write* lock for: `writeSegment` runs inside it, so for those 68 seconds every
+`Search`, `Doc`, `Lookup` and `Nearest` waits. Before 3b a commit's exclusive
+window was the time to encode and fsync one generation; now it is dominated by two
+argmax passes that touch no shared state at all. Both loops are per-document
+independent and would stay bit-identical partitioned by contiguous ranges, so the
+repayment is parallelism rather than a context — but the ceiling to state is the
+one a load test will find, and it is over a minute, not the write.
+
+`Index.Nearest` has the same no-context gap for a much smaller window: the centroid
+scan is 3.2e5 multiply-accumulates (414 × 768) and the list decode is a uvarint per
+candidate, 30,549 of them, where the scan it replaced ran 1.14e8 multiply-accumulates
+between polls. Smaller than what it replaced, and not zero.
+
+### 4.4 A document missing from every list is not detected
+
+`Scrub` verifies that every list decodes, that no document is in two of them, and
+that the lists fill the section. It does not check that every vector-bearing
+document is in one. A document that is not is invisible to vector queries, and the
+cost of that is recall — the same currency the index spends by design, and not
+separable from it by any rule available here. `weft-eval recall` is the instrument
+that would see it.
+
+### 4.5 Determinism rests on the absence of a generator, not on a seed
+
+There is no RNG in `ivf.go`. The training sample and the initial centroids are both
+taken on a fixed stride, which is stronger than a fixed seed — there is nothing to
+forget to seed. Its one weakness is stated where it lives: a corpus whose ordering
+is periodic with the stride is sampled from one phase of that period. Ingest order
+would have to be adversarial for that to bite.
+
+## 5. Where ANN lives, and what milestone 1 §2.2 actually asked
+
+The partition is in `pkg/engine`, and from a distance that looked like the engine
+absorbing a scorer's meaning. It is not, and the distinction is worth keeping
+because the next structure will raise it again.
+
+Milestone 1's test is whether a scorer needs a private store — whether the index is
+genuinely scorer-neutral, or whether each scorer ends up with its own copy of the
+corpus. The partition is a *section of the segment format*. It is written by the
+writer, mapped by the reader, checksummed like every other section and verified by
+`Scrub`; putting it in `scorer/vector` would have given that scorer exactly the
+private store the hypothesis forbids.
+
+What the boundary then had to answer is where the metric goes, and
+[D-008](DECISIONS.md) is that answer: `Nearest` returns `[]DocID` and computes no
+score. The engine knows the geometry — which documents are close enough to be worth
+looking at — and the scorer knows the metric. **The evidence that the line was
+drawn in the right place is the size of the diff on the other side of it: 7 lines.**
+Every rule about zero norms, non-finite queries, mixed widths and cancellation
+stayed in `vector.go` untouched, and all twelve of its tests passed without edit.
+Had the line been wrong, those rules would have had to move.
+
+The counterfactual is recorded too, because it is what would falsify this: if a
+scorer ever needs the candidates *in rank order*, or needs the centroid distances,
+`Nearest` widens to `[]Candidate` and half of a scorer is inside the engine. That
+diff would be the honest price of D-008 being wrong.
+
+## 6. Carried forward
+
+1. **The working set is 210 MiB per query and the layout is why** (§3). Not the
+   `vectors` section the plan expected — centroid-ordered `docs`, which is a
+   milestone rather than a repayment.
+2. **`text+vector − text` is now undetermined at 50 queries** (§1). Not caused by
+   this milestone alone; exposed by it.
+3. **Whether better centroids buy back `nprobe`** (§4.1) — testable, deliberately
+   untested, and the test needs a second corpus.
+4. **Neither the build nor `Nearest` can be cancelled** (§4.3).
+5. **Milestone 3's outcome sentence is now true of both paths.** The half milestone
+   3a left open — a corpus with vectors — is closed at 3.0× fewer bytes and 5.6×
+   less arithmetic per query, which is smaller than hoped and is measured rather
+   than claimed.

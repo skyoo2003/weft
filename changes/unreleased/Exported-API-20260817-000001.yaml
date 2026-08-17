@@ -1,0 +1,14 @@
+kind: Exported API
+body: 'engine.Index.Nearest(v []float32, k int) []DocID returns the DocIDs worth scoring
+  exactly for a query vector, at least k of them when the index holds that many vectors.
+  It computes no score: the engine knows which documents are geometrically plausible,
+  and the metric stays with the caller (docs/DECISIONS.md D-008). The result is ascending,
+  free of repeats, and wider than the answer — a segment with no partition offers every
+  id it holds, documents carrying no vector included, so a caller still skips what it
+  cannot score. The one thing left out is a segment holding no vectors at all: every
+  candidate it could offer is one the caller would skip, so offering them would only
+  buy a decode of the segment. It is not a promise that the exact top k are among them;
+  docs/EVAL.md section 5.14 publishes the measured recall against a brute-force scan.'
+time: 2026-08-17T00:00:01.000000000+09:00
+custom:
+  Issue: 11

@@ -1,0 +1,12 @@
+kind: Changed
+body: 'scorer/vector no longer scans the whole corpus. Its loop now reads engine.Index.Nearest,
+  which on the evaluation corpus scores 30,549 documents of 171,332 per query and returns
+  a query 4.6 times faster. The consequence a caller has to know about is that vector
+  results are now approximate: recall@10 against an exact scan is 0.992 and nDCG@10 for
+  the text+vector arm moved 0.6233 to 0.6211. Nothing about the scorer''s contract changed
+  — zero norms, non-finite queries, ErrDimMismatch and context polling all behave exactly
+  as before, and all twelve of its existing tests pass unmodified. A segment with no
+  partition is still scored exactly.'
+time: 2026-08-17T00:00:02.000000000+09:00
+custom:
+  Issue: 11

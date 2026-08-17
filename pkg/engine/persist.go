@@ -46,6 +46,13 @@ const (
 	// v1's layout made impossible rather than merely slow.
 	docoffFile = "docoff"
 	keysFile   = "keys"
+
+	// Format v3's approximate vector index: centroids, and the segment-local
+	// DocIDs assigned to each. It is what lets a vector query score a partition
+	// of the corpus rather than all of it — the half of "works past memory" that
+	// milestone 3a left open, since mapping the vectors moved them off the Go
+	// heap without reducing what a query touches.
+	ivfFile = "ivf"
 )
 
 // segDirName names the directory of one segment generation.
@@ -536,7 +543,6 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 	}
 	defer segRoot.Close()
 
-	rs := make([]*segReader, len(segSections))
 	// Every mapping is released before this returns, and nothing outliving the
 	// call points into one: a key is a string the decoder copied, a token count
 	// is an int.
@@ -546,7 +552,19 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 			unmapFile(b) //nolint:errcheck,gosec // nothing left to do about it here
 		}
 	}()
-	for i, s := range segSections {
+	// meta first and alone, for the reason openSegment gives: its frame says
+	// which sections this segment owes, and a v3 segment missing one is damage
+	// rather than an older vintage.
+	metaR, metaB, err := openSection(segRoot, metaFile, kindMeta, true)
+	if err != nil {
+		return 0, err
+	}
+	maps = append(maps, metaB)
+
+	secs := segSectionsFor(metaR.version)
+	rs := make([]*segReader, len(secs))
+	rs[0] = metaR
+	for i, s := range secs[1:] {
 		// Every frame checksum. That is the one check whose cost is the size of
 		// its section, and therefore the single difference between what Open
 		// reads and what this does: damage in bytes no decoder reaches is
@@ -556,9 +574,13 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 			return 0, err
 		}
 		maps = append(maps, b)
-		rs[i] = r
+		if r.version != metaR.version {
+			return 0, fmt.Errorf("%s: format version %d beside %s at version %d: %w",
+				s.name, r.version, metaFile, metaR.version, ErrCorrupt)
+		}
+		rs[i+1] = r
 	}
-	metaR, docsR, postR, termsR, docoffR, keysR := rs[0], rs[1], rs[2], rs[3], rs[4], rs[5]
+	docsR, postR, termsR, docoffR, keysR := rs[1], rs[2], rs[3], rs[4], rs[5]
 
 	docCount, totalLen, vecDim, err := decodeMeta(metaR)
 	if err != nil {
@@ -567,6 +589,26 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 	offs, err := parseDocOffsets(docoffR)
 	if err != nil {
 		return 0, err
+	}
+	// The partition, before the documents. It is checked against meta's numbers
+	// rather than against the documents themselves — see scrubIVF for the one
+	// thing that leaves unchecked and why — so nothing here needs the walk
+	// below to have happened first, and a segment whose ivf section is damaged
+	// is named as such rather than after a full corpus decode.
+	// meta's count is what sizes the partition's duplicate-detection bitmap and
+	// what every list's ids are ranged against, and nothing has contradicted it
+	// yet — the docs walk that would is below. A meta claiming maxDocCount would
+	// have scrubIVF allocate a byte per claimed document before anything said
+	// otherwise. docoff is already parsed and Open makes exactly this comparison,
+	// so the guard costs nothing but the line.
+	if docCount != offs.n {
+		return 0, fmt.Errorf("%s: meta says %d documents, %s indexes %d: %w",
+			metaFile, docCount, docoffFile, offs.n, ErrCorrupt)
+	}
+	if ivfR := ivfReader(rs); ivfR != nil {
+		if err := scrubIVF(ivfR, docCount, vecDim); err != nil {
+			return 0, err
+		}
 	}
 
 	docLen, sumLen, width, err := scrubDocs(docsR, offs, info.name, found)
