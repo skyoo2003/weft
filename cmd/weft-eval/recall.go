@@ -125,6 +125,7 @@ func recall(ctx context.Context, args []string) error {
 // what it means.
 type recallStats struct {
 	n            int
+	skipped      int
 	hits, want   int
 	cands        int
 	ivfTime      time.Duration
@@ -140,7 +141,7 @@ type recallStats struct {
 // measureRecall runs both passes over every query: what the partition answers,
 // and the exact scan it is graded against.
 func measureRecall(ctx context.Context, ix *engine.Index, ext extents, qs []queryVec, k int) (recallStats, error) {
-	st := recallStats{n: len(qs), worstRecall: math.Inf(1)}
+	st := recallStats{worstRecall: math.Inf(1)}
 	// The exact scan's id list, built once. It is every id in the index and the
 	// index does not change under this loop, so rebuilding it per query would put
 	// a corpus-sized allocation inside the very timing it is being compared with.
@@ -174,6 +175,22 @@ func measureRecall(ctx context.Context, ix *engine.Index, ext extents, qs []quer
 		exact := scoreTopK(ix, q.vec, all, k)
 		st.bruteTime += time.Since(start)
 
+		// A query the exact scan cannot grade is dropped from every average rather
+		// than from the numerator alone. Two reach here: a vector of the wrong
+		// width, which scoreTopK skips every document for and which Nearest answers
+		// with the whole segment, and an all-zero vector, which scorer/vector
+		// abstains on before it ever calls Nearest. Either one contributes nothing
+		// to want — so the st.want == 0 guard upstream does not fire while a valid
+		// query remains — while contributing a corpus-sized candidate list, its
+		// latency and its working set to figures that are published as per-query.
+		// Counted and printed instead, because a dropped measurement that nobody is
+		// told about is the same defect one line further on.
+		if len(exact) == 0 {
+			st.skipped++
+			continue
+		}
+		st.n++
+
 		overlap := 0
 		for _, id := range exact {
 			if slices.Contains(approx, id) {
@@ -186,10 +203,8 @@ func measureRecall(ctx context.Context, ix *engine.Index, ext extents, qs []quer
 		b, p := workingSet(ext, ids)
 		st.bytesTouched += b
 		st.pagesTouched += p
-		if len(exact) > 0 {
-			if r := float64(overlap) / float64(len(exact)); r < st.worstRecall {
-				st.worstRecall, st.worstQuery = r, q.id
-			}
+		if r := float64(overlap) / float64(len(exact)); r < st.worstRecall {
+			st.worstRecall, st.worstQuery = r, q.id
 		}
 	}
 	st.rssAfter = maxRSS()
@@ -200,7 +215,11 @@ func measureRecall(ctx context.Context, ix *engine.Index, ext extents, qs []quer
 // read against.
 func (st recallStats) print(k, docs int, total int64) {
 	n := float64(st.n)
-	fmt.Printf("\nrecall@%d against a brute-force scan, %d queries with vectors, %d documents\n\n", k, st.n, docs)
+	fmt.Printf("\nrecall@%d against a brute-force scan, %d queries graded, %d documents\n\n", k, st.n, docs)
+	if st.skipped > 0 {
+		fmt.Printf("  %-34s %12d  (no exact answer: zero-norm, or a width the corpus does not carry)\n",
+			"queries not graded", st.skipped)
+	}
 	fmt.Printf("  %-34s %12.4f\n", "recall@"+fmt.Sprint(k), float64(st.hits)/float64(st.want))
 	fmt.Printf("  %-34s %12.4f  (query %s)\n", "worst query", st.worstRecall, st.worstQuery)
 	fmt.Printf("  %-34s %12.1f  of %d documents (%.2f%%)\n", "candidates per query",

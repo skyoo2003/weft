@@ -251,11 +251,29 @@ func ivfTrainingSample(count, dim int, vecAt func(i int) []float32) []float32 {
 	stride := 1 + (count-1)/ivfSample
 	out := make([]float32, 0, min(count/stride+1, ivfSample)*dim)
 	buf := make([]float32, dim)
-	for i := 0; i < count && len(out) < ivfSample*dim; i += stride {
-		if !ivfNormalize(buf, vecAt(i)) {
-			continue
+	collect := func(step int) {
+		for i := 0; i < count && len(out) < ivfSample*dim; i += step {
+			if ivfNormalize(buf, vecAt(i)) {
+				out = append(out, buf...)
+			}
 		}
-		out = append(out, buf...)
+	}
+	collect(stride)
+	// Every strided position was a document without a usable vector, and the
+	// segment may still be full of them: 40,000 documents carrying a vector on
+	// odd ids only give a stride of 2 that lands on even ids forever. Without
+	// this the sample is empty, buildIVF returns no partition, and every vector
+	// query over that segment falls back to the full scan this file exists to
+	// remove — indistinguishable, from the outside, from a segment that
+	// legitimately holds no vectors.
+	//
+	// Only on empty, which is the line worth defending. A short sample is the
+	// stride weakness above and is priced there; falling back on short would
+	// change which vectors train the centroids for every corpus with any gap at
+	// all, and the bytes on disk with them. This cannot change an existing
+	// partition, because a corpus that reaches it has none.
+	if len(out) == 0 && stride > 1 {
+		collect(1)
 	}
 	return out
 }
@@ -627,6 +645,7 @@ func parseIVF(r *segReader, count, vecDim int) (ivfSection, error) {
 	}
 	x.nlist, x.dim = nlist, dim
 	x.centroids = make([]float32, nlist*dim)
+	var sq float64
 	for i := range x.centroids {
 		bits, err := r.u32("centroid component")
 		if err != nil {
@@ -640,6 +659,26 @@ func parseIVF(r *segReader, count, vecDim int) (ivfSection, error) {
 			return ivfSection{}, fmt.Errorf("%s: centroid component %d is %v: %w", r.name, i, c, ErrCorrupt)
 		}
 		x.centroids[i] = c
+		sq += float64(c) * float64(c)
+		// A centroid of all zeros is the NaN argument again with a quieter face.
+		// It scores zero against every query, so it sorts below any list with a
+		// positive dot and the documents assigned to it stop being reachable —
+		// a recall loss with no error anywhere, on a section whose checksum is
+		// intact. The writer cannot produce one: ivfNormalizeSum leaves a
+		// centroid at its previous position rather than zeroing it, and the seed
+		// it started from was a normalized sample vector.
+		//
+		// Zero exactly, not near-unit. A tolerance would be a constant with no
+		// measurement behind it, and one chosen a shade too tight refuses an
+		// index that is fine — the failure the check is meant to prevent, in the
+		// opposite direction. Magnitude alone biases the ordering; no magnitude
+		// removes the list from it.
+		if (i+1)%dim == 0 {
+			if sq == 0 {
+				return ivfSection{}, fmt.Errorf("%s: centroid %d has no direction: %w", r.name, i/dim, ErrCorrupt)
+			}
+			sq = 0
+		}
 	}
 
 	x.counts = make([]int, nlist)

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -96,5 +97,50 @@ func TestWorkingSetCountsDistinctPages(t *testing.T) {
 				t.Errorf("pages = %d, want %d", gotPages, tc.wantPages)
 			}
 		})
+	}
+}
+
+// TestADegenerateQueryIsNotAveragedIn is about what the report divides by.
+//
+// Two queries reach measureRecall that the exact scan cannot grade: one whose
+// vector is a width the corpus does not carry, and one whose vector is all
+// zeros — the case scorer/vector abstains on before it ever calls Nearest.
+// Both produce an empty exact answer, so neither adds to want, and the guard
+// that catches a wholly ungradeable run does not fire while one good query
+// remains. What they do add is a candidate list, a latency and a working set,
+// to three figures printed per query. The wrong-width one is the expensive
+// shape: Nearest answers a width it cannot partition with the whole segment,
+// so one such query pulls a corpus-sized candidate count into an average that
+// FINDINGS publishes as a percentage of the corpus.
+func TestADegenerateQueryIsNotAveragedIn(t *testing.T) {
+	ix := engine.New()
+	for _, v := range [][]float32{{1, 0}, {0, 1}, {1, 1}} {
+		if _, err := ix.Add(engine.Document{Key: fmt.Sprint(v), Text: "a", Vector: v}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Three records of 100 bytes. The values do not matter to what is asserted
+	// below, only that every id has an extent to be charged for.
+	ext := extents{off: []int64{0, 100, 200}, size: []int64{100, 100, 100}, total: 300}
+
+	st, err := measureRecall(t.Context(), ix, ext, []queryVec{
+		{"gradeable", []float32{1, 0}},
+		{"all-zero", []float32{0, 0}},
+		{"wrong width", []float32{1, 0, 0}},
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.n != 1 || st.skipped != 2 {
+		t.Errorf("graded %d queries and skipped %d, want 1 and 2", st.n, st.skipped)
+	}
+	// The one gradeable query's candidates and nothing else. This index holds no
+	// partition, so Nearest offers every id it has and each skipped query would
+	// have added another corpus to the sum.
+	if want := ix.Len(); st.cands != want {
+		t.Errorf("candidates = %d, want %d — a skipped query was averaged in", st.cands, want)
+	}
+	if st.bytesTouched != 300 {
+		t.Errorf("bytes touched = %d, want 300 — a skipped query reached records of its own", st.bytesTouched)
 	}
 }

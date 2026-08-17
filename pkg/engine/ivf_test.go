@@ -832,3 +832,69 @@ func TestIVFBytesAreIdenticalAcrossTwoCommits(t *testing.T) {
 		t.Errorf("two commits of one corpus produced different bytes:\n first %v\nsecond %v", first, second)
 	}
 }
+
+// TestTheTrainingSampleFindsVectorsOffTheStride is the case where the stride's
+// stated weakness stops being a sampling bias and becomes a disabled partition.
+//
+// ivfTrainingSample walks a fixed stride and skips a position whose document
+// carries no usable vector, without looking for one that does. A corpus whose
+// vectors are periodic with that stride therefore yields nothing at all: at
+// 40,000 documents the stride is 2, so vectors on odd ids are never sampled,
+// buildIVF's empty-sample guard returns no partition, and every vector query
+// over that segment runs the full scan this file exists to remove. Nothing
+// distinguishes it from a segment that legitimately holds no vectors, which is
+// what makes it a silent cost rather than a slow one.
+//
+// A short sample is the documented stride weakness and is left alone; this pins
+// only the empty one, which is the case that cannot make a partition worse
+// because there is no partition to worsen.
+func TestTheTrainingSampleFindsVectorsOffTheStride(t *testing.T) {
+	// 40,000 gives 1 + 39,999/ivfSample = 2, the stride that lands on even ids
+	// forever.
+	const count = 2 * ivfSample
+	vecAt := func(i int) []float32 {
+		if i%2 == 0 {
+			return nil
+		}
+		return []float32{1, 0}
+	}
+	got := ivfTrainingSample(count, 2, vecAt)
+	if len(got) == 0 {
+		t.Fatal("sampled nothing from a corpus of 20,000 vectors: the partition would be silently skipped")
+	}
+	if len(got) != ivfSample*2 {
+		t.Errorf("sampled %d components, want %d — the fallback stopped short of the budget", len(got), ivfSample*2)
+	}
+}
+
+// TestACentroidWithNoDirectionIsRefused extends the trust boundary parseIVF
+// already draws at NaN to the quieter shape with the same effect.
+//
+// A zero centroid scores zero against every query, so ivfOrder sorts it below
+// any list with a positive dot and the documents assigned to it stop being
+// reachable — a recall loss with no error raised anywhere, on a section whose
+// frame checksum is intact. The writer cannot produce one: a centroid with no
+// members keeps its seeded position, and that seed was a normalized sample
+// vector.
+func TestACentroidWithNoDirectionIsRefused(t *testing.T) {
+	const nlist, dim = 2, 4
+	var b []byte
+	b = binary.AppendUvarint(b, nlist)
+	b = binary.AppendUvarint(b, dim)
+	// The first centroid is a unit vector, so what is refused is the second one
+	// rather than the section's shape.
+	for _, c := range []float32{1, 0, 0, 0, 0, 0, 0, 0} {
+		b = binary.LittleEndian.AppendUint32(b, math.Float32bits(c))
+	}
+	for range nlist {
+		b = binary.AppendUvarint(b, 0)
+	}
+	b = append(b, make([]byte, nlist*8)...)
+
+	if _, err := parseIVF(&segReader{name: ivfFile, b: b}, 10, dim); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("parseIVF accepted a zero centroid: got %v, want ErrCorrupt", err)
+	}
+	if err := scrubIVF(&segReader{name: ivfFile, b: b}, 10, dim); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("scrubIVF accepted a zero centroid: got %v, want ErrCorrupt", err)
+	}
+}
