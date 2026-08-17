@@ -192,31 +192,76 @@ func TestOpenLoopRespectsCancellation(t *testing.T) {
 	}
 }
 
-// TestSplitByGCSeparatesTheTwoDistributions is journey 2.
+// TestGCPauseIsChargedPerSampleNotClassified is journey 2, and it is the second
+// design this milestone had — the first one was measured and did not work.
 //
-// "p99 including GC pause" is only meaningful beside a p99 that excludes it, and the
-// gap between them is the figure the milestone publishes. What makes that honest is
-// the contract on the classification, stated here and in the report: a sample is
-// GC-hit when the cycle counter moved during it, which is not the same claim as "this
-// request was slowed by a stop-the-world pause". Go does not expose the second.
-func TestSplitByGCSeparatesTheTwoDistributions(t *testing.T) {
+// The first design classified: a sample was GC-hit when the cycle counter moved
+// during it, and the report compared the hit and free distributions. A smoke run
+// against the evaluation corpus made 485 collections over 200 queries, so every
+// single sample was GC-hit and the free distribution was empty. The classification
+// is not wrong, it is degenerate at any allocation rate weft actually produces: at
+// 2.4 cycles per query "did a collection run during this request" carries no
+// information.
+//
+// Charging does work. A stop-the-world pause stops every goroutine, so the pause
+// time that elapsed inside a request's window is time that request provably spent
+// stopped, whatever else it was doing. Subtracting it gives the counterfactual the
+// milestone's outcome sentence asks for — what the tail would be without the
+// collector — and the gap between the two p99s is the answer, per sample rather
+// than per cohort.
+//
+// What this still does not capture is stated in the report beside the number: mark
+// assist is not stop-the-world, so a request charged zero pause can still have spent
+// its time marking. That is why gcCPUShare is reported alongside and why the smoke
+// run's 0.05% STW sat under a doubled median.
+func TestGCPauseIsChargedPerSampleNotClassified(t *testing.T) {
 	in := []benchSample{
-		{lat: 10 * time.Millisecond, gcHit: false},
-		{lat: 90 * time.Millisecond, gcHit: true},
-		{lat: 20 * time.Millisecond, gcHit: false},
-		{lat: 80 * time.Millisecond, gcHit: true},
+		{lat: 10 * time.Millisecond, gcPause: 0},
+		{lat: 90 * time.Millisecond, gcPause: 30 * time.Millisecond},
+		{lat: 20 * time.Millisecond, gcPause: 2 * time.Millisecond},
 	}
-	free, hit := splitByGC(in)
-	if len(free) != 2 || len(hit) != 2 {
-		t.Fatalf("split %d free / %d hit, want 2/2", len(free), len(hit))
+	raw, exGC := splitByGC(in)
+	if len(raw) != 3 || len(exGC) != 3 {
+		t.Fatalf("split %d raw / %d ex-GC, want 3/3: every sample appears in both", len(raw), len(exGC))
 	}
-	if free[0] != 10*time.Millisecond || hit[0] != 90*time.Millisecond {
-		t.Errorf("split did not preserve latencies: free %v hit %v", free, hit)
+	if raw[1] != 90*time.Millisecond {
+		t.Errorf("raw[1] = %v, want the unmodified latency", raw[1])
 	}
-	// Empty in, empty out — a run with no GC at all must not report a GC-hit
-	// distribution built from zero samples.
-	if f, h := splitByGC(nil); len(f) != 0 || len(h) != 0 {
-		t.Errorf("splitByGC(nil) = %v, %v; want empty", f, h)
+	if exGC[1] != 60*time.Millisecond {
+		t.Errorf("exGC[1] = %v, want 90ms - 30ms of charged pause", exGC[1])
+	}
+	if exGC[0] != 10*time.Millisecond {
+		t.Errorf("exGC[0] = %v, want the latency unchanged when no pause was charged", exGC[0])
+	}
+
+	// A pause longer than the request it is charged to. Reachable: the pause total
+	// is process-wide and the sample's window is read from two clock calls, so
+	// rounding and a pause straddling the boundary can cross over. Clamping at zero
+	// rather than letting a negative latency into a distribution that gets sorted
+	// and quantiled.
+	if _, ex := splitByGC([]benchSample{{lat: time.Millisecond, gcPause: 5 * time.Millisecond}}); ex[0] != 0 {
+		t.Errorf("over-charged sample = %v, want 0 rather than a negative latency", ex[0])
+	}
+
+	if r, e := splitByGC(nil); len(r) != 0 || len(e) != 0 {
+		t.Errorf("splitByGC(nil) = %v, %v; want empty", r, e)
+	}
+}
+
+// TestGCCPUShareIsAFraction covers the metric that explains the smoke run: a median
+// that doubled under 14% of capacity while stop-the-world totalled 0.05% of the
+// wall clock.
+//
+// Pause time is the collector's most visible cost and not its largest. Mark assist
+// charges allocation to the goroutine doing it, which is the query, and none of that
+// appears in /gc/pauses:seconds. Without this the report would publish a small STW
+// figure next to an inflated latency and leave the gap unexplained — the reader's
+// obvious conclusion being that the collector is cheap here, which the assist number
+// contradicts.
+func TestGCCPUShareIsAFraction(t *testing.T) {
+	share := gcCPUShare()
+	if share < 0 || share > 1 {
+		t.Errorf("gcCPUShare() = %v, want a fraction in [0,1]", share)
 	}
 }
 
