@@ -807,8 +807,27 @@ of them carrying a 768-dimensional vector, `nlist` 414, 50 queries.
 
 And what it costs to write: **68 seconds** added to a commit of the whole corpus,
 against the plan's predicted one to two minutes. Constant per commit and per merge,
-never per query, and not paid at all below 4,096 documents. The partition itself is
+never per query, and not paid at all below 16,384 documents. The partition itself is
 1.44 MiB on disk beside a 626 MiB `docs`.
+
+That floor moved from 4,096 while this milestone ran, and the move is a second
+finding about `nprobe`. The two constants are one decision: a query scans `nlist`
+centroids and then `nprobe` lists, so with `nlist = √count` it excludes nothing at
+all until `√count` passes `nprobe`. 4,096 was the right floor at `nprobe = 8` and
+became exactly the break-even point when the quality bar pushed `nprobe` to 64 — a
+segment sitting at the old floor offered **100%** of itself as candidates while its
+commit paid for a training and an assignment pass. The floor is now derived,
+`4·nprobe²`, the size at which a query first touches half a segment or less:
+
+| segment | 4,096 | 8,192 | 16,384 | 32,768 | 65,536 |
+| --- | --- | --- | --- | --- | --- |
+| `nlist` | 64 | 91 | 128 | 182 | 256 |
+| candidates | 100% | 76% | 48% | 41% | 27% |
+
+Nothing published above moves with it: the evaluation corpus is one segment of
+171,332 documents and partitions under either floor. What changes is the tail of an
+incremental ingest, which now stays exact instead of paying for a partition that
+excludes nothing.
 
 Two smaller numbers, from the tests rather than the corpus. The repayment in
 `scorer/vector` is **7 lines** — four removed, three added, all in the loop header

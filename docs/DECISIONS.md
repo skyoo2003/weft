@@ -535,7 +535,7 @@ thin result instead of an error.
 ### Why the reader rather than a converter
 
 Because it was nearly free, and a converter was not. A segment without a partition has to
-be readable whatever happens: the pending segment has none, a segment below 4,096
+be readable whatever happens: the pending segment has none, a segment below 16,384
 documents has none, and a partition that fails its checksum is treated as none (D-006). So
 "a v2 segment is a segment with no partition" reuses a branch that already had to exist,
 where a converter would have been a command to write, a rebuild to run, and a directory in

@@ -19,7 +19,7 @@ instead.
 **What version 3 brought is the reader, not a converter.** v3 is v2 plus the `ivf`
 section and nothing else, and the fallback a segment without a partition needs —
 *every id is a candidate* — is the same one a pending segment and a segment below
-4,096 documents already need. So reading v2 costs a branch that had to exist
+16,384 documents already need. So reading v2 costs a branch that had to exist
 anyway. `Index.Merge` is the converter in practice: it rewrites the run it
 collapses with the current writer, so a v2 generation is upgraded by the
 maintenance an index already performs, with no migration command and no directory
@@ -322,7 +322,7 @@ computed here** — the metric belongs to the caller, which is [D-008](DECISIONS
 Four decisions here are load-bearing:
 
 - **The section is always written**, `nlist = 0` when the segment holds fewer than
-  4,096 documents or no vectors. A section list that varied with the corpus would
+  16,384 documents or no vectors. A section list that varied with the corpus would
   make the rejection table above say "may or may not be here", and every reader
   and the first-commit ownership check would have to know which.
 - **Spherical, not plain L2.** Vectors are normalized before training and the
@@ -342,7 +342,9 @@ Four decisions here are load-bearing:
   not be allowed to hide.
 
 `nlist` is `min(⌈√count⌉, 1024)`, from the document count rather than the vector
-count. `nprobe` is a constant 64 and is not configurable; `Nearest` raises it on
+count — and then clamped once more to the number of vectors training actually
+sampled, because k-means with more centroids than points has no fixed point.
+`nprobe` is a constant 64 and is not configurable; `Nearest` raises it on
 its own when a query would otherwise return fewer than *k* candidates, so "at
 least k" is a contract rather than a tuning exercise. Both numbers are the
 reader's policy and neither is stored, so changing `nprobe` needs no rebuild.
@@ -524,7 +526,7 @@ Two things that follows from, and one it does not:
    understands both.
 7. **Version 3 paid that debt with the reader, and it was nearly free.** v3
    appends `ivf` and changes nothing else, and a segment without a partition has
-   to be readable regardless — a pending segment has none, a segment below 4,096
+   to be readable regardless — a pending segment has none, a segment below 16,384
    documents has none, and a damaged partition is treated as none. So "v2 is a
    segment with no partition" reuses a branch that already existed, where a
    converter would have been a command, a rebuild, and a directory in two states
@@ -543,5 +545,5 @@ Two things that follows from, and one it does not:
 | DocID namespacing | None — a DocID means nothing outside its index | Unresolved; a DocID is meaningful only inside one index directory |
 | Vector search is approximate | recall@10 = 0.992 against a brute-force scan on the evaluation corpus | The screw is `nprobe`, and it is not exposed. [EVAL §5](EVAL.md) carries the curve |
 | A vector query's working set | 210 MiB per query of a 626 MiB `docs` section | The partition cut the arithmetic 5.6× and the bytes 3.0×. Why the second number is so much worse than the first, and what would actually fix it, is [FINDINGS milestone 3b](FINDINGS.md) |
-| Build cost | +68 s on the 171,332-document evaluation corpus, for the partition | Constant per commit and per merge, not per query. Below 4,096 documents it is not paid at all |
+| Build cost | +68 s on the 171,332-document evaluation corpus, for the partition | Constant per commit and per merge, not per query. Below 16,384 documents it is not paid at all — the floor is `4·nprobe²`, the size at which a partition first narrows a query to half the segment |
 | `nlist` ceiling | 1024 | The assignment pass is linear in it |
