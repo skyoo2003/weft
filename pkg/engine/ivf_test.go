@@ -383,10 +383,10 @@ func TestIVFOrderIsBestFirstAndTotal(t *testing.T) {
 
 // commitVectors commits n documents carrying dim-wide clustered vectors and
 // returns the index and the directory it was committed to.
-func commitVectors(t *testing.T, n, dim, groups int) (*Index, string) {
+func commitVectors(t *testing.T, n, dim, groups int) (ix *Index, dir string) {
 	t.Helper()
 	vs := clusteredCorpus(n, dim, groups)
-	ix := New()
+	ix = New()
 	for i, v := range vs {
 		if _, err := ix.Add(Document{
 			Key:    fmt.Sprintf("doc-%06d", i),
@@ -396,7 +396,7 @@ func commitVectors(t *testing.T, n, dim, groups int) (*Index, string) {
 			t.Fatalf("Add %d: %v", i, err)
 		}
 	}
-	dir := t.TempDir()
+	dir = t.TempDir()
 	if err := ix.Commit(dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -458,6 +458,13 @@ func TestIVFSectionRoundTrips(t *testing.T) {
 // and FORMAT.md's rejection table never have to say "this file may or may not be
 // here". A segment too small to partition writes nlist = 0 and the reader treats
 // it the way it treats a pending segment: every id is a candidate.
+//
+// Both causes of nlist = 0 are asserted, because they answer differently and the
+// difference is easy to lose. Too small to partition still offers everything —
+// nothing to narrow with, but the documents can score. Holding no vectors offers
+// nothing: scorer/vector skips those documents before it compares widths, so a
+// candidate list of them is a decode of the whole segment that cannot change an
+// answer.
 func TestAnUnpartitionedSegmentStillWritesTheSection(t *testing.T) {
 	dir, segDir, ix := commitSeeded(t)
 	defer ix.Close() //nolint:errcheck // teardown
@@ -479,9 +486,19 @@ func TestAnUnpartitionedSegmentStillWritesTheSection(t *testing.T) {
 	if n := got.segs[0].ivf.nlist; n != 0 {
 		t.Fatalf("nlist = %d for a four-document segment, want 0", n)
 	}
-	cands := got.segs[0].nearest([]float32{1, 0}, 10)
-	if len(cands) != got.Len() {
-		t.Errorf("an unpartitioned segment offered %d of %d documents as candidates", len(cands), got.Len())
+	// Seeded with text and no vectors, so this is the vectorless half.
+	if cands := got.segs[0].nearest([]float32{1, 0}, 10); len(cands) != 0 {
+		t.Errorf("a segment holding no vectors offered %d candidates; every one is a record decoded to be skipped", len(cands))
+	}
+
+	// And the too-small half, which is the same nlist and the opposite answer.
+	small, _ := commitVectors(t, 64, 2, 4)
+	defer small.Close() //nolint:errcheck // teardown
+	if n := small.segs[0].ivf.nlist; n != 0 {
+		t.Fatalf("nlist = %d for a 64-document segment, want 0", n)
+	}
+	if cands := small.segs[0].nearest([]float32{1, 0}, 10); len(cands) != small.Len() {
+		t.Errorf("a segment too small to partition offered %d of %d documents as candidates", len(cands), small.Len())
 	}
 }
 

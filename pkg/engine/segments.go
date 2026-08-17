@@ -203,16 +203,28 @@ func (s *segment) close() error {
 // D-008 records why the line is drawn there rather than one function later.
 //
 // Three cases answer with every id this segment holds, and it matters that they
-// are one branch rather than three. A segment with no partition — too small,
-// vectorless, or version 2 — has nothing to narrow with. A query whose width is
-// not this segment's cannot be compared to its centroids at all, and filtering
-// it out silently here would turn "you mixed embedding models" into an empty
-// result, which is the disguise scorer/vector's ErrDimMismatch exists to
-// prevent: handing the ids over lets the scorer decode a document and say so.
-// And a list that fails its own checksum is answered the way D-006 answers
-// damage everywhere else — as though the structure were not there. Slower, and
-// not wrong.
+// are one branch rather than three. A segment with no partition — too small or
+// version 2 — has nothing to narrow with. A query whose width is not this
+// segment's cannot be compared to its centroids at all, and filtering it out
+// silently here would turn "you mixed embedding models" into an empty result,
+// which is the disguise scorer/vector's ErrDimMismatch exists to prevent:
+// handing the ids over lets the scorer decode a document and say so. And a list
+// that fails its own checksum is answered the way D-006 answers damage
+// everywhere else — as though the structure were not there. Slower, and not
+// wrong.
+//
+// A segment holding no vectors at all is the one case that answers with nothing,
+// and it is a different case rather than a fourth spelling of that one.
+// scorer/vector skips a document on len(d.Vector) == 0 before it compares
+// widths, so these ids can produce neither a score nor an ErrDimMismatch — only
+// a decode of every record in the segment. Mixed ingest makes that routine: one
+// text-only batch between two vector ones would otherwise reinstate, on every
+// vector query for as long as the segment lives, the full scan this partition
+// exists to remove.
 func (s *segment) nearest(v []float32, k int) []DocID {
+	if s.vecDim == 0 {
+		return nil
+	}
 	if s.ivf.nlist == 0 || len(v) != s.vecDim {
 		return s.allIDs()
 	}

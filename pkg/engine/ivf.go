@@ -32,8 +32,9 @@ import (
 //	query   nlist·d + nprobe·(N/nlist)·d ≈ 2.7e6 MAC, against 1.14e8 for a full scan
 //
 // So a query's arithmetic falls by ~42x and its record decodes by ~48x, and a
-// commit or a merge grows by a constant of a minute or two. Below ivfMinDocs
-// that trade does not close and no partition is built.
+// commit or a merge grows by a constant of a minute or two. The trade closes
+// only once nlist is comfortably past nprobe, which is what ivfMinDocs is
+// derived from; below it no partition is built.
 //
 // Two disciplines the rest of the file obeys without saying so again:
 //
@@ -52,19 +53,34 @@ import (
 const (
 	// ivfMinDocs is the segment size below which no partition is built.
 	//
-	// Building one costs a training pass over a sample plus an assignment pass
-	// over every vector, each vector against nlist centroids — for a segment of
-	// n documents that is about n·√n·d multiply-accumulates, against n·d for the
-	// scan it replaces. At 4,096 the build is worth roughly 64 full scans, so it
-	// takes 64 queries against that segment to break even. Segments smaller than
-	// this are the pending ones and the tail of an incremental ingest, which are
-	// exactly the ones a query may touch once and never again.
+	// Derived from ivfNProbe rather than chosen, because the two are one decision
+	// and were briefly two. A query scans nlist centroids and then nprobe lists of
+	// count/nlist members each, so with nlist = √count it narrows nothing at all
+	// until √count exceeds nprobe. 4,096 was this floor while nprobe was 8; when
+	// nprobe was measured up to 64 it became exactly the break-even point, and the
+	// milestone's own observable said so — at 4,096 a query takes 100% of the
+	// segment as candidates, and the commit pays a training pass and an assignment
+	// pass for a partition that excluded nothing.
 	//
-	// ponytail: 4,096 is the break-even arithmetic above and nothing else — no
-	// measurement of how many queries a small segment actually sees. Revisit if
-	// a workload turns up that queries small segments hard; the observable is
-	// candidate count per query per segment, which `weft-eval recall` prints.
-	ivfMinDocs = 4096
+	// Twice break-even, so nlist ≥ 2·nprobe and a query touches at most half the
+	// segment. Candidates per query as a share of the segment, measured on
+	// clustered synthetic corpora at d = 8:
+	//
+	//	count    4,096   8,192  16,384  32,768  65,536
+	//	nlist       64      91     128     182     256
+	//	share     100%     76%     48%     41%     27%
+	//
+	// The build is worth a few hundred full scans of arithmetic and a query saves
+	// 1 − nprobe/√count of one, so a segment at this floor repays its partition
+	// over something like a thousand queries and a larger one sooner. Below it are
+	// the pending segment and the tail of an incremental ingest — the segments a
+	// query may touch once and never again.
+	//
+	// ponytail: arithmetic and a candidate-share measurement, not a workload. What
+	// nobody has counted is how many queries a small segment really takes; the
+	// observable that would move this is the share above, which `weft-eval recall`
+	// prints per query.
+	ivfMinDocs = 4 * ivfNProbe * ivfNProbe
 
 	// ivfMaxList caps nlist. The assignment pass is linear in nlist, so an
 	// unclamped √n would make a billion-document segment cost a thousand times
@@ -216,7 +232,15 @@ func buildIVF(count, dim int, vecAt func(i int) []float32) ivfBuild {
 // have to be adversarial for that to bite, and the alternative costs the
 // determinism this milestone's fourth assertion is.
 func ivfTrainingSample(count, dim int, vecAt func(i int) []float32) []float32 {
-	stride := max(1, count/ivfSample)
+	// Ceiling division, and that is the whole of "evenly". A truncating stride
+	// walks off the end of the sample budget before it walks off the end of the
+	// corpus: at count = 2·ivfSample − 1 it is 1, the loop stops at ivfSample
+	// vectors, and the back half of the corpus never trains a centroid at all.
+	// Rounding up trades a slightly smaller sample for one that spans everything.
+	// Written as 1 + (count-1)/ivfSample rather than (count+ivfSample-1)/ivfSample
+	// because count is bounded by maxInt and the second form can wrap on a 32-bit
+	// build.
+	stride := 1 + (count-1)/ivfSample
 	out := make([]float32, 0, min(count/stride+1, ivfSample)*dim)
 	buf := make([]float32, dim)
 	for i := 0; i < count && len(out) < ivfSample*dim; i += stride {
@@ -342,7 +366,7 @@ func ivfDot(a, b []float32) float64 {
 // zeroes. A non-finite component is refused by Add and by the decoder, so it
 // cannot reach here — but the norm check catches it anyway, since a NaN
 // component makes the norm NaN.
-func ivfNormalize(dst []float32, v []float32) bool {
+func ivfNormalize(dst, v []float32) bool {
 	if len(v) != len(dst) {
 		return false
 	}
@@ -639,7 +663,13 @@ func (x ivfSection) list(j int) ([]DocID, bool) {
 // not a number taken from beside the list itself.
 func (x ivfSection) decodeList(r *segReader, j int) ([]DocID, error) {
 	start := r.off
-	out := make([]DocID, 0, x.counts[j])
+	// Same capacity discipline as decodeTermIndex and the document decoders: the
+	// count came off disk and is bounded only by the segment's document count, so
+	// on its own it lets a damaged counts table ask for four bytes per document of
+	// a corpus this list plainly does not hold. A delta is at least one byte, so
+	// what is left of the payload is the honest ceiling — and nearest decodes up
+	// to nprobe lists per query.
+	out := make([]DocID, 0, min(x.counts[j], len(r.b)-r.off))
 	prev := uint64(0)
 	for i := range x.counts[j] {
 		d, err := r.uvarint("ivf posting delta")

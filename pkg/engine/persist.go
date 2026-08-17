@@ -595,6 +595,16 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 	// thing that leaves unchecked and why — so nothing here needs the walk
 	// below to have happened first, and a segment whose ivf section is damaged
 	// is named as such rather than after a full corpus decode.
+	// meta's count is what sizes the partition's duplicate-detection bitmap and
+	// what every list's ids are ranged against, and nothing has contradicted it
+	// yet — the docs walk that would is below. A meta claiming maxDocCount would
+	// have scrubIVF allocate a byte per claimed document before anything said
+	// otherwise. docoff is already parsed and Open makes exactly this comparison,
+	// so the guard costs nothing but the line.
+	if docCount != offs.n {
+		return 0, fmt.Errorf("%s: meta says %d documents, %s indexes %d: %w",
+			metaFile, docCount, docoffFile, offs.n, ErrCorrupt)
+	}
 	if len(rs) > 6 {
 		if err := scrubIVF(rs[6], docCount, vecDim); err != nil {
 			return 0, err
