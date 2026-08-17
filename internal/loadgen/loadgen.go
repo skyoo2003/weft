@@ -1,5 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Package loadgen is milestone 5's instrument: what a query costs when there are
+// many of them, which is a different question from what one costs.
+//
+// `recall` measures a query once and reports its bytes, its candidates and its
+// latency. Those are averages of a sequential replay, and a mean is exactly the
+// statistic a tail is invisible in. The milestone's outcome sentence asks for a
+// p99 including GC pause, and neither half of that is derivable from what already
+// exists here: 50 queries cannot support a 99th percentile, and a sequential
+// replay never has two queries in flight, which is the only state in which a
+// stop-the-world pause can be charged to a request that did not cause it.
+//
+// Three things a report built on this prints, and why each is here rather than
+// assumed:
+//
+//	latency        the distribution, measured from the intended send time
+//	minus STW      the same samples with their charged stop-the-world time removed
+//	rusage         page faults, context switches and peak RSS for the run
+//
+// The second is the one the milestone is named for. Section 1 of the plan predicts
+// that weft's tail is a working-set problem rather than a GC problem — a small live
+// heap makes collections frequent and cheap, while 210 MiB of pages per query makes
+// a miss expensive — and the gap between the two distributions is what decides
+// that. The third is what says which kind of miss: minor faults are page-cache
+// hits, major faults are the disk.
 package loadgen
 
 import (
@@ -11,29 +35,6 @@ import (
 	"sync"
 	"time"
 )
-
-// bench is milestone 5's instrument: what a query costs when there are many of
-// them, which is a different question from what one costs.
-//
-// `recall` measures a query once and reports its bytes, its candidates and its
-// latency. Those are averages of a sequential replay, and a mean is exactly the
-// statistic a tail is invisible in. The milestone's outcome sentence asks for a
-// p99 including GC pause, and neither half of that is derivable from what already
-// exists here: 50 queries cannot support a 99th percentile, and a sequential
-// replay never has two queries in flight, which is the only state in which a
-// stop-the-world pause can be charged to a request that did not cause it.
-//
-// Three things it prints, and why each is here rather than assumed:
-//
-//	latency        the distribution, measured from the intended send time
-//	GC-free/-hit   the same distribution split by whether a cycle ran during it
-//	rusage         page faults, context switches and peak RSS for the run
-//
-// The second is the one the milestone is named for. Section 1 of the plan predicts
-// that weft's tail is a working-set problem rather than a GC problem — a small live
-// heap makes collections frequent and cheap, while 210 MiB of pages per query makes
-// a miss expensive — and the split is what decides that. The third is what says
-// which kind of miss: minor faults are page-cache hits, major faults are the disk.
 
 // Ladder is the arrival rates a run sweeps, as fractions of the throughput a
 // sequential replay achieved.
@@ -83,7 +84,7 @@ type Quantiles struct {
 	P50ok, P95ok, P99ok, P999ok bool
 }
 
-// quantile returns the q-th quantile of an already-sorted sample by nearest rank.
+// Quantile returns the q-th quantile of an already-sorted sample by nearest rank.
 //
 // Nearest rank rather than linear interpolation: the interpolating definitions
 // return a value between two observations, which for a latency report is a number
@@ -125,12 +126,17 @@ func Printable(n int, q float64) bool {
 	return float64(n)*(1-q) >= 100-1e-6
 }
 
-// summarize reduces latencies to the printed distribution.
+// Summarize reduces latencies to the printed distribution.
 //
-// It sorts a copy. The caller holds one slice and asks for three summaries — all
-// samples, GC-free and GC-hit — and sorting in place would reorder a slice whose
-// order still carries the send sequence, which is the only thing that could later
-// answer "did the tail cluster in time or spread across the run".
+// It sorts a copy. The caller holds the samples once and asks for two summaries —
+// as measured and minus stop-the-world — off slices that SplitByGC returns
+// index-aligned with each other and with the samples they came from. Sorting in
+// place would destroy that alignment, and with it the only thing that could later
+// answer "was the tail one request or the same request twice".
+//
+// The order it preserves is completion order, not send order: Drive appends a
+// sample when its request returns. Send order is recoverable from the schedule —
+// request i was due at start + i/rate — and is not carried here.
 func Summarize(lats []time.Duration) Quantiles {
 	n := len(lats)
 	s := slices.Clone(lats)
@@ -169,13 +175,18 @@ func Summarize(lats []time.Duration) Quantiles {
 // a negative duration in a slice that gets sorted and quantiled is a wrong number
 // rather than a visible error.
 func SplitByGC(samples []Sample) (raw, exGC []time.Duration) {
-	for _, s := range samples {
-		raw = append(raw, s.Lat)
+	if len(samples) == 0 {
+		return nil, nil
+	}
+	raw = make([]time.Duration, len(samples))
+	exGC = make([]time.Duration, len(samples))
+	for i, s := range samples {
+		raw[i] = s.Lat
 		d := s.Lat - s.GCPause
 		if d < 0 {
 			d = 0
 		}
-		exGC = append(exGC, d)
+		exGC[i] = d
 	}
 	return raw, exGC
 }
@@ -194,7 +205,7 @@ type FaultCounts struct {
 	Nvcsw, Nivcsw int64
 }
 
-// sub returns the counts accumulated between two snapshots.
+// Sub returns the counts accumulated between two snapshots.
 //
 // Every figure the report prints is a difference. The absolute counters include
 // mapping the index, loading the query set and starting the Go runtime — all of it
@@ -216,7 +227,7 @@ func (c FaultCounts) Sub(prev FaultCounts) FaultCounts {
 // that pauses the program once per request would be measuring pauses it caused.
 const gcCycleMetric = "/gc/cycles/total:gc-cycles"
 
-// gcCycles is the number of collections completed so far.
+// GCCycles is the number of collections completed so far.
 func GCCycles() uint64 {
 	s := []metrics.Sample{{Name: gcCycleMetric}}
 	metrics.Read(s)
@@ -246,22 +257,42 @@ func GCCycles() uint64 {
 //
 // do must be safe for concurrent use. It is handed the request's index so a caller
 // can rotate through a query set without sharing a cursor.
-func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) ([]Sample, int) {
+//
+// rate must be positive; a non-positive rate has no schedule and returns nothing.
+// Callers validate the flag and say so in words — this is the backstop that keeps
+// a bad value out of time.Duration(float64(time.Second)/rate), whose float-to-int
+// conversion at ±Inf is undefined in Go and differs between amd64 and arm64.
+func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) (samples []Sample, shed int) {
 	if maxInflight < 1 {
 		maxInflight = 1
+	}
+	if !(rate > 0) { //nolint:staticcheck // written this way to reject NaN as well as <= 0
+		return nil, 0
 	}
 	interval := time.Duration(float64(time.Second) / rate)
 
 	var (
-		mu      sync.Mutex
-		samples = make([]Sample, 0, n)
-		shed    int
-		wg      sync.WaitGroup
+		mu sync.Mutex
+		wg sync.WaitGroup
 	)
+	samples = make([]Sample, 0, n)
 	slots := make(chan struct{}, maxInflight)
 	start := time.Now()
 
 	for i := range n {
+		// Checked every iteration rather than only inside the wait below. Once the
+		// send loop falls behind its own schedule — which is what a rate above what
+		// the loop can dispatch produces — time.Until(due) is never positive, the
+		// timer branch is never taken, and a cancellation checked only there would
+		// not be seen until the rung had sent all n requests.
+		if ctx.Err() != nil {
+			// Requests never sent are not shed requests: shedding is a property
+			// of the load the run applied, and a cancelled run applied less load
+			// rather than overloading. The report prints the sample count
+			// alongside, which is what says the run was cut short.
+			wg.Wait()
+			return samples, shed
+		}
 		due := start.Add(time.Duration(i) * interval)
 		if d := time.Until(due); d > 0 {
 			t := time.NewTimer(d)
@@ -269,11 +300,6 @@ func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) 
 			case <-t.C:
 			case <-ctx.Done():
 				t.Stop()
-				// Requests never sent are not shed requests: shedding is a
-				// property of the load the run applied, and a cancelled run
-				// applied less load rather than overloading. The report prints
-				// the sample count alongside, which is what says the run was
-				// cut short.
 				wg.Wait()
 				return samples, shed
 			}
@@ -354,8 +380,33 @@ func HeadlineRate(rates []float64, sat float64) float64 {
 // wall clock the collector took the world for.
 const gcPauseMetric = "/gc/pauses:seconds"
 
+// pauseBuf is the read buffer, reused, and that is not micro-optimisation: it is
+// what keeps the instrument out of its own measurement.
+//
+// metrics.Read fills a Float64Histogram in place when the Sample it is handed
+// already carries one of the right shape, and allocates a fresh 163-bucket one when
+// it does not. GCPauseTotal is called twice per request — a ladder is 100,000 calls
+// — and a freshly allocated []metrics.Sample each time measures at 1,504 B and 3
+// allocs per call against 0 and 0 for a reused one. That is ~150 MiB of garbage per
+// ladder produced by the pause counter, driving collections the report then charges
+// to the query. Same sentence the package already applies to ReadMemStats: an
+// instrument that makes the thing it measures is not one.
+//
+// ponytail: one global buffer under one mutex, not a sync.Pool. A Pool is drained at
+// every GC, which on this workload is a few times a second — so it reallocates
+// exactly when the collector is busiest, which is the case this exists for. The lock
+// adds no real serialisation either: metrics.Read already takes a runtime-wide
+// semaphore, so concurrent callers were queued before this mutex existed. If a
+// profile ever shows this contended, shard it per-P.
+var (
+	pauseMu  sync.Mutex
+	pauseBuf = []metrics.Sample{{Name: gcPauseMetric}}
+)
+
 func GCPauseTotal() time.Duration {
-	s := []metrics.Sample{{Name: gcPauseMetric}}
+	pauseMu.Lock()
+	defer pauseMu.Unlock()
+	s := pauseBuf
 	metrics.Read(s)
 	if s[0].Value.Kind() != metrics.KindFloat64Histogram {
 		return 0
@@ -385,21 +436,45 @@ func GCPauseTotal() time.Duration {
 // the goroutine that allocated — which is the query. A report that published the
 // STW figure alone would invite exactly the wrong conclusion.
 //
-// Cumulative over the process, so a run's figure is a difference, and it is a ratio
-// of two totals rather than a rate: what a reader wants is "how much of this
-// machine went to the collector", which is dimensionless.
+// Cumulative over the process, so this is the whole-process figure and a *run's*
+// figure is GCCPUShareBetween of two snapshots. It is a ratio of two totals rather
+// than a rate: what a reader wants is "how much of this machine went to the
+// collector", which is dimensionless.
 func GCCPUShare() float64 {
+	gc, total := GCCPUSeconds()
+	if total <= 0 {
+		return 0
+	}
+	return gc / total
+}
+
+// GCCPUSeconds is the collector's CPU time and the process's total, both cumulative
+// since the process started.
+//
+// Two numbers rather than their ratio because the ratio does not subtract. A rung's
+// share is not share₁ - share₀: both are dominated by everything the process did
+// before the rung began — mapping the index, the cold pass, every earlier rung — and
+// by the fifth rung the running ratio has stopped moving whatever the collector is
+// doing now. GCCPUShareBetween is the arithmetic that does hold.
+func GCCPUSeconds() (gc, total float64) {
 	s := []metrics.Sample{
 		{Name: "/cpu/classes/gc/total:cpu-seconds"},
 		{Name: "/cpu/classes/total:cpu-seconds"},
 	}
 	metrics.Read(s)
 	if s[0].Value.Kind() != metrics.KindFloat64 || s[1].Value.Kind() != metrics.KindFloat64 {
+		return 0, 0
+	}
+	return s[0].Value.Float64(), s[1].Value.Float64()
+}
+
+// GCCPUShareBetween is the collector's share of the CPU the process burned between
+// two GCCPUSeconds snapshots — the ratio of the differences, which is the only form
+// of it that describes one rung rather than the process's whole history.
+func GCCPUShareBetween(gc0, total0, gc1, total1 float64) float64 {
+	d := total1 - total0
+	if d <= 0 {
 		return 0
 	}
-	total := s[1].Value.Float64()
-	if total <= 0 {
-		return 0
-	}
-	return s[0].Value.Float64() / total
+	return (gc1 - gc0) / d
 }

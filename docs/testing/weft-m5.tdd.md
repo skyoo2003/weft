@@ -118,7 +118,7 @@ submodule. FINDINGS milestone 5 pending with task 4.
 | 6 | A long rung is interruptible | `TestOpenLoopRespectsCancellation` | unit | PASS | as above |
 | 7 | GC is charged per sample, not classified per cohort, and an over-charged sample clamps to zero rather than going negative | `TestGCPauseIsChargedPerSampleNotClassified` | unit | PASS | as above |
 | 8 | GC CPU share is a fraction in [0,1] — the metric that catches mark assist, which stop-the-world misses | `TestGCCPUShareIsAFraction` | unit | PASS | as above |
-| 9 | Summarize does not sort the caller's slice, so the send order survives three summaries | `TestSummarizeDoesNotMutateTheCaller` | unit | PASS | as above |
+| 9 | Summarize does not sort the caller's slice, so the raw and minus-STW slices stay index-aligned across both summaries | `TestSummarizeDoesNotMutateTheCaller` | unit | PASS | as above |
 | 10 | The headline load point is chosen by a registered rule, not after seeing the p99s | `TestSaturationIsTheFirstRungPastTwiceTheUnloadedMedian` | unit | PASS | as above |
 | 11 | Page fault counters actually move — a constant stub would satisfy every arithmetic test and fail this | `TestProcFaultsCountsMinorFaultsOnTouch` | unit | PASS | as above |
 | 12 | A run's fault figure is a difference between snapshots, per field | `TestProcFaultsSubIsPerField` | unit | PASS | as above |

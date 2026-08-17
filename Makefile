@@ -1,6 +1,6 @@
 .PHONY: all fmt build vet test lint lint-docs spdx fuzz arch deps run example clean \
 	changelog changelog-new changelog-check docs-site release-check \
-	eval eval-full eval-data recall bench bench-compare
+	eval eval-full eval-data recall bench bench-compare bench-build
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
@@ -177,10 +177,6 @@ recall:
 		go run ./cmd/weft-eval recall -data $(EVAL_DATA); \
 	fi
 
-# Everything milestone 4 publishes: the degeneracy diagnostic, the frozen arms, the
-# sensitivity sweep, and the fusion weight sweep behind the README's claim that no
-# weight makes the graph stream worth anything. Slower — the sweep alone re-measures
-# 28 configurations.
 # Milestone 5. The latency distribution `eval` and `recall` cannot produce: both
 # report means of a sequential replay, and a tail is the statistic a mean is blind
 # to. Open loop, so a stalled server does not get to slow the load down and hide
@@ -188,11 +184,12 @@ recall:
 #
 # Not in `all` and not in CI. A shared runner's tail latency is a function of
 # whatever else is on the machine, so gating a merge on a p99 measured there makes
-# the gate a coin flip. CI builds bench/ and runs the driver's unit tests; the
-# numbers are produced by a person on a quiet machine and published in docs/PERF.md.
+# the gate a coin flip. CI runs the driver's unit tests as part of `all` and compiles
+# the bleve side through `bench-build`; the numbers themselves are produced by a
+# person on a quiet machine and published in docs/PERF.md.
 #
 # Long: the ladder's lowest rung sends 10,000 queries at an eighth of measured
-# throughput, and a p99 needs all 10,000 — see printableQuantile.
+# throughput, and a p99 needs all 10,000 — see internal/loadgen.Printable.
 bench:
 	@if [ ! -d $(EVAL_DATA)/index ]; then \
 		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; \
@@ -208,9 +205,20 @@ bench-compare:
 	@if [ ! -d bench/.bleve-index ]; then \
 		echo "SKIP: no bleve index — run 'cd bench && go run . -build' first (slow, once)"; \
 	else \
-		cd bench && go run . -data ../$(EVAL_DATA) $(BENCHFLAGS); \
+		cd bench && go run . -data $(abspath $(EVAL_DATA)) $(BENCHFLAGS); \
 	fi
 
+# The bleve side compiled, vetted and tested. Its own target because it is its own
+# module: `go build ./...` at the root does not descend into a nested module, so
+# without this nothing in the gate ever compiles bench/main.go and the comparison
+# rots silently between the runs that use it.
+bench-build:
+	cd bench && go build ./... && go vet ./... && go test ./...
+
+# Everything milestone 4 publishes: the degeneracy diagnostic, the frozen arms, the
+# sensitivity sweep, and the fusion weight sweep behind the README's claim that no
+# weight makes the graph stream worth anything. Slower — the sweep alone re-measures
+# 28 configurations.
 eval-full:
 	go run ./cmd/weft-eval diagnose
 	go run ./cmd/weft-eval run

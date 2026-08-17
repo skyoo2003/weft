@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -49,80 +50,135 @@ func benchScorers(ix *engine.Index, arm string) ([]engine.Scorer, error) {
 	return nil, fmt.Errorf("-arm=%q: want %q or %q", arm, benchArmText, benchArmVector)
 }
 
-func bench(ctx context.Context, args []string) error {
-	var (
-		rate        float64
-		rotations   int
-		inflight    int
-		arm         string
-		anySnapshot bool
-		cpuprofile  string
-	)
+// benchOpts is what the flags decide, validated.
+type benchOpts struct {
+	data        string
+	rate        float64
+	rotations   int
+	inflight    int
+	arm         string
+	anySnapshot bool
+	cpuprofile  string
+}
+
+// benchFlags parses and validates, so that every "this value cannot be measured"
+// answer is given before the index is mapped rather than after.
+func benchFlags(args []string) (benchOpts, error) {
+	var o benchOpts
 	data, flagErr := dataFlags(cmdBench, args, func(fs *flag.FlagSet) {
-		fs.Float64Var(&rate, "rate", 0, "arrival rate in queries/sec; 0 sweeps the ladder")
-		fs.IntVar(&rotations, "rotations", 200, "passes over the query set per rung (50 queries x 200 = 10,000 samples)")
-		fs.IntVar(&inflight, "inflight", 0, "cap on concurrent requests; 0 is 4 per core")
-		fs.StringVar(&arm, "arm", benchArmText, "scorers to load: text or text+vector")
-		fs.StringVar(&cpuprofile, "cpuprofile", "", "write a CPU profile of the whole run here")
-		snapshotFlag(fs, &anySnapshot)
+		fs.Float64Var(&o.rate, "rate", 0, "arrival rate in queries/sec; 0 sweeps the ladder")
+		fs.IntVar(&o.rotations, "rotations", 200, "passes over the query set per rung (50 queries x 200 = 10,000 samples)")
+		fs.IntVar(&o.inflight, "inflight", 0, "cap on concurrent requests; 0 is 4 per core")
+		fs.StringVar(&o.arm, "arm", benchArmText, "scorers to load: text or text+vector")
+		fs.StringVar(&o.cpuprofile, "cpuprofile", "", "write a CPU profile of the whole run here")
+		snapshotFlag(fs, &o.anySnapshot)
 	})
 	if flagErr != nil {
-		return flagErr
+		return o, flagErr
 	}
-	if rotations <= 0 {
-		return fmt.Errorf("-rotations=%d: a run needs at least one pass over the query set", rotations)
+	o.data = *data
+	if o.rotations <= 0 {
+		return o, fmt.Errorf("-rotations=%d: a run needs at least one pass over the query set", o.rotations)
 	}
-	if inflight <= 0 {
-		inflight = loadgen.DefaultInflight()
+	// Rejected rather than clamped, and rejected here rather than absorbed by the
+	// driver. A negative rate makes every due time earlier than the last, so the
+	// whole rung is dispatched at once and its latencies — measured from a due time
+	// minutes in the past — climb linearly into the thousands of seconds. That
+	// prints as a latency distribution with nothing in it saying the schedule was
+	// nonsense.
+	if o.rate < 0 || math.IsNaN(o.rate) {
+		return o, fmt.Errorf("-rate=%v: an arrival rate is positive, or 0 to sweep the ladder", o.rate)
 	}
-	if !anySnapshot {
-		if err := verifySnapshot(*data, queriesFile, qrelsFile); err != nil {
+	if o.inflight <= 0 {
+		o.inflight = loadgen.DefaultInflight()
+	}
+	return o, nil
+}
+
+func bench(ctx context.Context, args []string) error {
+	o, err := benchFlags(args)
+	if err != nil {
+		return err
+	}
+	if !o.anySnapshot {
+		if err := verifySnapshot(o.data, queriesFile, qrelsFile); err != nil {
 			return err
 		}
 	}
 
-	ix, err := openIndex(*data, anySnapshot)
+	ix, err := openIndex(o.data, o.anySnapshot)
 	if err != nil {
 		return err
 	}
 	defer ix.Close() //nolint:errcheck // nothing left to do about it on the way out
-	qs, err := loadQueries(*data)
+	qs, err := loadQueries(o.data)
 	if err != nil {
 		return err
 	}
 	if len(qs) == 0 {
 		return errors.New("no queries with judgments: there is nothing to replay")
 	}
-	scorers, err := benchScorers(ix, arm)
+	scorers, err := benchScorers(ix, o.arm)
 	if err != nil {
 		return err
 	}
 
-	if cpuprofile != "" {
-		f, err := os.Create(cpuprofile)
-		if err != nil {
-			return fmt.Errorf("cpuprofile: %w", err)
-		}
-		defer f.Close() //nolint:errcheck // the profile is written by StopCPUProfile
-		if err := pprof.StartCPUProfile(f); err != nil {
-			return fmt.Errorf("cpuprofile: %w", err)
-		}
-		defer pprof.StopCPUProfile()
+	stopProfile, err := startCPUProfile(o.cpuprofile)
+	if err != nil {
+		return err
 	}
+	defer stopProfile()
 
 	// Errors are counted rather than returned. A run is thousands of requests and
 	// one failing is a fact about the corpus, not a reason to discard the
 	// distribution the others produced — but a run where most of them failed is
 	// measuring an error path, so the count is printed beside every rung and a run
 	// that is mostly errors says so at the end.
+	// A cancelled run is not a failing one: after Ctrl-C every in-flight Search
+	// returns context.Canceled, and counting those would end a deliberately
+	// interrupted ladder with a WARNING naming thousands of errors that were the
+	// interruption. Same condition bench/ applies on the bleve side.
 	var failed atomic.Int64
 	do := func(i int) {
 		q := qs[i%len(qs)].Query
-		if _, err := engine.Search(ctx, q, frozenK, fusion.Fuse, scorers...); err != nil {
+		if _, err := engine.Search(ctx, q, frozenK, fusion.Fuse, scorers...); err != nil && ctx.Err() == nil {
 			failed.Add(1)
 		}
 	}
 
+	unloaded, err := benchWarmup(ctx, qs, do, &failed)
+	if err != nil {
+		return err
+	}
+	rates := benchRates(o.rate, unloaded)
+
+	n := o.rotations * len(qs)
+	fmt.Printf("\nweft  %s  warm  n=%d/rung  inflight=%d  GOMAXPROCS=%d\n",
+		o.arm, n, o.inflight, runtime.GOMAXPROCS(0))
+
+	p50s := make([]time.Duration, 0, len(rates))
+	reports := make([]benchReport, 0, len(rates))
+	for _, r := range rates {
+		rep := benchRung(ctx, r, n, o.inflight, do)
+		rep.rate = r
+		reports = append(reports, rep)
+		p50s = append(p50s, rep.all.P50)
+		rep.print()
+		if ctx.Err() != nil {
+			break
+		}
+	}
+
+	benchSummary(o.arm, rates[:len(p50s)], p50s, reports, unloaded)
+	if f := failed.Load(); f > 0 {
+		fmt.Printf("\nWARNING: %d requests returned an error and are counted in the distributions above\n", f)
+	}
+	return ctx.Err()
+}
+
+// benchWarmup runs the two preliminaries and returns the number the ladder is
+// scaled from.
+func benchWarmup(ctx context.Context, qs []eval.Query, do func(int), failed *atomic.Int64) (time.Duration, error) {
 	// Cold first, and only once: these are the numbers that exist for exactly one
 	// pass, because the second pass finds every page the first one faulted in. A
 	// p99 is impossible here — 50 samples — so what is printed is the maximum and
@@ -133,93 +189,124 @@ func bench(ctx context.Context, args []string) error {
 	// denominator of the ladder and the reference the saturation rule reads.
 	unloaded := benchUnloaded(ctx, qs, do)
 	if unloaded <= 0 {
-		return errors.New("the sequential replay measured no time at all")
+		return 0, errors.New("the sequential replay measured no time at all")
+	}
+	// Fatal here, unlike inside the ladder, because these hundred requests are not
+	// a distribution the run reports — they are what every rate on the ladder is
+	// derived from. A misconfigured arm that errors in microseconds makes `unloaded`
+	// the median of an error path, `base` enormous, and every rung below a schedule
+	// no server was ever asked to meet. The count printed at the end would say so
+	// after ninety minutes of measuring nothing.
+	if f := failed.Load(); f > 0 && ctx.Err() == nil {
+		return 0, fmt.Errorf("%d of the %d cold and sequential requests returned an error, so the "+
+			"ladder would be scaled from an error path rather than from a query", f, 2*len(qs))
 	}
 	log.Printf("unloaded: p50 %v over %d queries, so %.1f q/s sequentially",
 		unloaded.Round(time.Microsecond), len(qs), float64(time.Second)/float64(unloaded))
+	return unloaded, nil
+}
 
-	rates := []float64{rate}
-	if rate == 0 {
-		base := float64(time.Second) / float64(unloaded)
-		rates = rates[:0]
-		for _, f := range loadgen.Ladder {
-			rates = append(rates, base*f)
-		}
+// benchRates is the ladder, scaled from the sequential throughput, or the single
+// rung an explicit -rate asks for.
+func benchRates(rate float64, unloaded time.Duration) []float64 {
+	if rate != 0 {
+		return []float64{rate}
 	}
-
-	n := rotations * len(qs)
-	fmt.Printf("\nweft  %s  warm  n=%d/rung  inflight=%d  GOMAXPROCS=%d\n",
-		arm, n, inflight, runtime.GOMAXPROCS(0))
-
-	p50s := make([]time.Duration, 0, len(rates))
-	reports := make([]benchReport, 0, len(rates))
-	for _, r := range rates {
-		rep := benchRung(ctx, r, n, inflight, do)
-		rep.rate = r
-		reports = append(reports, rep)
-		p50s = append(p50s, rep.all.P50)
-		rep.print()
-		if ctx.Err() != nil {
-			break
-		}
+	base := float64(time.Second) / float64(unloaded)
+	rates := make([]float64, 0, len(loadgen.Ladder))
+	for _, f := range loadgen.Ladder {
+		rates = append(rates, base*f)
 	}
+	return rates
+}
 
-	sat := loadgen.SaturationRate(rates[:len(p50s)], p50s, unloaded)
-	head := loadgen.HeadlineRate(rates[:len(p50s)], sat)
+// startCPUProfile turns the flag into a stop function, so the caller has one defer
+// rather than two whose order decides whether the profile is written at all.
+func startCPUProfile(path string) (func(), error) {
+	if path == "" {
+		return func() {}, nil
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("cpuprofile: %w", err)
+	}
+	if err := pprof.StartCPUProfile(f); err != nil {
+		f.Close() //nolint:errcheck // the create failed to be useful; this is cleanup
+		return nil, fmt.Errorf("cpuprofile: %w", err)
+	}
+	return func() {
+		// Stop before close: StopCPUProfile is what flushes the samples.
+		pprof.StopCPUProfile()
+		f.Close() //nolint:errcheck // everything worth reporting was written above
+	}, nil
+}
+
+// benchSummary applies the load-point rule and prints the one line the milestone
+// quotes. Separate from bench so the rule is read in one place rather than at the
+// bottom of a function that also parses flags and opens an index.
+func benchSummary(arm string, rates []float64, p50s []time.Duration, reports []benchReport, unloaded time.Duration) {
+	sat := loadgen.SaturationRate(rates, p50s, unloaded)
+	head := loadgen.HeadlineRate(rates, sat)
 	if sat == 0 {
 		fmt.Printf("\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
 	} else {
 		fmt.Printf("\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
 			sat, unloaded.Round(time.Microsecond), head)
 	}
-	for _, rep := range reports {
-		if rep.rate == head {
-			fmt.Printf("HEADLINE   %s  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
-				arm, rep.rate, fmtQ(rep.all.P99, rep.all.P99ok),
-				fmtQ(rep.exGC.P99, rep.exGC.P99ok), 100*rep.gcCPUEnd)
+	for i := range reports {
+		rep := &reports[i]
+		if rep.rate != head {
+			continue
 		}
+		fmt.Printf("HEADLINE   %s  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
+			arm, rep.rate, fmtQ(rep.all.P99, rep.all.P99ok),
+			fmtQ(rep.exGC.P99, rep.exGC.P99ok), 100*rep.gcCPU)
 	}
-	if f := failed.Load(); f > 0 {
-		fmt.Printf("\nWARNING: %d requests returned an error and are counted in the distributions above\n", f)
-	}
-	return ctx.Err()
 }
 
 // benchReport is one rung.
+//
+// Every field but rss is a difference taken around the rung. rss is the exception
+// and is named for it: ru_maxrss is a high-water mark the kernel never lowers, so
+// there is no "during this rung" reading of it — what it says is the peak the
+// process has reached by the time this rung ended, cold pass included.
 type benchReport struct {
-	rate       float64
-	all, exGC  loadgen.Quantiles
-	shed       int
-	faults     loadgen.FaultCounts
-	gcCycles   uint64
-	pause      time.Duration
-	gcCPUStart float64
-	gcCPUEnd   float64
-	rss        int64
-	elapsed    time.Duration
+	rate      float64
+	all, exGC loadgen.Quantiles
+	shed      int
+	faults    loadgen.FaultCounts
+	gcCycles  uint64
+	pause     time.Duration
+	gcCPU     float64
+	peakRSS   int64
+	elapsed   time.Duration
 }
 
 // benchRung applies one arrival rate and collects everything measured around it.
 func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int)) benchReport {
 	faultsBefore, cyclesBefore := loadgen.ProcFaults(), loadgen.GCCycles()
-	pausesBefore, cpuBefore := loadgen.GCPauseTotal(), loadgen.GCCPUShare()
+	pausesBefore := loadgen.GCPauseTotal()
+	// Both CPU totals, not their ratio: the ratio of two running totals cannot be
+	// subtracted, and by the fifth rung it is dominated by the index mapping and the
+	// four rungs before this one rather than by what the collector is doing now.
+	gcCPU0, totalCPU0 := loadgen.GCCPUSeconds()
 	start := time.Now()
 
 	samples, shed := loadgen.Drive(ctx, rate, n, inflight, do)
 
 	elapsed := time.Since(start)
+	gcCPU1, totalCPU1 := loadgen.GCCPUSeconds()
 	raw, exGC := loadgen.SplitByGC(samples)
 	return benchReport{
-		all:        loadgen.Summarize(raw),
-		exGC:       loadgen.Summarize(exGC),
-		shed:       shed,
-		faults:     loadgen.ProcFaults().Sub(faultsBefore),
-		gcCycles:   loadgen.GCCycles() - cyclesBefore,
-		pause:      loadgen.GCPauseTotal() - pausesBefore,
-		gcCPUStart: cpuBefore,
-		gcCPUEnd:   loadgen.GCCPUShare(),
-		rss:        loadgen.MaxRSS(),
-		elapsed:    elapsed,
+		all:      loadgen.Summarize(raw),
+		exGC:     loadgen.Summarize(exGC),
+		shed:     shed,
+		faults:   loadgen.ProcFaults().Sub(faultsBefore),
+		gcCycles: loadgen.GCCycles() - cyclesBefore,
+		pause:    loadgen.GCPauseTotal() - pausesBefore,
+		gcCPU:    loadgen.GCCPUShareBetween(gcCPU0, totalCPU0, gcCPU1, totalCPU1),
+		peakRSS:  loadgen.MaxRSS(),
+		elapsed:  elapsed,
 	}
 }
 
@@ -285,8 +372,8 @@ func (r benchReport) print() {
 		fmtQ(r.exGC.P99, r.exGC.P99ok), fmtQ(r.exGC.P999, r.exGC.P999ok))
 	fmt.Printf("  gc        cycles %d  STW %v (%.3f%% of elapsed)  GC CPU share %.1f%%\n",
 		r.gcCycles, r.pause.Round(time.Microsecond),
-		100*float64(r.pause)/float64(max(r.elapsed, 1)), 100*r.gcCPUEnd)
-	fmt.Printf("  rusage    minflt %d  majflt %d  nvcsw %d  nivcsw %d  maxrss %.1f MiB\n",
+		100*float64(r.pause)/float64(max(r.elapsed, 1)), 100*r.gcCPU)
+	fmt.Printf("  rusage    minflt %d  majflt %d  nvcsw %d  nivcsw %d  peakrss %.1f MiB (process)\n",
 		r.faults.Minor, r.faults.Major, r.faults.Nvcsw, r.faults.Nivcsw,
-		float64(r.rss)/(1<<20))
+		float64(r.peakRSS)/(1<<20))
 }

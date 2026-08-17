@@ -1,0 +1,12 @@
+kind: Added
+body: '`weft-eval bench` and `make bench` publish a latency distribution rather than a mean:
+  an open-loop arrival ladder at 12.5%, 25%, 50%, 100% and 200% of measured sequential
+  throughput, with each request timed from its intended send time so a stall lands on every
+  request it delayed. Every rung reports p50/p95/p99/p99.9 as measured and with the
+  stop-the-world time charged to each sample removed, alongside GC cycles, GC CPU share,
+  page faults and context switches. A quantile without 100 samples beyond it is left out
+  rather than printed, and which rung the headline is quoted at is fixed by a rule
+  registered before the numbers existed. docs/PERF.md is the measurement design.'
+time: 2026-08-18T00:00:00.000000000+09:00
+custom:
+  Issue: 12

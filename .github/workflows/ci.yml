@@ -47,6 +47,12 @@ jobs:
       # enough to run unconditionally, and the failure names the files.
       - run: make spdx
 
+      # bench/ is a separate module, so `make all` never compiles it — the whole
+      # point of the quarantine is that the root module does not see bleve. That
+      # also means nothing above would notice bench/main.go failing to build, and
+      # it is the entire bleve half of milestone 5's order-of-magnitude claim.
+      - run: make bench-build
+
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # golangci-lint-action v9.3.0
         with:

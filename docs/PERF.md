@@ -130,6 +130,21 @@ request would be measuring pauses it caused.
 | `nvcsw` | the process yielded; it blocked on something |
 | `nivcsw` | the scheduler took the core away — over-subscription, from inside |
 
+`peakrss` on the same line is the exception and is labelled `(process)` for it.
+`ru_maxrss` is a high-water mark the kernel never lowers, so there is no "during
+this rung" reading of it: what it reports is the peak the process has reached by
+the end of that rung, index mapping and cold pass included. It is monotonically
+non-decreasing down the table by construction, and a rung's own footprint is not
+recoverable from it.
+
+`GC CPU share` **is** a per-rung figure, and getting there needs the ratio of two
+differences rather than the difference of two ratios.
+`/cpu/classes/gc/total:cpu-seconds` and `/cpu/classes/total:cpu-seconds` are both
+cumulative since process start, so a running share stops moving once the process
+has any history — by the fifth rung a rung that gave a third of its CPU to the
+collector and one that gave none read the same. `loadgen.GCCPUShareBetween` takes
+both totals at each end of a rung and divides the differences.
+
 A tail dominated by `majflt` is a storage problem, one dominated by `nivcsw` is a
 concurrency problem, and one with neither is the collector's or the code's. None
 of that is visible in latency alone, and §6's prediction is precisely a claim

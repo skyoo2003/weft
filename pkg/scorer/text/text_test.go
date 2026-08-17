@@ -296,3 +296,49 @@ func TestCancellationArrivingAfterTheLastPostingIsObserved(t *testing.T) {
 
 // Compile-time proof that this satisfies the interface fusion never sees.
 var _ engine.Scorer = (*Scorer)(nil)
+
+// TestSearchIsSafeForConcurrentUse is the assumption internal/loadgen.Drive makes
+// and nothing else in this tree had ever exercised.
+//
+// Every caller before milestone 5 ran queries one at a time: `run`, `sweep`,
+// `weights` and `recall` all replay sequentially. `weft-eval bench` is the first to
+// call engine.Search from 4×GOMAXPROCS goroutines against one Index and one scorer,
+// and its whole latency distribution is meaningless if that races. The driver's own
+// tests deliberately run without an index, so `make test -race` would not have
+// caught it: this is where the -race gate reaches the read path.
+//
+// Fails only under -race, which `make all` runs.
+func TestSearchIsSafeForConcurrentUse(t *testing.T) {
+	ix := index(t, "the quick brown fox", "a lazy brown dog", "quick quick fox fox")
+	s := New(ix)
+	fuse := func(streams [][]engine.Candidate, k int) []engine.Candidate {
+		if len(streams) == 0 {
+			return nil
+		}
+		return engine.TopK(streams[0], k)
+	}
+
+	const goroutines, each = 8, 50
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	for g := range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Different queries per goroutine, so the postings lists being walked
+			// overlap rather than being identical work the scheduler could serialise.
+			q := []string{"quick", "brown fox", "lazy dog", "fox"}[g%4]
+			for range each {
+				if _, err := engine.Search(context.Background(), engine.Query{Text: q}, 3, fuse, s); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent Search: %v", err)
+	}
+}

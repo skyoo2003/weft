@@ -37,6 +37,7 @@ Entries are written with [changie](https://changie.dev) as the change is made, n
 ### Added
 
 - `weft-eval recall` and `make recall` measure what nDCG cannot see about an approximate vector index: overlap with a brute-force scan, candidates scored per query, latency both ways, and the working set a query actually reaches in bytes and in distinct pages. A partition that loses half the true neighbours holds nDCG steady when the neighbours it lost were unjudged, which on 50 queries against 171,332 documents is most of them. ([#11](https://github.com/skyoo2003/weft/issues/11))
+- `weft-eval bench` and `make bench` publish a latency distribution rather than a mean: an open-loop arrival ladder at 12.5%, 25%, 50%, 100% and 200% of measured sequential throughput, with each request timed from its intended send time so a stall lands on every request it delayed. Every rung reports p50/p95/p99/p99.9 as measured and with the stop-the-world time charged to each sample removed, alongside GC cycles, GC CPU share, page faults and context switches. A quantile without 100 samples beyond it is left out rather than printed, and which rung the headline is quoted at is fixed by a rule registered before the numbers existed. docs/PERF.md is the measurement design. ([#12](https://github.com/skyoo2003/weft/issues/12))
 
 ### Changed
 

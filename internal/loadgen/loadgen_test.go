@@ -4,7 +4,9 @@ package loadgen
 
 import (
 	"context"
+	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -265,9 +267,88 @@ func TestGCCPUShareIsAFraction(t *testing.T) {
 	}
 }
 
-// TestSummarizeDoesNotMutateTheCaller matters because the driver hands the same
-// slice to three summaries — all, GC-free and GC-hit — and a summarizer that sorted
-// in place would reorder samples whose order still carries the send sequence.
+// TestGCCPUShareBetweenIsARatioOfDifferences is the arithmetic a rung's figure
+// needs and the whole-process share cannot give it.
+//
+// Both metrics are cumulative since process start, so subtracting two shares is
+// meaningless: by the fifth rung the running ratio is dominated by the index
+// mapping, the cold pass and the four rungs before it, and a rung where the
+// collector took a third of the CPU reads the same as one where it took none. The
+// ratio of the differences is what describes the interval.
+func TestGCCPUShareBetweenIsARatioOfDifferences(t *testing.T) {
+	// 1.0s of collector time out of 4.0s of process time during the interval,
+	// against a history that spent almost nothing on the collector. The whole-
+	// process share is 1.01/100.0 ≈ 1%; the interval's is 25%.
+	if got := GCCPUShareBetween(0.01, 96.0, 1.01, 100.0); math.Abs(got-0.25) > 1e-9 {
+		t.Errorf("GCCPUShareBetween = %v, want 0.25", got)
+	}
+	// No CPU elapsed between the snapshots: nothing to take a share of, and a
+	// division here would be an Inf or a NaN printed as a percentage.
+	if got := GCCPUShareBetween(1, 2, 1, 2); got != 0 {
+		t.Errorf("GCCPUShareBetween over a zero interval = %v, want 0", got)
+	}
+}
+
+// TestGCPauseTotalDoesNotAllocate keeps the instrument out of its own measurement.
+//
+// GCPauseTotal is called twice per request — 100,000 times over a ladder — and
+// metrics.Read allocates a fresh 163-bucket histogram for every Sample it has not
+// seen before. Measured at 1,504 B and 3 allocs per call before the read buffer was
+// pooled, which is ~150 MiB of garbage per ladder produced by the pause counter,
+// driving collections the report then charges to the query. This is the same
+// sentence the package already applies to ReadMemStats, asserted.
+func TestGCPauseTotalDoesNotAllocate(t *testing.T) {
+	if n := testing.AllocsPerRun(100, func() { _ = GCPauseTotal() }); n > 0 {
+		t.Errorf("GCPauseTotal allocates %.0f times per call; the pause counter is "+
+			"making the collections it reports", n)
+	}
+}
+
+// TestDriveRejectsANonPositiveRate pins the backstop under the flag validation.
+//
+// float64(time.Second)/0 is +Inf and float64(time.Second)/-5 is negative. The first
+// converts to a time.Duration by an undefined float-to-int conversion that differs
+// between amd64 and arm64; the second makes every due time earlier than the last, so
+// the whole rung dispatches at once and its latencies — taken from a due time
+// minutes in the past — climb linearly and print as a distribution.
+func TestDriveRejectsANonPositiveRate(t *testing.T) {
+	for _, rate := range []float64{0, -5, math.NaN()} {
+		var ran atomic.Int64
+		samples, shed := Drive(context.Background(), rate, 100, 8, func(int) { ran.Add(1) })
+		if len(samples) != 0 || shed != 0 || ran.Load() != 0 {
+			t.Errorf("Drive at rate %v sent %d requests (%d samples, %d shed); a "+
+				"non-positive rate has no schedule", rate, ran.Load(), len(samples), shed)
+		}
+	}
+}
+
+// TestOpenLoopCancelsWhenBehindSchedule is the half of cancellation the timer path
+// cannot cover.
+//
+// The ctx check used to live inside `if d := time.Until(due); d > 0`. Once the send
+// loop falls behind its own schedule that branch is never taken — which is exactly
+// what a rate above what the loop can dispatch produces — so a cancelled rung ran to
+// all n requests. A no-op `do` at a modest rate keeps the driver ahead of schedule
+// and never reaches the bug, which is why the existing cancellation test passed over
+// it. Here the rate is high enough that every due time is already in the past.
+func TestOpenLoopCancelsWhenBehindSchedule(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// 1e9/s: interval rounds to a nanosecond, so the schedule is behind from the
+	// first iteration and time.Until(due) is never positive.
+	samples, shed := Drive(ctx, 1e9, 1_000_000, 8, func(int) {})
+	if len(samples)+shed > 1000 {
+		t.Errorf("an already-cancelled Drive sent %d of 1,000,000 requests; the "+
+			"cancellation check is only reachable while the loop is ahead of schedule",
+			len(samples)+shed)
+	}
+}
+
+// TestSummarizeDoesNotMutateTheCaller matters because SplitByGC returns two slices
+// that are index-aligned with each other and with the samples they came from, and a
+// summarizer that sorted in place would destroy that alignment on the first of the
+// two calls the report makes.
 func TestSummarizeDoesNotMutateTheCaller(t *testing.T) {
 	in := []time.Duration{3, 1, 2}
 	Summarize(in)

@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -112,7 +113,7 @@ func indexMapping() mapping.IndexMapping {
 	return m
 }
 
-func buildIndex(ctx context.Context, corpusPath, indexPath string, batchSize int) error {
+func buildIndex(ctx context.Context, corpusPath, indexPath string, batchSize int) (err error) {
 	if _, err := os.Stat(indexPath); err == nil {
 		return fmt.Errorf("%s already exists: remove it to rebuild, so a half-written "+
 			"index is never measured under the label of a complete one", indexPath)
@@ -131,7 +132,15 @@ func buildIndex(ctx context.Context, corpusPath, indexPath string, batchSize int
 	if err != nil {
 		return fmt.Errorf("create index: %w", err)
 	}
-	defer ix.Close() //nolint:errcheck // the error that matters is on Batch
+	// Reported, not dropped. scorch persists on Close, so a Close that fails is
+	// exactly the half-written index the os.Stat guard above exists to prevent
+	// anyone from measuring — and it would otherwise be the one failure that leaves
+	// a directory looking complete.
+	defer func() {
+		if cerr := ix.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close index: %w", cerr)
+		}
+	}()
 
 	start := time.Now()
 	sc := bufio.NewScanner(f)
@@ -236,16 +245,29 @@ func readQrels(path string) (map[string]bool, error) {
 
 	out := map[string]bool{}
 	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		fields := strings.Fields(sc.Text())
-		if len(fields) < 3 {
+	for line := 1; sc.Scan(); line++ {
+		text := strings.TrimSpace(sc.Text())
+		if text == "" {
 			continue
 		}
-		// The BEIR qrels carry a header row. Detected by the score column not
-		// being a number rather than by skipping line 0, so a file written
-		// without one is not silently missing its first query.
+		fields := strings.Fields(text)
+		// The BEIR qrels carry a header row, and it is the only row allowed to be
+		// unparseable. Every other malformed row is an error rather than a skip:
+		// internal/eval.ReadQrels refuses the same file on weft's side, and a
+		// comparison where one engine errors and the other quietly replays a
+		// smaller query set is measuring two different amounts of work under one
+		// ratio.
+		if len(fields) < 3 {
+			if line == 1 {
+				continue
+			}
+			return nil, fmt.Errorf("%s line %d: %d columns, need 3", path, line, len(fields))
+		}
 		if _, err := strconv.Atoi(fields[2]); err != nil {
-			continue
+			if line == 1 {
+				continue
+			}
+			return nil, fmt.Errorf("%s line %d: score %q is not a number", path, line, fields[2])
 		}
 		out[fields[0]] = true
 	}
@@ -255,6 +277,12 @@ func readQrels(path string) (map[string]bool, error) {
 func measure(ctx context.Context, data, indexPath string, rate float64, rotations, inflight int) error {
 	if rotations <= 0 {
 		return fmt.Errorf("-rotations=%d: a run needs at least one pass", rotations)
+	}
+	// Same rejection weft's bench makes: a negative rate puts every due time before
+	// the last, dispatches the whole rung at once, and prints latencies measured
+	// from a due time minutes in the past as though they were a distribution.
+	if rate < 0 || math.IsNaN(rate) {
+		return fmt.Errorf("-rate=%v: an arrival rate is positive, or 0 to sweep the ladder", rate)
 	}
 	if inflight <= 0 {
 		inflight = loadgen.DefaultInflight()
@@ -289,12 +317,16 @@ func measure(ctx context.Context, data, indexPath string, rate float64, rotation
 	}
 
 	// Cold, then the warm sequential median the ladder is scaled from. Same two
-	// preliminaries weft's bench runs, in the same order, so the denominators are
-	// derived the same way on both sides.
+	// preliminaries weft's bench runs, in the same order, including the per-query
+	// cancellation check, so the denominators are derived the same way on both
+	// sides and Ctrl-C ends both at the same granularity.
 	coldFaults := loadgen.ProcFaults()
 	coldStart := time.Now()
 	var coldWorst time.Duration
 	for i := range qs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		t := time.Now()
 		do(i)
 		if d := time.Since(t); d > coldWorst {
@@ -308,6 +340,9 @@ func measure(ctx context.Context, data, indexPath string, rate float64, rotation
 
 	warm := make([]time.Duration, 0, len(qs))
 	for i := range qs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		t := time.Now()
 		do(i)
 		warm = append(warm, time.Since(t))
@@ -315,6 +350,14 @@ func measure(ctx context.Context, data, indexPath string, rate float64, rotation
 	unloaded := loadgen.Summarize(warm).P50
 	if unloaded <= 0 {
 		return errors.New("the sequential replay measured no time at all")
+	}
+	// Fatal for the same reason it is on weft's side: these are not a distribution
+	// the run reports, they are what every rate on the ladder is derived from, and a
+	// median taken off an error path scales the whole ladder to a schedule no engine
+	// was ever asked to meet.
+	if f := failed.Load(); f > 0 {
+		return fmt.Errorf("%d of the %d cold and sequential searches returned an error, so the "+
+			"ladder would be scaled from an error path rather than from a query", f, 2*len(qs))
 	}
 	log.Printf("unloaded: p50 %v over %d queries, so %.1f q/s sequentially",
 		unloaded.Round(time.Microsecond), len(qs), float64(time.Second)/float64(unloaded))
@@ -336,13 +379,20 @@ func measure(ctx context.Context, data, indexPath string, rate float64, rotation
 	rungs := make([]rung, 0, len(rates))
 	for _, r := range rates {
 		fb, cb, pb := loadgen.ProcFaults(), loadgen.GCCycles(), loadgen.GCPauseTotal()
+		// Both CPU totals rather than their ratio, for the reason cmd/weft-eval
+		// states: a ratio of running totals does not subtract, so the raw figure
+		// stops moving after the first rung whatever the collector then does.
+		gcCPU0, totalCPU0 := loadgen.GCCPUSeconds()
 		start := time.Now()
 		samples, shed := loadgen.Drive(ctx, r, n, inflight, do)
 		elapsed := time.Since(start)
+		gcCPU1, totalCPU1 := loadgen.GCCPUSeconds()
 		raw, exGC := loadgen.SplitByGC(samples)
 		g := rung{
 			rate: r, all: loadgen.Summarize(raw), exGC: loadgen.Summarize(exGC),
-			shed: shed, gcCPU: loadgen.GCCPUShare(), pause: loadgen.GCPauseTotal() - pb,
+			shed:    shed,
+			gcCPU:   loadgen.GCCPUShareBetween(gcCPU0, totalCPU0, gcCPU1, totalCPU1),
+			pause:   loadgen.GCPauseTotal() - pb,
 			elapsed: elapsed, faults: loadgen.ProcFaults().Sub(fb), cycles: loadgen.GCCycles() - cb,
 		}
 		rungs = append(rungs, g)
@@ -400,7 +450,10 @@ func (g rung) print() {
 	fmt.Printf("  gc        cycles %d  STW %v (%.3f%% of elapsed)  GC CPU share %.1f%%\n",
 		g.cycles, g.pause.Round(time.Microsecond),
 		100*float64(g.pause)/float64(max(g.elapsed, 1)), 100*g.gcCPU)
-	fmt.Printf("  rusage    minflt %d  majflt %d  nvcsw %d  nivcsw %d  maxrss %.1f MiB\n",
+	// peakrss, not maxrss: ru_maxrss is a high-water mark the kernel never lowers,
+	// so this is the peak the process has reached by now — index open and cold pass
+	// included — and not a figure for this rung. Same label cmd/weft-eval prints.
+	fmt.Printf("  rusage    minflt %d  majflt %d  nvcsw %d  nivcsw %d  peakrss %.1f MiB (process)\n",
 		g.faults.Minor, g.faults.Major, g.faults.Nvcsw, g.faults.Nivcsw,
 		float64(loadgen.MaxRSS())/(1<<20))
 }
