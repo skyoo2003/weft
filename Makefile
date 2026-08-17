@@ -1,6 +1,6 @@
 .PHONY: all fmt build vet test lint lint-docs spdx fuzz arch deps run example clean \
 	changelog changelog-new changelog-check docs-site release-check \
-	eval eval-full eval-data recall
+	eval eval-full eval-data recall bench bench-compare
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
@@ -181,6 +181,36 @@ recall:
 # sensitivity sweep, and the fusion weight sweep behind the README's claim that no
 # weight makes the graph stream worth anything. Slower — the sweep alone re-measures
 # 28 configurations.
+# Milestone 5. The latency distribution `eval` and `recall` cannot produce: both
+# report means of a sequential replay, and a tail is the statistic a mean is blind
+# to. Open loop, so a stalled server does not get to slow the load down and hide
+# its own p99 — docs/PERF.md section 2.
+#
+# Not in `all` and not in CI. A shared runner's tail latency is a function of
+# whatever else is on the machine, so gating a merge on a p99 measured there makes
+# the gate a coin flip. CI builds bench/ and runs the driver's unit tests; the
+# numbers are produced by a person on a quiet machine and published in docs/PERF.md.
+#
+# Long: the ladder's lowest rung sends 10,000 queries at an eighth of measured
+# throughput, and a p99 needs all 10,000 — see printableQuantile.
+bench:
+	@if [ ! -d $(EVAL_DATA)/index ]; then \
+		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; \
+	else \
+		go run ./cmd/weft-eval bench -data $(EVAL_DATA) $(BENCHFLAGS); \
+	fi
+
+# Milestone 5's third assertion: same machine, same corpus, same queries, same
+# driver. bench/ is a separate module so that bleve never enters this one — `make
+# deps` is what proves it did not. See bench/README.md for what the comparison
+# does and does not cover.
+bench-compare:
+	@if [ ! -d bench/.bleve-index ]; then \
+		echo "SKIP: no bleve index — run 'cd bench && go run . -build' first (slow, once)"; \
+	else \
+		cd bench && go run . -data ../$(EVAL_DATA) $(BENCHFLAGS); \
+	fi
+
 eval-full:
 	go run ./cmd/weft-eval diagnose
 	go run ./cmd/weft-eval run

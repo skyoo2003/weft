@@ -36,3 +36,6 @@ __pycache__/
 .idea/
 .vscode/
 .changelog.expected
+
+# The bleve comparison index. Multi-gigabyte, rebuildable with `cd bench && go run . -build`.
+/bench/.bleve-index/
