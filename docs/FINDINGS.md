@@ -1001,7 +1001,9 @@ weft's p99 at the registered load point is **98.041 ms**, of which the collector
 accounts for **279 µs — 0.28%**. bleve on the same machine, corpus, query set, arm
 and load generator is **47.123 ms**, so weft is **2.08×** it against a bar of 10×.
 The plan predicted the tail would be a working-set problem rather than a GC
-problem; it is neither. Evidence: `internal/loadgen`, `weft-eval bench`, `bench/`.
+problem; below saturation it is neither. **Above it, the ladder found something the
+plan did not look for: weft cannot sustain its own sequential throughput, and bleve
+can** (§3.2). Evidence: `internal/loadgen`, `weft-eval bench`, `bench/`.
 The measurement design and the judgment rules fixed before the numbers are
 [PERF.md](PERF.md), the decision is [D-009](DECISIONS.md).
 
@@ -1012,6 +1014,7 @@ The measurement design and the judgment rules fixed before the numbers are
 | `go list -m all` still one line after bleve entered | **holds.** bleve and its ~20 transitive modules live in `bench/`, a separate module |
 | `pkg/fusion` unchanged | **holds.** 0 lines. `pkg/scorer` 0 lines too — this milestone changed no engine code |
 | The write lock's ceiling under read load | **missed.** Not measured — see §5 |
+| *(not a pass line, found anyway)* | weft collapses at 25.86/s — p50 39 ms to 1.80 s, 24% shed, RSS 141 to 817 MiB. §3.2 |
 
 ## 1. Result
 
@@ -1025,7 +1028,8 @@ queries, k = 10, `text` arm both sides.
 | headline rung (12.5% of own throughput) | 3.23/s | 19.53/s |
 | p50 | 68.356 ms | 13.686 ms |
 | p95 | 87.912 ms | 33.313 ms |
-| **p99** | **98.041 ms** | **47.123 ms** |
+| **p99** (headline rung) | **98.041 ms** | **47.123 ms** |
+| best p99 on the ladder | 78.237 ms at 6.46/s | 24.783 ms at 156.23/s |
 | p99 minus charged STW | 97.762 ms | 47.123 ms |
 | max | 212.528 ms | 62.007 ms |
 | GC cycles over the rung | 24,256 | 1,688 |
@@ -1086,42 +1090,95 @@ measurement cannot say what.
 ## 3. What the tail actually is, which nothing predicted
 
 Neither GC nor storage leaves anything like the gap between 38.671 ms sequential
-and 68.356 ms at 12.5% of that throughput. The counter that moves is
-`nivcsw`: **2,066,685 involuntary context switches** over 51 minutes, 207 per
-query.
+and 68.356 ms at 12.5% of that throughput. And nothing in the plan predicted what
+the ladder found above it. Both ladders, in full:
 
-**bleve does the same thing**, and that is what makes it a fact about the
-measurement rather than about weft:
-
-| rate | 19.53/s | 39.06/s | 78.11/s | 156.23/s | 312.45/s |
+| rate (weft) | 3.23/s | 6.46/s | 12.93/s | **25.86/s** | 51.72/s |
 | --- | --- | --- | --- | --- | --- |
-| bleve p50 | 13.686 ms | 9.954 ms | 7.367 ms | 7.248 ms | 9.501 ms |
-| bleve p99 | 47.123 ms | 32.442 ms | 25.149 ms | 24.783 ms | — (shed 1) |
+| p50 | 68.356 ms | 52.795 ms | 39.328 ms | **1.7995 s** | 2.1446 s |
+| p95 | 87.912 ms | 69.067 ms | 59.470 ms | 3.3333 s | 3.7602 s |
+| p99 | 98.041 ms | 78.237 ms | 81.070 ms | — | — |
+| shed | 0 | 0 | 0 | **2,363** | 6,516 |
+| peak RSS | 115.1 MiB | 118.0 MiB | 141.4 MiB | **816.8 MiB** | 801.0 MiB |
 
-**Latency falls as load rises, monotonically, over an eight-fold range**, and only
-turns around past saturation. bleve's sequential p50 is 6.401 ms and its *best*
-open-loop p50 is 7.248 ms at full measured throughput — close. At an eighth of that
-it is 13.686 ms, nearly double, for doing less work.
+| rate (bleve) | 19.53/s | 39.06/s | 78.11/s | 156.23/s | 312.45/s |
+| --- | --- | --- | --- | --- | --- |
+| p50 | 13.686 ms | 9.954 ms | 7.367 ms | 7.248 ms | 9.501 ms |
+| p99 | 47.123 ms | 32.442 ms | 25.149 ms | 24.783 ms | — |
+| shed | 0 | 0 | 0 | 0 | 1 |
+| peak RSS | 58.4 MiB | 58.4 MiB | 58.4 MiB | 58.4 MiB | 65.6 MiB |
 
-The explanation that fits both engines is that the sequential baseline measures a
-warm machine and a sparse open loop does not. At 3.23/s a query is followed by 240
-ms of idle, over which caches are evicted and the core clocks down; back-to-back in
+Two separate things are in those tables and the milestone's registered rule saw
+neither.
+
+### 3.1 Latency falls as load rises, on both engines
+
+p50 drops monotonically over a four-fold range on weft (68.4 → 39.3 ms) and an
+eight-fold range on bleve (13.7 → 7.2 ms), and bleve's *best* open-loop p50 —
+7.248 ms at full measured throughput — is within 13% of its 6.401 ms sequential
+baseline while its lowest rung is more than double it.
+
+The explanation that fits both is that the sequential baseline measures a warm
+machine and a sparse open loop does not. At 3.23/s a weft query is followed by 240
+ms of idle, over which caches are evicted and the core clocks down; back to back in
 a tight loop, none of that happens. So:
 
 1. **The "unloaded" denominator is optimistic**, and every rung below saturation is
    measured against a machine state no rung reproduces.
-2. **The saturation rule therefore fires at rung 1 for both engines** — p50 passed
-   twice the unloaded p50 immediately — which makes the headline the *slowest* rung
-   on the ladder. The rule was registered before the numbers ([PERF.md](PERF.md)
-   §3) and is reported as it fired rather than adjusted afterwards. It is
-   conservative in weft's favour only in the sense that it is conservative for both.
+2. **The registered saturation rule therefore fires at rung 1 for both engines** —
+   p50 passed twice the unloaded p50 immediately — which puts the headline on the
+   *slowest* rung of the ladder. The rule was fixed before the numbers
+   ([PERF.md](PERF.md) §3) and is reported as it fired rather than adjusted
+   afterwards.
 3. **The comparison survives it** because both sides are quoted at the same relative
-   load, 12.5% of their own sequential throughput, through the same driver.
+   load, 12.5% of their own sequential throughput, through the same driver. It is
+   also conservative for weft: its best measured p99 is 78.237 ms, not 98.041 ms.
 
-**What would fix the rule is a different denominator**: an open-loop rung at the
-lowest rate, rather than a tight sequential loop. That is a change to a registered
+**What would fix the rule is a different denominator** — an open-loop rung at the
+lowest rate rather than a tight sequential loop. That is a change to a registered
 judgment rule and belongs to whoever owns it, not to the milestone measuring under
-it. It is recorded here rather than applied.
+it.
+
+### 3.2 weft cannot sustain its own sequential throughput, and bleve can
+
+This is the milestone's real finding and no part of the plan anticipated it.
+
+At 25.86/s — exactly the rate weft's own sequential replay achieved — the engine
+does not slow down, it **collapses**: p50 goes from 39.3 ms to **1.80 seconds**, a
+factor of 45; 2,363 of 10,000 requests are shed because the in-flight cap is
+permanently full; and peak RSS goes from 141 MiB to **817 MiB**. bleve at the
+corresponding rung of its own ladder, 156.23/s, has p50 7.248 ms, sheds nothing,
+and sits at the same 58.4 MiB it used at every other rate.
+
+The mechanism is visible in the RSS column and it is not the collector's baseline
+cost:
+
+- A weft query allocates 43.6 MiB and holds much of it live at once — 30,549
+  candidates and their decoded records (§2).
+- The in-flight cap is 40. Forty concurrent queries is therefore of order 800 MiB
+  of **live** heap, which is what the 816.8 MiB measures.
+- GOGC targets a multiple of live heap, so the collector's work per cycle scales
+  with concurrency here. More in flight makes each query slower, which puts more in
+  flight.
+
+That is a positive feedback loop with a knee, and the knee sits between 12.93/s and
+25.86/s. **bleve has no such knee in the measured range** because its per-query live
+set is small enough that concurrency does not move its heap at all — 58.4 MiB at
+every rung.
+
+So the plan's §1 was wrong to acquit the collector and wrong about which resource
+would bind, but the corrected story is not the one it told either. Below the knee
+GC is 0.28% of the p99 and the working set is entirely page-cached. At the knee the
+binding constraint is **live heap under concurrency**, which is a property of
+`Index.Doc` decoding a whole record per candidate — the same decode
+[milestone 3b §3](#milestone-3b--the-vector-scan) costed at a 1.4× tax on the
+working set, now reappearing as the thing that ends the throughput curve.
+
+**What this does not say.** The knee was found with `inflight = 40`; a lower cap
+would trade shed requests for a lower heap and might move it. Nothing here sweeps
+that, and the honest statement is that weft's usable throughput on this corpus and
+this machine is **at least 12.93/s and less than 25.86/s**, against a sequential
+25.86/s — bleve's usable throughput is at least its sequential 156/s.
 
 ## 4. Known costs
 
@@ -1195,9 +1252,15 @@ the verdict stands and the caveat is still recorded.
    against a copy. This is the one pass line milestone 5 misses.
 2. **The saturation rule's denominator is wrong** (§3), and fixing it changes a
    registered rule.
-3. **The tail is neither the collector nor the storage** (§2), so the 210 MiB
-   working set and the centroid-ordered `docs` layout milestone 3b costed remain
-   unjustified by any measurement here. They would bind on a host whose page cache
-   is contested; this one's is not.
-4. **`text+vector` has no published tail** (§4.4).
-5. **Three repetitions** (§4.5).
+3. **The throughput knee is live heap under concurrency** (§3.2), and it is the
+   first measurement that puts a number on the cost of `Index.Doc` decoding a whole
+   record per candidate. Milestone 3b costed that decode as a 1.4× tax on the
+   working set and registered a repayment trigger against page counts; the trigger
+   that actually fired is a different one. Whether a lower in-flight cap moves the
+   knee is unswept.
+4. **Below the knee the tail is neither the collector nor the storage** (§2), so the
+   210 MiB working set and the centroid-ordered `docs` layout milestone 3b costed
+   remain unjustified by any measurement here. They would bind on a host whose page
+   cache is contested; this one's is not.
+5. **`text+vector` has no published tail** (§4.4).
+6. **Three repetitions** (§4.5).

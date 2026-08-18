@@ -250,6 +250,7 @@ the lesson [FINDINGS](FINDINGS.md) milestone 4 §4.2 paid for once already.
 | GOGC | 100 (default) |
 | corpus | 171,332 documents, 50 judged TREC-COVID queries, k=10 |
 | repetitions | **1** — the median-of-three rule above is not yet satisfied. See [FINDINGS](FINDINGS.md) milestone 5 §4.5 |
+| weft ladder | rung 1 in one process; rungs 2–5 as four separate `-rate` invocations, each with its own warm-up. Stated because it is a deviation from one-process-per-ladder |
 
 The numbers measured on it are in [FINDINGS.md](FINDINGS.md) milestone 5 §1.
 

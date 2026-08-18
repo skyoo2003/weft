@@ -123,9 +123,11 @@ rate=312.45/s  p50  9.501ms  p95 42.534ms  p99   --      max 244.488ms  (shed 1)
 **Rule 2: 98.041 ms <= 10 x 47.123 ms. Ratio 2.08. Passes.**
 
 The ladder is non-monotone downward — p99 falls as load rises over an eight-fold
-range — and weft's partial ladder shows the same shape. That is a property of the
-measurement rather than of either engine; [FINDINGS](../FINDINGS.md) milestone 5
-§3 has the diagnosis and says what would fix the rule.
+range, and weft's ladder does the same thing below its knee (68.4 → 52.8 → 39.3 ms
+p50). Above the knee weft collapses and bleve does not — p50 1.80 s and 24% shed at
+25.86/s against bleve's 7.248 ms and zero at 156.23/s. That is the milestone's
+largest finding and no pass line asked for it;
+[FINDINGS](../FINDINGS.md) milestone 5 §3.2 has the mechanism.
 
 ### Task 6 — documentation
 
