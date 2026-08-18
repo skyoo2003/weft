@@ -72,9 +72,15 @@ what a real adopter would have, and records every point at which it was blocked.
 
 | In | Out |
 | --- | --- |
-| every `.md` in the repository **except this file** | every `.go` under `pkg/`, `internal/`, `cmd/`, `bench/` |
-| `go doc` output for any package, including rendered Examples | `pkg/engine/testdata/*` golden API files |
+| every `.md` in the repository except the two on the right | this file, and `docs/testing/*.tdd.md` |
+| `go doc` output for any package, including rendered Examples | every `.go` under `pkg/`, `internal/`, `cmd/`, `bench/`, and `pkg/engine/testdata/*` |
 | everything under `examples/` | the git history, the PRD, and `.claude/plans/` |
+
+The two excluded documents are excluded for one reason: both record the answer.
+This file states the verdict on prediction A in §1.1, and the TDD evidence states
+it again with the tests that produced it. Neither is something an adopter reads to
+add a scorer — one is the protocol for the trial and the other is the maintainer's
+proof — so removing them costs the subject nothing a real user would have had.
 
 `examples/` is in because its name says it is documentation. `go doc` is in
 because pkg.go.dev renders exactly that and it is what a `go get` user reads.
