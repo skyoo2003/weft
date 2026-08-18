@@ -569,3 +569,95 @@ Three things, and each has a number attached.
 3. **Somebody has to read a v2 index this build cannot open.** The reader is only cheap
    while the two versions differ by an appended section; the moment a v4 changes a field,
    this record stops being precedent.
+
+---
+
+## D-009 — The load is open-loop, and bleve lives in a submodule
+
+**Date:** 2026-08-18
+**Milestone:** 5 — performance
+**Status:** accepted
+
+### Context
+
+Milestone 5's outcome sentence asks for two things that each have a trap in them.
+
+"GC pause를 포함한 p99가 공개되고" needs a load generator, and the obvious load
+generator is wrong. "기성 엔진과 같은 자릿수임을 보인다" needs bleve, and the PRD's own
+success metrics forbid bleve: *운영 — 의존성: 표준 라이브러리만. 외부 의존성 0개 유지 —
+`go list -m all` 이 자기 모듈만 출력*.
+
+### Decision
+
+**The driver sends on a clock, not on a completion.** Request *i* is due at
+`start + i/rate` whatever request *i-1* is doing, and its latency is measured from that
+due time. When the in-flight cap is reached the request is **shed and counted**, never
+waited on.
+
+**bleve lives in `bench/`, a separate Go module**, and both harnesses import one shared
+driver from `internal/loadgen` through a `replace` directive.
+
+### Why
+
+**On the loop.** A closed-loop driver — send the next when the last returns — lets a
+stalled server receive less load. The stall then appears as one slow request, because
+every request that would have arrived during it was never sent, and the p99 that comes
+out is a p99 of a load the server chose for itself. That is coordinated omission, and a
+milestone whose entire deliverable is a p99 cannot be measured by the instrument that
+hides it. Shedding rather than blocking is the same argument one level down: a driver
+that waited for a free slot would be waiting on the server again, at exactly the load
+where the bias matters most. `TestOpenLoopDoesNotLetTheServerSlowTheLoad` is the
+assertion, and it distinguishes the two designs by the *count* of slow samples — one for
+a closed loop, many for an open one.
+
+**On the submodule.** The alternative was to quote a figure bleve's own documentation
+publishes, and that is not a comparison: different machine, different corpus, different
+query set, different rank cut. Any of those alone can move a latency by more than the
+order of magnitude the rule is testing. A nested module gets both properties at once,
+because the Go tool's module graph and the working tree are different things:
+`GOWORK=off go list -m all` at the root still prints one line and `go build ./...` never
+descends, while `gofmt -l .` and `git ls-files '*.go'` still do. Measured after adding
+bleve v2.6.0 and its roughly twenty transitive modules: `make deps` prints
+`github.com/skyoo2003/weft` and nothing else, `make arch` is green, `make spdx` is green.
+
+**On sharing the driver.** The rule being tested is a ratio. A bias present in one
+implementation of an open loop and absent from the other moves that ratio without
+moving either engine, so the two harnesses are two `main` packages over one
+`internal/loadgen`. That is also why `internal/` and not `pkg/`: the driver is a
+measurement tool, not part of what weft offers an embedder, and putting it in `pkg/`
+would add it to the public API golden and to the CHANGELOG's promises.
+
+### What it costs
+
+**The hybrid arm is not compared.** bleve's kNN is behind a `vectors` build tag and needs
+cgo and a faiss shared library. Taking that on changes the subject — "a Go search engine"
+becomes "a Go wrapper around faiss" — so the comparison covers `text` only. The arm a
+user would actually deploy is `text+vector`, and this decision means the milestone cannot
+speak to it. Stated in `bench/README.md` and [PERF.md](PERF.md) §4 rather than discovered
+by a reader later.
+
+**The analyzers do not match.** bleve's `standard` analyzer stems and drops stop words;
+`engine.Tokenize` does neither. The effects run in opposite directions and neither is
+plausibly worth 10×, which is all rule 2 asks — but the comparison is not
+analyzer-matched and no reading of it should assume otherwise.
+
+**A submodule is a second place to keep green.** It has its own `go.mod` and its own
+lockstep with the driver's exported names. CI builds it; CI does not run it.
+
+**Neither `bench` target is in `all` or in CI.** A shared runner's tail latency is a
+function of whatever else is on the machine, so gating a merge on a p99 measured there
+makes the gate a coin flip. The numbers are produced by a person on a quiet machine and
+published in [PERF.md](PERF.md).
+
+### What would show this decision was wrong
+
+1. **`bench/` acquires a reason to be imported by the main module.** Then the quarantine
+   is load-bearing in the wrong direction and the dependency metric has to be renegotiated
+   rather than worked around. `make deps` is what would catch the drift.
+2. **The open loop turns out to be measuring the driver.** If the ladder's upper rungs
+   report `shed` counts large enough that the distribution is mostly of requests that were
+   never sent, the cap is the instrument's limit rather than the server's, and the fix is
+   a driver process separate from the server process — which is a rewrite, not a tweak.
+3. **Somebody needs the hybrid comparison.** Then faiss enters `bench/`, the "Go engine
+   against Go engine" framing goes with it, and this record stops being precedent for what
+   the comparison means.

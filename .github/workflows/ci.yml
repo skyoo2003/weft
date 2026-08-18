@@ -35,10 +35,14 @@ jobs:
         with:
           # go.mod is the single source of truth for the Go version.
           go-version-file: go.mod
-          # Zero external dependencies means no go.sum, and the cache is on by
-          # default: it warns on every run looking for a file that will never
-          # exist. Nothing to cache, so ask for nothing.
-          cache: false
+          # The root module has zero external dependencies and no go.sum, so there was
+          # nothing to cache and the cache was switched off to stop it warning about a
+          # file that would never exist. bench/go.sum broke that premise: the bleve
+          # comparison is its own module with 30-odd modules behind it, and
+          # `make bench-build` below pulls all of them. Keyed on that file alone,
+          # because it is the only one in the repository the cache can be keyed on.
+          cache: true
+          cache-dependency-path: bench/go.sum
 
       # fmt + build + vet + test -race.
       - run: make all
@@ -47,12 +51,28 @@ jobs:
       # enough to run unconditionally, and the failure names the files.
       - run: make spdx
 
+      # bench/ is a separate module, so `make all` never compiles it — the whole
+      # point of the quarantine is that the root module does not see bleve. That
+      # also means nothing above would notice bench/main.go failing to build, and
+      # it is the entire bleve half of milestone 5's order-of-magnitude claim.
+      - run: make bench-build
+
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # golangci-lint-action v9.3.0
         with:
           # Must match GOLANGCI_VERSION in the Makefile: the action brings its
           # own binary, so this is the one place the two can drift.
           version: v2.12.2
+
+      # The same reasoning bench-build is built on, applied to the linter: `./...` does
+      # not descend into a nested module, so the step above never reads bench/main.go.
+      # A second invocation rather than a wider glob, because the two are separate
+      # modules; it finds this repository's .golangci.yaml by walking up from bench/.
+      - name: Lint the comparison module
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # golangci-lint-action v9.3.0
+        with:
+          version: v2.12.2
+          working-directory: bench
 
       - name: Lint documentation
         uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff  # markdownlint-cli2-action v24.2.0

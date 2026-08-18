@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/skyoo2003/weft/internal/eval"
+	"github.com/skyoo2003/weft/internal/loadgen"
 	"github.com/skyoo2003/weft/pkg/engine"
 )
 
@@ -95,7 +96,7 @@ func recall(ctx context.Context, args []string) error {
 	// the corpus, so a mark taken after it is already at the full-scan high water —
 	// and ru_maxrss is a high-water mark nothing can lower, which is what makes a
 	// "before" reading taken too late not a baseline but a second copy of "after".
-	rssBefore := maxRSS()
+	rssBefore := loadgen.MaxRSS()
 
 	ext, err := recordExtents(ix, filepath.Join(*data, indexDir))
 	if err != nil {
@@ -207,7 +208,7 @@ func measureRecall(ctx context.Context, ix *engine.Index, ext extents, qs []quer
 			st.worstRecall, st.worstQuery = r, q.id
 		}
 	}
-	st.rssAfter = maxRSS()
+	st.rssAfter = loadgen.MaxRSS()
 	return st, nil
 }
 

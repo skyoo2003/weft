@@ -12,14 +12,17 @@ make all      # fmt + build + vet + test -race
 
 That needs nothing installed but the Go toolchain, which is deliberate: you can run the whole of it before you have read anything or installed anything. [CI](.github/workflows/ci.yml) calls this same target rather than copying its commands, so neither can drift from the other. The target is shared; the environment is not. CI runs one platform, `ubuntu-latest`, at go.mod's Go version, and `test -race` needs a C toolchain, so a local failure CI would never have seen is possible in the other direction.
 
-Four more checks run in CI and are Makefile targets too, kept out of `make all` because each costs a tool to install or a minute of wall clock:
+Five more checks run in CI and are Makefile targets too, kept out of `make all` because each costs a tool to install or a minute of wall clock:
 
 ```bash
 make spdx         # every .go file carries its licence line; make spdx-fix adds them
-make lint         # golangci-lint, pinned to the version CI uses
+make bench-build  # vet + test the bleve comparison, which is its own module
+make lint         # golangci-lint, pinned to the version CI uses; covers bench/ too
 make lint-docs    # markdownlint over every .md
 make fuzz         # 30s each against the two segment-decoder fuzz targets
 ```
+
+`bench-build` is separate from `make all` for a structural reason rather than a cost one: `bench/` is a nested module, so neither `go build ./...` nor `golangci-lint run ./...` at the root descends into it, and without a target naming it the bleve half of milestone 5's comparison would rot unnoticed between the runs that use it.
 
 `make lint` and `make lint-docs` need `golangci-lint` and `markdownlint-cli2`; each target says so and names the install command rather than failing obscurely. `make fuzz` needs nothing but time, and it is the one most likely to find something no test covers — [SECURITY.md](SECURITY.md) names the segment decoder as the first place a hostile file lands. There is an optional [pre-commit config](.pre-commit-config.yaml) that runs the first three; nothing requires it, and CI does not use it.
 

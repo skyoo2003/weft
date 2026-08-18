@@ -1,6 +1,6 @@
 .PHONY: all fmt build vet test lint lint-docs spdx fuzz arch deps run example clean \
 	changelog changelog-new changelog-check docs-site release-check \
-	eval eval-full eval-data recall
+	eval eval-full eval-data recall bench bench-compare bench-build
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
@@ -46,6 +46,11 @@ lint:
 		exit 1; \
 	}
 	golangci-lint run ./...
+	# bench/ too, for the reason bench-build exists: `./...` does not descend into a
+	# nested module, so without this line bench/main.go is the one committed .go file
+	# in the repository no lint gate ever reads. It picks up this same .golangci.yaml
+	# by walking up from bench/.
+	cd bench && golangci-lint run ./...
 
 # Markdown is most of what a first-time reader of this repository actually
 # reads, so it gets the same treatment as the Go.
@@ -177,6 +182,53 @@ recall:
 		go run ./cmd/weft-eval recall -data $(EVAL_DATA); \
 	fi
 
+# Milestone 5. The latency distribution `eval` and `recall` cannot produce: both
+# report means of a sequential replay, and a tail is the statistic a mean is blind
+# to. Open loop, so a stalled server does not get to slow the load down and hide
+# its own p99 — docs/PERF.md section 2.
+#
+# Not in `all` and not in CI. A shared runner's tail latency is a function of
+# whatever else is on the machine, so gating a merge on a p99 measured there makes
+# the gate a coin flip. CI runs the driver's unit tests as part of `all` and compiles
+# the bleve side through `bench-build`; the numbers themselves are produced by a
+# person on a quiet machine and published in docs/PERF.md.
+#
+# Long: the ladder's lowest rung sends 10,000 queries at an eighth of measured
+# throughput, and a p99 needs all 10,000 — see internal/loadgen.Printable.
+bench:
+	@if [ ! -d $(EVAL_DATA)/index ]; then \
+		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; \
+	else \
+		go run ./cmd/weft-eval bench -data $(EVAL_DATA) $(BENCHFLAGS); \
+	fi
+
+# Milestone 5's third assertion: same machine, same corpus, same queries, same
+# driver. bench/ is a separate module so that bleve never enters this one — `make
+# deps` is what proves it did not. See bench/README.md for what the comparison
+# does and does not cover.
+bench-compare:
+	@if [ ! -d bench/.bleve-index ]; then \
+		echo "SKIP: no bleve index — run 'cd bench && go run . -build' first (slow, once)"; \
+	else \
+		cd bench && go run . -data $(abspath $(EVAL_DATA)) $(BENCHFLAGS); \
+	fi
+
+# The bleve side type-checked and tested. Its own target because it is its own
+# module: `go build ./...` at the root does not descend into a nested module, so
+# without this nothing in the gate ever compiles bench/main.go and the comparison
+# rots silently between the runs that use it.
+#
+# `go build ./...` is not among the three: it type-checks nothing vet does not, and it
+# writes a 20 MiB executable into bench/ that nothing runs — the binary .gitignore had
+# to be taught about and `make clean` did not remove. vet fails on a compile error,
+# which is the guarantee this target exists for.
+#
+# `go test ./...` is here for when bench/ has tests rather than because it has them
+# now: the parsing it used to own moved to internal/eval, which is tested in the root
+# module, and what is left is the bleve calls themselves.
+bench-build:
+	cd bench && go vet ./... && go test ./...
+
 # Everything milestone 4 publishes: the degeneracy diagnostic, the frozen arms, the
 # sensitivity sweep, and the fusion weight sweep behind the README's claim that no
 # weight makes the graph stream worth anything. Slower — the sweep alone re-measures
@@ -220,3 +272,7 @@ example:
 clean:
 	go clean ./...
 	rm -f weft
+	# bench/ is its own module, so `go clean ./...` above does not reach it, and a
+	# `go build` run there by hand leaves a 20 MiB executable named after the directory.
+	cd bench && go clean ./...
+	rm -f bench/bench

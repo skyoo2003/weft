@@ -36,3 +36,11 @@ __pycache__/
 .idea/
 .vscode/
 .changelog.expected
+
+# The bleve comparison index. Multi-gigabyte, rebuildable with `cd bench && go run . -build`.
+/bench/.bleve-index/
+
+# And the comparison binary itself. `go build` in bench/ writes a 20 MiB executable
+# named after the directory; README.md there says `go run .`, so nothing needs it
+# committed and a platform-specific binary in the history is 20 MiB nobody can use.
+/bench/bench

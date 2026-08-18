@@ -86,6 +86,7 @@ const (
 	cmdSweep    = "sweep"
 	cmdWeights  = "weights"
 	cmdRecall   = "recall"
+	cmdBench    = "bench"
 )
 
 func main() {
@@ -116,6 +117,8 @@ func main() {
 		err = weights(ctx, args)
 	case cmdRecall:
 		err = recall(ctx, args)
+	case cmdBench:
+		err = bench(ctx, args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -132,7 +135,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: weft-eval <prepare|build|diagnose|run|sweep|weights|recall> [flags]
+	fmt.Fprint(os.Stderr, `usage: weft-eval <prepare|build|diagnose|run|sweep|weights|recall|bench> [flags]
 
   prepare   join corpus ids to Semantic Scholar for citation edges and SPECTER
             vectors. Slow (hours, rate limited) and resumable — rerun to continue.
@@ -147,6 +150,10 @@ func usage() {
             brute-force scan, candidates per query, and the working set a query
             actually reaches. nDCG cannot see a partition losing neighbours the
             qrels never judged; this can.
+  bench     the latency distribution under an open-loop arrival rate, with the
+            GC pause and page faults collected in the same run. recall reports
+            what one query costs; a p99 is a different question and a mean cannot
+            answer it. docs/PERF.md is the measurement design.
 
 Run any subcommand with -h for its flags. docs/EVAL.md is the measurement design.
 `)

@@ -149,13 +149,16 @@ pkg/
     recency/       1/(1+age/HalfLife)
 internal/
   eval/            nDCG@10, arm runner, paired bootstrap, dataset readers
-cmd/weft-eval/     prepare / build / diagnose / run / sweep
+  loadgen/         open-loop load driver, quantiles, GC and rusage accounting
+cmd/weft-eval/     prepare / build / diagnose / run / sweep / weights / recall / bench
+bench/             separate module: the bleve comparison, so weft keeps zero deps
 docs/
   FINDINGS.md      milestone 1, 2 and 4 results, known costs, open questions
   FORMAT.md        the on-disk format, version 1
   DECISIONS.md     decisions expensive to reverse
   DATASETS.md      evaluation dataset survey for milestone 4
   EVAL.md          how milestone 4's numbers were produced, and why to doubt them
+  PERF.md          how milestone 5's latency numbers are produced, and the load-point rule
   RESEARCH.md      one round of community and competitive research
 ```
 
@@ -173,9 +176,10 @@ make run        # interactive demo
 make example    # minimal example
 make eval       # milestone 4's published nDCG table (needs a prepared corpus)
 make eval-full  # adds the graph tie analysis and the 28-configuration sweep
+make bench      # milestone 5's latency ladder (needs a prepared corpus, ~90 min)
 ```
 
-CI runs `make all` plus four targets kept out of it because each costs a tool to install or a minute of wall clock: `make spdx`, `make lint`, `make lint-docs`, and `make fuzz` — the last being 30 seconds each against the two segment-decoder fuzz targets, which is where a hostile file would land. [CONTRIBUTING](CONTRIBUTING.md#the-gate) has the detail.
+CI runs `make all` plus five targets kept out of it because each costs a tool to install or a minute of wall clock: `make spdx`, `make bench-build`, `make lint`, `make lint-docs`, and `make fuzz` — the last being 30 seconds each against the two segment-decoder fuzz targets, which is where a hostile file would land. [CONTRIBUTING](CONTRIBUTING.md#the-gate) has the detail.
 
 `make eval` needs data that is not in the repository. [EVAL.md §7](docs/EVAL.md) lists the downloads and the one-time `weft-eval prepare` step.
 
