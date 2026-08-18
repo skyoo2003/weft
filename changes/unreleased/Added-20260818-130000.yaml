@@ -1,0 +1,12 @@
+kind: Added
+body: '`weft-eval bench -writes` prices what a commit costs the reads running against it,
+  which is the question docs/FINDINGS.md milestone 3b left open. It copies the index
+  first — a commit against the published evaluation corpus would rewrite the thing every
+  measured number names — then drops one commit into a read load and splits the latencies
+  by whether a request was due while the write lock was held. On the evaluation corpus a
+  commit adding 20,000 documents holds the lock 11.641s and the worst read caught in it
+  waits 13.142s. A commit below the partition floor skips the training entirely and costs
+  36ms, so the cost scales with the size of the commit rather than the size of the index.'
+time: 2026-08-18T13:00:00.000000000+09:00
+custom:
+  Issue: 12

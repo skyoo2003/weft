@@ -408,3 +408,65 @@ func TestSaturationIsTheFirstRungPastTwiceTheUnloadedMedian(t *testing.T) {
 		})
 	}
 }
+
+// TestSampleCarriesItsOffset is what makes a window measurable at all.
+//
+// Samples come back in completion order, not send order, so "which requests were
+// in flight while something else was happening" is not answerable from the slice
+// alone. Due is the offset of a request's scheduled send from the run's start,
+// which is the one clock both the driver and whatever it is racing against share.
+func TestSampleCarriesItsOffset(t *testing.T) {
+	const n = 8
+	samples, shed := Drive(context.Background(), 200, n, 8, func(int) {})
+	if len(samples)+shed != n {
+		t.Fatalf("samples %d + shed %d != %d", len(samples), shed, n)
+	}
+	seen := map[time.Duration]bool{}
+	for _, s := range samples {
+		if s.Due < 0 || s.Due > time.Second {
+			t.Errorf("Due = %v, want an offset inside the run", s.Due)
+		}
+		if seen[s.Due] {
+			t.Errorf("two samples claim the same due offset %v", s.Due)
+		}
+		seen[s.Due] = true
+	}
+	// One every 5ms: the last request is due 35ms in.
+	if len(samples) == n && !seen[7*5*time.Millisecond] {
+		t.Errorf("no sample due at 35ms; offsets are %v", seen)
+	}
+}
+
+// TestSplitByWindowIsHalfOpen is milestone 3b section 4.3's instrument: what a
+// commit's write lock costs the reads it runs against.
+//
+// The comparison is between requests due inside the window and requests due
+// outside it, and the boundary rule has to be stated because a commit is a single
+// event that every sample is measured relative to. Half-open [from, to): a request
+// due exactly when the commit started waited for it, a request due exactly when it
+// ended did not.
+func TestSplitByWindowIsHalfOpen(t *testing.T) {
+	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
+	in := []Sample{
+		{Due: ms(0), Lat: ms(1)},
+		{Due: ms(99), Lat: ms(2)},
+		{Due: ms(100), Lat: ms(500)}, // exactly at the start: inside
+		{Due: ms(150), Lat: ms(400)},
+		{Due: ms(200), Lat: ms(3)}, // exactly at the end: outside
+		{Due: ms(300), Lat: ms(4)},
+	}
+	during, outside := SplitByWindow(in, ms(100), ms(200))
+	if len(during) != 2 || len(outside) != 4 {
+		t.Fatalf("split %d during / %d outside, want 2/4", len(during), len(outside))
+	}
+	if during[0] != ms(500) || during[1] != ms(400) {
+		t.Errorf("during = %v, want the two slow latencies", during)
+	}
+	// A window nothing falls into is empty rather than everything.
+	if d, o := SplitByWindow(in, ms(1000), ms(2000)); len(d) != 0 || len(o) != len(in) {
+		t.Errorf("empty window split %d/%d, want 0/%d", len(d), len(o), len(in))
+	}
+	if d, o := SplitByWindow(nil, 0, ms(1)); len(d) != 0 || len(o) != 0 {
+		t.Errorf("SplitByWindow(nil) = %v, %v; want empty", d, o)
+	}
+}

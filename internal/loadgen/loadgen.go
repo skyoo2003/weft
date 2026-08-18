@@ -69,6 +69,38 @@ type Sample struct {
 	// the goroutine performing it — here, the query — and none of that is
 	// stop-the-world or visible in this field. GCCPUShare is what reports it.
 	GCPause time.Duration
+
+	// Due is when this request was scheduled to be sent, as an offset from the
+	// run's start.
+	//
+	// Samples come back in completion order rather than send order, so without it
+	// "which requests were in flight while something else was happening" is not
+	// answerable from the slice. That question is the whole of the write-lock
+	// measurement milestone 3b section 4.3 asked this milestone for: a Commit is
+	// one event, and what it costs is the difference between the reads due during
+	// it and the reads due either side. SplitByWindow is the arithmetic.
+	Due time.Duration
+}
+
+// SplitByWindow separates the latencies of requests due inside [from, to) from the
+// rest, both offsets from the run's start.
+//
+// Half-open, and the boundary is a real decision rather than a convention: a
+// request due exactly when a commit began waited for it, and one due exactly when
+// the commit ended did not. Getting that backwards moves one sample, which matters
+// at the edges of a window that only a few requests fall into.
+//
+// Latencies rather than samples, because the callers of this are the same
+// Summarize the rest of the report goes through.
+func SplitByWindow(samples []Sample, from, to time.Duration) (during, outside []time.Duration) {
+	for _, s := range samples {
+		if s.Due >= from && s.Due < to {
+			during = append(during, s.Lat)
+		} else {
+			outside = append(outside, s.Lat)
+		}
+	}
+	return during, outside
 }
 
 // Quantiles is a latency distribution reduced to what gets printed.
@@ -293,7 +325,8 @@ func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) 
 			wg.Wait()
 			return samples, shed
 		}
-		due := start.Add(time.Duration(i) * interval)
+		offset := time.Duration(i) * interval
+		due := start.Add(offset)
 		if d := time.Until(due); d > 0 {
 			t := time.NewTimer(d)
 			select {
@@ -318,7 +351,7 @@ func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) 
 			defer func() { <-slots }()
 			before := GCPauseTotal()
 			do(i)
-			s := Sample{Lat: time.Since(due), GCPause: GCPauseTotal() - before}
+			s := Sample{Lat: time.Since(due), GCPause: GCPauseTotal() - before, Due: offset}
 			mu.Lock()
 			samples = append(samples, s)
 			mu.Unlock()

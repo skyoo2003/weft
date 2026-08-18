@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"slices"
@@ -59,6 +60,8 @@ type benchOpts struct {
 	arm         string
 	anySnapshot bool
 	cpuprofile  string
+	writes      bool
+	writedocs   int
 }
 
 // benchFlags parses and validates, so that every "this value cannot be measured"
@@ -71,6 +74,8 @@ func benchFlags(args []string) (benchOpts, error) {
 		fs.IntVar(&o.inflight, "inflight", 0, "cap on concurrent requests; 0 is 4 per core")
 		fs.StringVar(&o.arm, "arm", benchArmText, "scorers to load: text or text+vector")
 		fs.StringVar(&o.cpuprofile, "cpuprofile", "", "write a CPU profile of the whole run here")
+		fs.BoolVar(&o.writes, "writes", false, "instead of the ladder, drop one Commit into a read load and price the write lock (copies the index first)")
+		fs.IntVar(&o.writedocs, "writedocs", 1, "documents the -writes commit adds; past ivfMinDocs the commit trains a partition, which is the expensive case")
 		snapshotFlag(fs, &o.anySnapshot)
 	})
 	if flagErr != nil {
@@ -91,6 +96,9 @@ func benchFlags(args []string) (benchOpts, error) {
 	}
 	if o.inflight <= 0 {
 		o.inflight = loadgen.DefaultInflight()
+	}
+	if o.writedocs < 1 {
+		return o, fmt.Errorf("-writedocs=%d: a commit needs at least one document to be a commit", o.writedocs)
 	}
 	return o, nil
 }
@@ -149,6 +157,9 @@ func bench(ctx context.Context, args []string) error {
 	unloaded, err := benchWarmup(ctx, qs, do, &failed)
 	if err != nil {
 		return err
+	}
+	if o.writes {
+		return benchWrites(ctx, o, qs, unloaded)
 	}
 	rates := benchRates(o.rate, unloaded)
 
@@ -376,4 +387,185 @@ func (r benchReport) print() {
 	fmt.Printf("  rusage    minflt %d  majflt %d  nvcsw %d  nivcsw %d  peakrss %.1f MiB (process)\n",
 		r.faults.Minor, r.faults.Major, r.faults.Nvcsw, r.faults.Nivcsw,
 		float64(r.peakRSS)/(1<<20))
+}
+
+// ---------------------------------------------------------------- writes
+
+// benchWriteCopy is where the -writes arm does its damage.
+//
+// A Commit rewrites the index it is given, and the index this command opens by
+// default is .eval-data/index — the corpus every number in docs/EVAL.md is
+// measured against, whose provenance file exists so that nobody publishes a figure
+// from a different one. Adding a document to it would leave 171,333 documents, a
+// new generation, and every published nDCG quietly measuring a corpus that is not
+// the one it names.
+//
+// So the arm copies first and never touches the original. The copy is the whole
+// corpus — 626 MiB on the evaluation index — which is a real cost and the reason
+// this is a flag rather than part of the default ladder.
+const benchWriteCopy = "bench-write-copy"
+
+// benchWrites runs a read load with one Commit dropped into the middle of it, and
+// reports what the reads due during that commit paid.
+//
+// This is the pass line milestone 3b section 4.3 handed forward. It measured a
+// 68-second IVF training inside Commit and observed that Commit holds the write
+// lock for all of it, so every Search, Doc, Lookup and Nearest waits — then said
+// the ceiling is "the one a load test will find". This is that load test.
+//
+// The arm is deliberately not part of the ladder. It answers a different question
+// with a different shape of answer: not a distribution over rates, but two
+// distributions at one rate, split by whether a request was due while the lock was
+// held.
+// It takes no `do` from the caller. The ladder's closure is bound to the published
+// index, and the whole point of this arm is that reads and the commit contend for
+// one lock — so it builds its own against the copy. A parameter that looked
+// harmless here would have measured two different indexes and reported the
+// difference as the lock's cost.
+func benchWrites(ctx context.Context, o benchOpts, qs []eval.Query, unloaded time.Duration) error {
+	dst, err := benchCopyIndex(o.data)
+	if err != nil {
+		return err
+	}
+
+	wix, err := engine.Open(dst)
+	if err != nil {
+		return fmt.Errorf("open the copy: %w", err)
+	}
+	defer wix.Close() //nolint:errcheck // nothing left to do on the way out
+
+	// Reads go to the copy too. Measuring reads against one index while committing
+	// to another would be measuring nothing: the lock the arm exists to price is
+	// the one those very reads contend for.
+	scorers, err := benchScorers(wix, o.arm)
+	if err != nil {
+		return err
+	}
+	wdo := func(i int) {
+		if _, err := engine.Search(ctx, qs[i%len(qs)].Query, frozenK, fusion.Fuse, scorers...); err != nil && ctx.Err() == nil {
+			log.Printf("search: %v", err)
+		}
+	}
+
+	// Half of the ladder's lowest rung, which is a rate the previous run showed
+	// weft sustains with nothing shed. The arm is about the lock, not about the
+	// knee, so it is measured well below it.
+	rate := float64(time.Second) / float64(unloaded) * 0.125
+	n := o.rotations * len(qs)
+	fmt.Printf("\nweft  %s  writes  rate=%.2f/s  n=%d  inflight=%d  commit adds %d document(s)\n",
+		o.arm, rate, n, o.inflight, o.writedocs)
+
+	// The commit is fired a third of the way in, from its own goroutine, and the
+	// window it held is recorded in the same clock the driver stamps Due with.
+	var from, to atomic.Int64
+	runStart := time.Now()
+	fireAt := time.Duration(float64(n) / rate / 3 * float64(time.Second))
+	go benchCommitProbe(ctx, wix, dst, o.writedocs, fireAt, runStart, &from, &to)
+
+	samples, shed := loadgen.Drive(ctx, rate, n, o.inflight, wdo)
+	lo, hi := time.Duration(from.Load()), time.Duration(to.Load())
+	if hi == 0 {
+		return errors.New("the commit did not finish inside the run: nothing to attribute")
+	}
+	during, outside := loadgen.SplitByWindow(samples, lo, hi)
+	dq, oq := loadgen.Summarize(during), loadgen.Summarize(outside)
+
+	fmt.Printf("commit window  [%v, %v)  =  %v\n",
+		lo.Round(time.Millisecond), hi.Round(time.Millisecond), (hi - lo).Round(time.Millisecond))
+	fmt.Printf("  during    p50 %s  p95 %s  max %v  (n=%d)\n",
+		fmtQ(dq.P50, dq.P50ok), fmtQ(dq.P95, dq.P95ok), dq.Max.Round(time.Millisecond), dq.N)
+	fmt.Printf("  outside   p50 %s  p95 %s  max %v  (n=%d)\n",
+		fmtQ(oq.P50, oq.P50ok), fmtQ(oq.P95, oq.P95ok), oq.Max.Round(time.Millisecond), oq.N)
+	fmt.Printf("  shed %d\n", shed)
+	// The maxima are what this arm is for. A quantile over the requests due inside
+	// a single lock window is an order statistic of however many that was — often
+	// too few for even a p50 to print — but the worst one is exactly the number
+	// milestone 3b asked for: how long a read can be made to wait.
+	fmt.Printf("\nthe worst read due during the commit waited %v; the worst outside it waited %v\n",
+		dq.Max.Round(time.Millisecond), oq.Max.Round(time.Millisecond))
+	return ctx.Err()
+}
+
+// benchVecDim is the width the corpus established, discovered rather than assumed:
+// a document with a vector of the wrong width is refused by Add (ErrDimMismatch),
+// and a text-only corpus wants no vector at all.
+//
+// engine exposes no VecDim, so it is read off a document instead. Doc(0) is the
+// first document the index holds and it is as good as any — the width is a corpus
+// property, not a per-document one, which is what ErrDimMismatch enforces.
+func benchVecDim(ix *engine.Index) int {
+	if d, ok := ix.Doc(0); ok {
+		return len(d.Vector)
+	}
+	return 0
+}
+
+// benchCopyIndex duplicates the index so the write arm never opens the published
+// one, and returns where it put it.
+//
+// Not removed afterwards. A 626 MiB copy takes long enough that a second run wants
+// it, and leaving it under a name nobody would mistake for the real index is what
+// keeps that safe.
+func benchCopyIndex(data string) (string, error) {
+	src := filepath.Join(data, indexDir)
+	dst := filepath.Join(data, benchWriteCopy)
+	if err := os.RemoveAll(dst); err != nil {
+		return "", fmt.Errorf("clear %s: %w", dst, err)
+	}
+	log.Printf("copying %s to %s so the published index is not written to", src, dst)
+	start := time.Now()
+	if err := os.CopyFS(dst, os.DirFS(src)); err != nil {
+		return "", fmt.Errorf("copy index: %w", err)
+	}
+	log.Printf("copied in %s; it is left in place for a rerun", time.Since(start).Round(time.Second))
+	return dst, nil
+}
+
+// benchCommitProbe adds documents and commits once, recording the window it held
+// the write lock in the same clock the driver stamps Sample.Due with.
+//
+// How many documents it adds is the whole variable, and it is a flag because the
+// answer is not monotone in an interesting way. A commit writes only what was added
+// since the last one (milestone 3a), and a new segment below ivfMinDocs carries no
+// partition — so a one-document commit skips the IVF training milestone 3b measured
+// at 68 seconds, and prices a completely different event.
+//
+// The vectors are synthetic and that is stated rather than hidden: the training
+// cost is a function of count and width, not of content, and sourcing real vectors
+// here would mean re-reading the corpus inside a latency measurement.
+// Deterministic, so two runs commit the same bytes.
+func benchCommitProbe(ctx context.Context, wix *engine.Index, dst string, docs int,
+	fireAt time.Duration, runStart time.Time, from, to *atomic.Int64,
+) {
+	select {
+	case <-time.After(fireAt):
+	case <-ctx.Done():
+		return
+	}
+	dim := benchVecDim(wix)
+	for i := range docs {
+		d := engine.Document{
+			Key:  fmt.Sprintf("bench-write-probe-%d", i),
+			Text: "a document added to price the write lock",
+		}
+		if dim > 0 {
+			d.Vector = make([]float32, dim)
+			for j := range d.Vector {
+				// A different direction per document, so k-means has something
+				// to partition rather than one repeated point.
+				d.Vector[j] = float32((i*7+j*13)%1000) / 1000
+			}
+		}
+		if _, err := wix.Add(d); err != nil {
+			log.Printf("add %d: %v", i, err)
+			return
+		}
+	}
+	from.Store(int64(time.Since(runStart)))
+	t := time.Now()
+	if err := wix.Commit(dst); err != nil {
+		log.Printf("commit: %v", err)
+	}
+	to.Store(int64(time.Since(runStart)))
+	log.Printf("commit held the write lock for %v", time.Since(t).Round(time.Millisecond))
 }

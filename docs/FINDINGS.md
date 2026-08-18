@@ -1013,7 +1013,7 @@ The measurement design and the judgment rules fixed before the numbers are
 | Within an order of magnitude of an established engine | **holds.** 2.08× bleve v2.6.0, same machine and session |
 | `go list -m all` still one line after bleve entered | **holds.** bleve and its ~20 transitive modules live in `bench/`, a separate module |
 | `pkg/fusion` unchanged | **holds.** 0 lines. `pkg/scorer` 0 lines too — this milestone changed no engine code |
-| The write lock's ceiling under read load | **missed.** Not measured — see §5 |
+| The write lock's ceiling under read load | **holds.** A commit adding 20,000 documents held it **11.641 s**, and the worst read due during that window waited **13.142 s** — 190× the p50 beside it. §3.3 |
 | *(not a pass line, found anyway)* | weft collapses at 25.86/s — p50 39 ms to 1.80 s, 24% shed, RSS 141 to 817 MiB. §3.2 |
 
 ## 1. Result
@@ -1180,6 +1180,49 @@ that, and the honest statement is that weft's usable throughput on this corpus a
 this machine is **at least 12.93/s and less than 25.86/s**, against a sequential
 25.86/s — bleve's usable throughput is at least its sequential 156/s.
 
+### 3.3 The write lock, and the 68 seconds that were not reproducible
+
+[Milestone 3b §4.3](#milestone-3b--the-vector-scan) handed this milestone a
+68-second IVF training inside `Commit`, held under the write lock, and said the
+ceiling is "the one a load test will find". `weft-eval bench -writes` is that load
+test: it copies the index — a `Commit` against `.eval-data/index` would rewrite the
+corpus every published number is measured against — runs a read load against the
+copy, and drops one commit into the middle of it.
+
+The first answer was **36 milliseconds**, and it is a finding rather than a
+measurement error. Since milestone 3a a commit writes only what was added since the
+last one, and a new segment below `ivfMinDocs` carries no partition at all — so a
+one-document commit skips the training entirely. **The 68 seconds is not a property
+of `Commit`; it is a property of committing 171,332 documents at once**, which is
+what a first build does and what nothing else does.
+
+Forcing the expensive case — 20,000 documents in one commit, enough to cross the
+partition floor — gives the ceiling:
+
+| | |
+| --- | --- |
+| write lock held | **11.641 s** |
+| reads due inside that window | 40 |
+| **worst read due inside** | **13.142 s** |
+| worst read due outside | 1.346 s |
+| p50 outside | 69.075 ms |
+| shed | 2 |
+
+Run twice, because a single lock window is one event: 11.641 s / 13.142 s the
+first time and 10.881 s / 12.414 s the second. Same order, and the figures quoted
+above are the first run's.
+
+**A read arriving during a partition-training commit waits 190× the median.** The
+1.346 s outside the window is the queue draining afterwards, so the damage outstays
+the lock. Both numbers scale with the size of the commit rather than with the size
+of the index, which is the useful part: an ingest that commits in batches under
+`ivfMinDocs` never pays it, and one that commits a corpus pays it in full.
+
+The documents added are synthetic — the training cost is a function of count and
+vector width, not of content, and sourcing real vectors inside a latency
+measurement would mean re-reading the corpus. Stated here because it is the kind of
+shortcut that should not be discovered in the code.
+
 ## 4. Known costs
 
 ### 4.1 The instrument was measuring itself, and a review caught it
@@ -1245,12 +1288,13 @@ the verdict stands and the caveat is still recorded.
 
 ## 5. Carried forward
 
-1. **The write lock's ceiling is still unmeasured.** [Milestone 3b §4.3](#milestone-3b--the-vector-scan)
-   handed this milestone a 68-second `Commit` holding the write lock, and the
-   `-writes` arm that would price it is **not implemented**: a `Commit` against
-   `.eval-data/index` rewrites the published evaluation corpus, so it has to run
-   against a copy. This is the one pass line milestone 5 misses.
-2. **The saturation rule's denominator is wrong** (§3), and fixing it changes a
+1. **Nothing bounds a commit's lock window.** §3.3 prices it — 11.641 s for 20,000
+   documents, and a read caught in it waits 13.142 s — but the repayment is
+   unbuilt. Two shapes are visible from here and neither is scheduled: train the
+   partition outside the write lock (both argmax passes touch no shared state,
+   [milestone 3b §4.3](#milestone-3b--the-vector-scan) says so), or give `Commit` a
+   context so an operator can abandon one.
+2. **The saturation rule's denominator is wrong** (§3.1), and fixing it changes a
    registered rule.
 3. **The throughput knee is live heap under concurrency** (§3.2), and it is the
    first measurement that puts a number on the cost of `Index.Doc` decoding a whole

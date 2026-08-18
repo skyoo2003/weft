@@ -21,9 +21,10 @@ needed rejecting.
 One command in the plan needed a safety change rather than rejection. The plan's
 `-writes` arm calls for a `Commit` during read load, and `Commit` on
 `.eval-data/index` would rewrite the published evaluation index — the corpus every
-number in [EVAL.md](../EVAL.md) is measured against. It is **not implemented in
-this pass**; when it is, it must operate on a copy. Recorded as a gap in the
-coverage section rather than silently dropped.
+number in [EVAL.md](../EVAL.md) is measured against. Implemented against a **copy**
+instead: the arm copies the index to `.eval-data/bench-write-copy` and never opens
+the original for writing. Verified after the run — `.eval-data/index` still holds
+one segment, one manifest and its provenance file.
 
 Three decisions were left open by the plan and answered by the user before any
 code was written, all three at the plan's registered defaults:
@@ -129,6 +130,26 @@ p50). Above the knee weft collapses and bleve does not — p50 1.80 s and 24% sh
 largest finding and no pass line asked for it;
 [FINDINGS](../FINDINGS.md) milestone 5 §3.2 has the mechanism.
 
+### Task 4b — the write lock
+
+RED on `Sample.Due` and `SplitByWindow`, GREEN, then measured. `weft-eval bench
+-writes` copies the index first, so the published corpus is never opened for
+writing.
+
+The first answer was 36 ms, which turned out to be a finding rather than a small
+number: since milestone 3a a commit writes only what was added, and a segment below
+`ivfMinDocs` carries no partition, so a one-document commit skips the IVF training
+entirely. Forcing the expensive case with `-writedocs 20000`:
+
+```text
+commit window  [1m37.528s, 1m49.169s)  =  11.641s
+  during    max 13.142s  (n=40)
+  outside   p50 69.075ms  max 1.346s  (n=958)
+```
+
+**A read arriving during a partition-training commit waits 190x the median.**
+[FINDINGS](../FINDINGS.md) milestone 5 §3.3.
+
 ### Task 6 — documentation
 
 [PERF.md](../PERF.md) written **before** the numbers, so the judgment rule could
@@ -154,6 +175,8 @@ its performance and dependency metrics, and its GC risk row are all updated.
 | 10 | The headline load point is chosen by a registered rule, not after seeing the p99s | `TestSaturationIsTheFirstRungPastTwiceTheUnloadedMedian` | unit | PASS | as above |
 | 11 | Page fault counters actually move — a constant stub would satisfy every arithmetic test and fail this | `TestProcFaultsCountsMinorFaultsOnTouch` | unit | PASS | as above |
 | 12 | A run's fault figure is a difference between snapshots, per field | `TestProcFaultsSubIsPerField` | unit | PASS | as above |
+| 12a | A sample carries the offset of its scheduled send, so "what was in flight while X happened" is answerable from a slice returned in completion order | `TestSampleCarriesItsOffset` | unit | PASS | as above |
+| 12b | The commit window is half-open: a read due exactly at the lock's start waited for it, one due exactly at its end did not | `TestSplitByWindowIsHalfOpen` | unit | PASS | as above |
 | 13 | weft still has zero external dependencies after bleve entered `bench/` | `pkg/engine.TestNoExternalDependencies`, `make deps` | arch | PASS | `make deps` prints `github.com/skyoo2003/weft` and nothing else |
 | 14 | Fusion still cannot see a scorer; the public API goldens did not move | `make arch` | arch | PASS | `ok github.com/skyoo2003/weft/pkg/engine` |
 | 15 | The non-unix build still compiles through the rusage stub | `GOOS=windows go build ./...` | build | PASS | exit 0 |
@@ -250,18 +273,13 @@ CI.
 
 Deliberately not covered, and why:
 
-1. **The `-writes` arm is not implemented.** The plan's fifth assertion — the write
-   lock's ceiling under read load, which [FINDINGS](../FINDINGS.md) milestone 3b
-   §4.3 handed to this milestone — needs a `Commit` during load, and a `Commit`
-   against `.eval-data/index` would rewrite the published evaluation corpus. It
-   must run against a copy. **Milestone 5 is not complete without it.**
-2. **The measurement itself is not a test.** Latency is a property of a machine, and
+1. **The measurement itself is not a test.** Latency is a property of a machine, and
    a p99 assertion in CI would fail on a busy runner and pass on a quiet one. The
    instrument is tested; the numbers are published in [PERF.md](../PERF.md) and
    reproduced by hand.
-3. **`bench/` has no tests of its own.** It is a harness over a tested driver; what
+2. **`bench/` has no tests of its own.** It is a harness over a tested driver; what
    it adds is corpus reading and a bleve call. CI compiles it.
-4. **Three repetitions are required and not yet done.** [PERF.md](../PERF.md) §5
+3. **Three repetitions are required and not yet done.** [PERF.md](../PERF.md) §5
    fixes the headline as the median of three with the spread reported. A single run
    is not publishable — the lesson [FINDINGS](../FINDINGS.md) milestone 4 §4.2 paid
    for once already.
