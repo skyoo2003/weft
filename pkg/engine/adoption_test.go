@@ -19,6 +19,7 @@
 package engine_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -29,61 +30,105 @@ import (
 	"github.com/skyoo2003/weft/pkg/scorer/vector"
 )
 
-// rankOf reports where doc landed, 1-based, or 0 when it is absent.
-func rankOf(cands []engine.Candidate, want engine.DocID) int {
-	for i, c := range cands {
-		if c.Doc == want {
-			return i + 1
-		}
+// popularity is the fifth signal, and it is written here rather than under
+// pkg/scorer to keep it in an outsider's position: engine_test is a separate
+// package, so it can reach nothing this repository does not export.
+//
+// Its input is a view count per Key that no engine.Document field can hold. The
+// join is Resolve, the exported half of the identity map that turns a caller's
+// own identifier into the DocID fusion compares.
+type popularity struct {
+	ix    *engine.Index
+	views map[string]int
+}
+
+func newPopularity(ix *engine.Index, views map[string]int) engine.Scorer {
+	return &popularity{ix: ix, views: views}
+}
+
+func (p *popularity) Name() string { return "popularity" }
+
+// Candidates walks the side store, not the corpus.
+//
+// scorer/recency — the 99-line proof that a fourth signal is cheap, and the only
+// implementation an outsider has to copy — sweeps every DocID and calls Doc on
+// each, which decodes a whole record per document. Milestone 5 section 3.2 found
+// that same decode to be where throughput collapses under concurrency. A side
+// store does not have to inherit that: its keys are its own, so the loop is over
+// what the caller knows rather than over the corpus, and Doc is never called.
+func (p *popularity) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
+	if k <= 0 {
+		return nil, nil
 	}
-	return 0
+	cands := make([]engine.Candidate, 0, len(p.views))
+	for key, n := range p.views {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		id, ok := p.ix.Resolve(key)
+		if !ok {
+			// A key this index has never seen. No opinion, the same as a scorer
+			// handed a query with no vector — not an error.
+			continue
+		}
+		cands = append(cands, engine.Candidate{Doc: id, Score: float64(n)})
+	}
+	return engine.TopK(cands, k), nil
 }
 
 // TestASignalCanCarryDataDocumentDoesNotHold is the milestone 6 claim reduced to
-// one assertion: a fifth scorer whose entire input is a map the engine has never
-// seen changes the ranking, and does so through the same Search call the other
-// four use.
+// one assertion: a scorer whose entire input is a map the engine has never seen
+// reaches the ranking, through the same Search call every other scorer uses.
 //
-// The document it promotes is "d", which the corpus wrote to be uninteresting to
-// every existing scorer — unrelated prose, an orthogonal vector, no links, and
-// the oldest timestamp. If a side store is a real extension path, popularity
-// alone has to be able to move it; if it is not, no amount of view count will.
+// The document it surfaces is "d", which the corpus wrote to be uninteresting —
+// unrelated prose, an orthogonal vector, no links, the oldest timestamp. Text
+// alone cannot see it. If a side store is a real extension path, a view count
+// has to be able to put it there, and if it is not, no view count will.
+//
+// It is asked of two streams rather than five on purpose. What five would also
+// measure is how loud one equal RRF vote is against four others, which milestone
+// 4 already answered and which is a property of the fuser rather than of the
+// extension path. The five-scorer call is still made below, for the milestone 1
+// question of whether the call shape survives a scorer weft does not ship.
 func TestASignalCanCarryDataDocumentDoesNotHold(t *testing.T) {
 	ix := corpus(t)
 	txt := text.New(ix)
 	q := engine.Query{Text: "fusion scorer", Vector: []float32{1, 0, 0}}
 
-	four := []engine.Scorer{txt, vector.New(ix), graph.New(ix, txt), recency.NewAt(ix, refNow)}
-
 	// The data engine.Document has nowhere to put. Keyed by Key, because that is
 	// the caller's own identifier and the only one that means anything before an
 	// Add has happened or after a restart.
 	views := map[string]int{"a": 3, "b": 2, "c": 1, "d": 1000, "lonely": 0}
-
-	// Five scorers, and note the call below is the four-scorer call with one more
-	// element. That is the milestone 1 shape holding for a scorer that lives
-	// outside every package weft ships.
-	five := append(append([]engine.Scorer{}, four...), newPopularity(ix, views))
-
-	before, err := engine.Search(t.Context(), q, 5, fusion.Fuse, four...)
-	if err != nil {
-		t.Fatalf("Search with 4 scorers: %v", err)
-	}
-	after, err := engine.Search(t.Context(), q, 5, fusion.Fuse, five...)
-	if err != nil {
-		t.Fatalf("Search with 5 scorers: %v", err)
-	}
+	pop := newPopularity(ix, views)
 
 	d, ok := ix.Resolve("d")
 	if !ok {
 		t.Fatal("corpus is missing document d")
 	}
-	was, now := rankOf(before, d), rankOf(after, d)
-	if was == 0 {
-		t.Fatalf("d was absent from the 4-scorer ranking, so this test cannot tell a promotion from an appearance: %+v", before)
+
+	before, err := engine.Search(t.Context(), q, 3, fusion.Fuse, txt)
+	if err != nil {
+		t.Fatalf("Search with text alone: %v", err)
 	}
-	if now >= was {
-		t.Fatalf("d ranked %d without popularity and %d with it: a signal carrying data Document does not hold is not reaching fusion", was, now)
+	after, err := engine.Search(t.Context(), q, 3, fusion.Fuse, txt, pop)
+	if err != nil {
+		t.Fatalf("Search with text and popularity: %v", err)
+	}
+
+	if contains(before, d) {
+		t.Fatalf("text alone already ranked d — the corpus no longer isolates the new signal: %+v", before)
+	}
+	if !contains(after, d) {
+		t.Fatalf("d is still absent once popularity is added: a signal carrying data Document does not hold is not reaching fusion: %+v", after)
+	}
+
+	// Five scorers, four of them weft's own, and this is the four-scorer call
+	// with one more element in the slice. Nothing about invoking Search or Fuse
+	// changed for a scorer that lives outside every package weft ships — that it
+	// compiles and returns is the assertion.
+	five := []engine.Scorer{txt, vector.New(ix), graph.New(ix, txt), recency.NewAt(ix, refNow), pop}
+	if _, err := engine.Search(t.Context(), q, 5, fusion.Fuse, five...); err != nil {
+		t.Fatalf("Search with 5 scorers, the fifth from outside the module: %v", err)
 	}
 }
 
