@@ -1,0 +1,12 @@
+kind: Added
+body: 'docs/PERF.md publishes the first latency distribution this project has had. weft''s
+  p99 on the 171,332-document evaluation corpus is 98.041ms at the registered load point,
+  of which stop-the-world accounts for 279us — 0.28%. bleve v2.6.0 on the same machine,
+  corpus, query set, arm and load generator is 47.123ms, so weft is 2.08x it against the
+  order-of-magnitude bar the PRD set. The comparison lives in bench/, a separate module,
+  so `go list -m all` still prints one line. Two predictions were wrong: the tail is
+  neither the collector nor the 210MiB working set, and what it actually is turns out to
+  be a property of open-loop measurement that bleve shares.'
+time: 2026-08-18T12:00:00.000000000+09:00
+custom:
+  Issue: 12

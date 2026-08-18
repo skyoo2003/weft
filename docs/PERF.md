@@ -243,10 +243,15 @@ the lesson [FINDINGS](FINDINGS.md) milestone 4 §4.2 paid for once already.
 
 | | |
 | --- | --- |
-| host | *(see FINDINGS milestone 5)* |
-| GOMAXPROCS | *(recorded in the report header)* |
-| Go | as in `go.mod` |
-| GOGC | 100 (default) unless the row says otherwise |
+| host | Apple M4, 16 GiB |
+| OS | macOS 26.5.2 |
+| Go | 1.26.1 darwin/arm64 |
+| GOMAXPROCS | 10 |
+| GOGC | 100 (default) |
+| corpus | 171,332 documents, 50 judged TREC-COVID queries, k=10 |
+| repetitions | **1** — the median-of-three rule above is not yet satisfied. See [FINDINGS](FINDINGS.md) milestone 5 §4.5 |
+
+The numbers measured on it are in [FINDINGS.md](FINDINGS.md) milestone 5 §1.
 
 ## 6. The prediction being graded
 

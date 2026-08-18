@@ -89,22 +89,52 @@ stop-the-world. See [PERF.md](../PERF.md) §2.4.
 
 ### Task 4 — the measurement
 
-Pending; the numbers land in [FINDINGS.md](../FINDINGS.md) milestone 5 and
-[PERF.md](../PERF.md) §5. The first attempt was **discarded**: a bleve index build
-was running on the same machine as the weft ladder, which is the contamination
-[PERF.md](../PERF.md) §5 now warns about explicitly.
+Done for the headline rung, published in [FINDINGS.md](../FINDINGS.md) milestone 5
+§1. weft `text`, rule 1's headline rung (3.23/s, 12.5% of measured sequential
+throughput), n = 10,000, one process, 51m33s:
+
+```text
+rate=3.23/s  n=10000  shed=0  elapsed=51m33.478s
+  latency   p50 68.356ms  p95 87.912ms  p99 98.041ms  p99.9   --    max 212.528ms
+  minus STW p50 68.227ms  p95 87.661ms  p99 97.762ms  p99.9   --
+  gc        cycles 24256  STW 1.45705s (0.047% of elapsed)  GC CPU share 1.0%
+  rusage    minflt 23965  majflt 0  nvcsw 13857  nivcsw 2066685  peakrss 115.1 MiB
+```
+
+**Two ladders were discarded before this one.** The first shared the machine with
+a bleve index build — the contamination [PERF.md](../PERF.md) §5 now warns about
+explicitly. The second was measured by the pre-review instrument, whose
+`GCPauseTotal` allocated per call and produced roughly 150 MiB of garbage per
+ladder that the report then charged to the query.
 
 ### Task 5 — bleve comparison
 
-`bench/` built and indexed: 171,332 documents in 17s, 150.6 MiB on disk. The
-dependency isolation is verified below; the latency comparison is pending with
-task 4.
+`bench/` built and indexed: 171,332 documents in 17s, 150.6 MiB on disk. Full
+five-rung ladder, same driver, same corpus, same 50 judged queries, same k:
+
+```text
+rate=19.53/s   p50 13.686ms  p95 33.313ms  p99 47.123ms  max 62.007ms
+rate=39.06/s   p50  9.954ms  p95 22.494ms  p99 32.442ms  max 39.925ms
+rate=78.11/s   p50  7.367ms  p95 13.850ms  p99 25.149ms  max 31.977ms
+rate=156.23/s  p50  7.248ms  p95 12.979ms  p99 24.783ms  max 35.333ms
+rate=312.45/s  p50  9.501ms  p95 42.534ms  p99   --      max 244.488ms  (shed 1)
+```
+
+**Rule 2: 98.041 ms <= 10 x 47.123 ms. Ratio 2.08. Passes.**
+
+The ladder is non-monotone downward — p99 falls as load rises over an eight-fold
+range — and weft's partial ladder shows the same shape. That is a property of the
+measurement rather than of either engine; [FINDINGS](../FINDINGS.md) milestone 5
+§3 has the diagnosis and says what would fix the rule.
 
 ### Task 6 — documentation
 
 [PERF.md](../PERF.md) written **before** the numbers, so the judgment rule could
-not be chosen after them. [D-009](../DECISIONS.md) records the open loop and the
-submodule. FINDINGS milestone 5 pending with task 4.
+not be chosen after them — and it duly fired in an awkward place (§3 of FINDINGS)
+and was reported as it fired. [D-009](../DECISIONS.md) records the open loop and
+the submodule. [FINDINGS](../FINDINGS.md) milestone 5 carries the verdict, the two
+wrong predictions and the five things carried forward. The PRD's milestone 5 row,
+its performance and dependency metrics, and its GC risk row are all updated.
 
 ## Test specification
 
