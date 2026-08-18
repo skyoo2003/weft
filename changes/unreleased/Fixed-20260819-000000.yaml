@@ -1,0 +1,14 @@
+kind: Fixed
+body: 'Five defects in the milestone 5 load instrument, all found by review and all biased
+  toward a flattering number. GCPause was charged over a shorter window than the latency it
+  is subtracted from, so 64% of the p99 elapsed before accounting began; -writes stamped its
+  commit window after the Add loop, filing the writer''s own lock contention under the
+  baseline it is compared against; the unloaded median was 50 samples where the package''s
+  own rule wants 200, and it is the denominator of every arrival rate; GCPauseTotal
+  allocated per call, producing ~150 MiB of garbage per ladder that the report charged to
+  the query; and GC CPU share was a ratio of process-since-start totals rather than of
+  per-rung differences. Every published figure was re-measured afterwards — the headline
+  p99 moved 98.041ms to 108.193ms and the collector''s share of it 0.28% to 0.38%.'
+time: 2026-08-19T00:00:00.000000000+09:00
+custom:
+  Issue: 12

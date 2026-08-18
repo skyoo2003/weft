@@ -95,18 +95,22 @@ Done for the headline rung, published in [FINDINGS.md](../FINDINGS.md) milestone
 throughput), n = 10,000, one process, 51m33s:
 
 ```text
-rate=3.23/s  n=10000  shed=0  elapsed=51m33.478s
-  latency   p50 68.356ms  p95 87.912ms  p99 98.041ms  p99.9   --    max 212.528ms
-  minus STW p50 68.227ms  p95 87.661ms  p99 97.762ms  p99.9   --
-  gc        cycles 24256  STW 1.45705s (0.047% of elapsed)  GC CPU share 1.0%
-  rusage    minflt 23965  majflt 0  nvcsw 13857  nivcsw 2066685  peakrss 115.1 MiB
+rate=3.41/s  n=10000  shed=0  elapsed=48m52.243s
+  latency   p50 83.371ms  p95 99.507ms  p99 108.193ms  p99.9   --    max 126.37ms
+  minus STW p50 83.192ms  p95 99.316ms  p99 107.782ms  p99.9   --
+  gc        cycles 24496  STW 1.829123s (0.062% of elapsed)  GC CPU share 1.1%
+  rusage    minflt 288  majflt 0  nvcsw 10678  nivcsw 1933648  peakrss 120.7 MiB
 ```
 
-**Two ladders were discarded before this one.** The first shared the machine with
-a bleve index build — the contamination [PERF.md](../PERF.md) §5 now warns about
-explicitly. The second was measured by the pre-review instrument, whose
-`GCPauseTotal` allocated per call and produced roughly 150 MiB of garbage per
-ladder that the report then charged to the query.
+**Three ladders preceded this one and none of their numbers survive.** The first
+shared the machine with a bleve index build — the contamination
+[PERF.md](../PERF.md) §5 now warns about explicitly. The second was measured by an
+instrument whose `GCPauseTotal` allocated per call, producing roughly 150 MiB of
+garbage per ladder that the report then charged to the query. The third was
+superseded by three further corrections, the largest being that `GCPause` was
+charged over a shorter window than the `Lat` it is subtracted from — 64% of the p99
+elapsed before accounting began. [FINDINGS](../FINDINGS.md) milestone 5 §4.1 has
+all five defects and what each moved.
 
 ### Task 5 — bleve comparison
 
@@ -114,21 +118,23 @@ ladder that the report then charged to the query.
 five-rung ladder, same driver, same corpus, same 50 judged queries, same k:
 
 ```text
-rate=19.53/s   p50 13.686ms  p95 33.313ms  p99 47.123ms  max 62.007ms
-rate=39.06/s   p50  9.954ms  p95 22.494ms  p99 32.442ms  max 39.925ms
-rate=78.11/s   p50  7.367ms  p95 13.850ms  p99 25.149ms  max 31.977ms
-rate=156.23/s  p50  7.248ms  p95 12.979ms  p99 24.783ms  max 35.333ms
-rate=312.45/s  p50  9.501ms  p95 42.534ms  p99   --      max 244.488ms  (shed 1)
+rate=19.64/s   p50 15.401ms  p95 36.863ms  p99 57.525ms  max 64.027ms
+rate=39.28/s   p50 11.745ms  p95 25.605ms  p99 35.390ms  max 41.310ms
+rate=78.56/s   p50  8.350ms  p95 15.227ms  p99 25.597ms  max 39.653ms
+rate=157.13/s  p50  7.797ms  p95 17.569ms  p99 25.370ms  max 128.146ms
+rate=314.25/s  p50  8.208ms  p95 26.638ms  p99 83.468ms  max 208.253ms
 ```
 
-**Rule 2: 98.041 ms <= 10 x 47.123 ms. Ratio 2.08. Passes.**
+**Rule 2: 108.193 ms <= 10 x 57.525 ms. Ratio 1.88. Passes.**
 
 The ladder is non-monotone downward — p99 falls as load rises over an eight-fold
-range, and weft's ladder does the same thing below its knee (68.4 → 52.8 → 39.3 ms
-p50). Above the knee weft collapses and bleve does not — p50 1.80 s and 24% shed at
-25.86/s against bleve's 7.248 ms and zero at 156.23/s. That is the milestone's
-largest finding and no pass line asked for it;
-[FINDINGS](../FINDINGS.md) milestone 5 §3.2 has the mechanism.
+range, and weft's ladder does the same thing below its knee (83.4 → 51.5 → 39.2 ms
+p50). Above the knee weft collapses and bleve does not — p50 1.27 s and 14% shed at
+27.28/s with RSS at 853 MiB, against bleve's 7.797 ms, zero shed and 59.3 MiB at
+157.13/s. bleve has a knee too, at 314.25/s, but it sheds nothing and its RSS moves
+8 MiB: a queue forming, not a memory collapse. That is the milestone's largest
+finding and no pass line asked for it; [FINDINGS](../FINDINGS.md) milestone 5 §3.2
+has the mechanism.
 
 ### Task 4b — the write lock
 
@@ -142,12 +148,16 @@ number: since milestone 3a a commit writes only what was added, and a segment be
 entirely. Forcing the expensive case with `-writedocs 20000`:
 
 ```text
-commit window  [1m37.528s, 1m49.169s)  =  11.641s
-  during    max 13.142s  (n=40)
-  outside   p50 69.075ms  max 1.346s  (n=958)
+the writer held the lock for 11.063s, of which the commit itself was 11.014s
+commit window  [1m35.539s, 1m46.602s)  =  11.063s
+  during    max 12.539s  (n=38)
+  outside   p50 83.401ms  max 2.093s  (n=962)
 ```
 
-**A read arriving during a partition-training commit waits 190x the median.**
+**A read arriving during a partition-training commit waits 150x the median.** The
+20,000 `Add` calls that precede it hold the same exclusive lock and cost 49 ms of
+the 11.063 s — a correction whose reasoning was right and whose magnitude here was
+not what anyone would have guessed, which is why both halves print.
 [FINDINGS](../FINDINGS.md) milestone 5 §3.3.
 
 ### Task 6 — documentation
@@ -280,9 +290,16 @@ Deliberately not covered, and why:
 2. **`bench/` has no tests of its own.** It is a harness over a tested driver; what
    it adds is corpus reading and a bleve call. CI compiles it.
 3. **Three repetitions are required and not yet done.** [PERF.md](../PERF.md) §5
-   fixes the headline as the median of three with the spread reported. A single run
-   is not publishable — the lesson [FINDINGS](../FINDINGS.md) milestone 4 §4.2 paid
-   for once already.
+   fixes the headline as the median of three with the spread reported. This is one
+   run of the corrected instrument. The one cross-run comparison available is not
+   reassuring about precision: the same rung read 98.041 ms before the last three
+   fixes and 108.193 ms after, and nothing separates the corrections from run-to-run
+   noise — the lesson [FINDINGS](../FINDINGS.md) milestone 4 §4.2 paid for once
+   already.
+4. **Five instrument defects were found by review, not by test.** Every one biased
+   toward a flattering number and none was visible in the output. The unit tests
+   cover the driver's logic; nothing tests that the clock around it is honest, and
+   it is not obvious what would.
 
 ## Merge evidence
 

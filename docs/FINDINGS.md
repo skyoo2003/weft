@@ -996,51 +996,28 @@ diff would be the honest price of D-008 being wrong.
 <!-- markdownlint-disable-next-line MD025 -->
 # Milestone 5 — Performance
 
-> **STALE — being re-measured.** Every number in this milestone below was produced
-> by an instrument that a review has since corrected in three ways that move
-> published figures, and the corrections are in the tree while these numbers are
-> not. **Do not quote anything here until this banner is gone.**
->
-> 1. **`-writes` stamped its window after the `Add` loop.** `engine.Add` takes the
->    same exclusive lock `Commit` does, so at `-writedocs 20000` the writer blocked
->    reads twenty thousand times *before* the window opened, and every one of those
->    stalls was filed under `outside` — the baseline the lock's cost is compared
->    against. The bias pointed at making the lock look cheap, and it grew with the
->    parameter the experiment sweeps. §3.3's figures are the ones this hits.
-> 2. **`GCPause` was charged over a shorter window than the `Lat` it is subtracted
->    from.** The pause total was read inside the request's goroutine, so a pause
->    landing in the queue before dispatch was in `Lat` and not in `GCPause` —
->    measured at 64% of the p99 elapsing before accounting began. `p99 minus STW`
->    under-subtracted the tail it exists to explain, so the collector's share
->    published in §1 and §2 is an **under**-estimate.
-> 3. **The unloaded median was 50 samples**, which the package's own `Printable`
->    rule rejects for a p50. It is the denominator of all five arrival rates and the
->    reference the saturation rule compares every rung against, so it can move which
->    rung is called saturated. Now 200 on both sides.
->
-> The re-measurement is running. What is *not* expected to move: the shape of §3.1
-> and §3.2 — both engines' ladders and the collapse at 25.86/s — because neither
-> depends on any of the three.
-
 **Verdict: both clauses hold, and the prediction that got them there was wrong.**
-weft's p99 at the registered load point is **98.041 ms**, of which the collector
-accounts for **279 µs — 0.28%**. bleve on the same machine, corpus, query set, arm
-and load generator is **47.123 ms**, so weft is **2.08×** it against a bar of 10×.
-The plan predicted the tail would be a working-set problem rather than a GC
-problem; below saturation it is neither. **Above it, the ladder found something the
-plan did not look for: weft cannot sustain its own sequential throughput, and bleve
-can** (§3.2). Evidence: `internal/loadgen`, `weft-eval bench`, `bench/`.
-The measurement design and the judgment rules fixed before the numbers are
-[PERF.md](PERF.md), the decision is [D-009](DECISIONS.md).
+weft's p99 at the registered load point is **108.193 ms**, of which the collector
+accounts for **411 µs — 0.38%**. bleve on the same machine, corpus, query set, arm
+and load generator is **57.525 ms**, so weft is **1.88×** it against a bar of 10×.
+The plan predicted the tail would be a working-set problem rather than a GC problem;
+below saturation it is neither. **Above it, the ladder found what the plan did not
+look for: weft cannot sustain its own sequential throughput, and bleve can** (§3.2).
+Evidence: `internal/loadgen`, `weft-eval bench`, `bench/`. The measurement design and
+the judgment rules fixed before the numbers are [PERF.md](PERF.md), the decision is
+[D-009](DECISIONS.md).
 
 | Pass line | Result |
 | --- | --- |
-| A p99 including GC pause is published | **holds.** 98.041 ms at 3.23/s, n = 10,000, with the stop-the-world time charged per sample and subtracted alongside |
-| Within an order of magnitude of an established engine | **holds.** 2.08× bleve v2.6.0, same machine and session |
+| A p99 including GC pause is published | **holds.** 108.193 ms at 3.41/s, n = 10,000, with the stop-the-world time charged per sample and subtracted alongside |
+| Within an order of magnitude of an established engine | **holds.** 1.88× bleve v2.6.0, same machine and session |
 | `go list -m all` still one line after bleve entered | **holds.** bleve and its ~20 transitive modules live in `bench/`, a separate module |
 | `pkg/fusion` unchanged | **holds.** 0 lines. `pkg/scorer` 0 lines too — this milestone changed no engine code |
-| The write lock's ceiling under read load | **holds.** A commit adding 20,000 documents held it **11.641 s**, and the worst read due during that window waited **13.142 s** — 190× the p50 beside it. §3.3 |
-| *(not a pass line, found anyway)* | weft collapses at 25.86/s — p50 39 ms to 1.80 s, 24% shed, RSS 141 to 817 MiB. §3.2 |
+| The write lock's ceiling under read load | **holds.** A commit adding 20,000 documents held it **11.063 s**, and the worst read due inside that window waited **12.539 s** — 150× the p50 beside it. §3.3 |
+| *(not a pass line, found anyway)* | weft collapses at 27.28/s — p50 39 ms to 1.27 s, 14% shed, RSS 126 to 853 MiB. §3.2 |
+
+**Every figure here was re-measured after a review corrected three defects in the
+instrument** — §4.1 has them and what each moved.
 
 ## 1. Result
 
@@ -1050,30 +1027,30 @@ queries, k = 10, `text` arm both sides.
 
 | | weft | bleve v2.6.0 |
 | --- | --- | --- |
-| sequential p50, warm | 38.671 ms | 6.401 ms |
-| headline rung (12.5% of own throughput) | 3.23/s | 19.53/s |
-| p50 | 68.356 ms | 13.686 ms |
-| p95 | 87.912 ms | 33.313 ms |
-| **p99** (headline rung) | **98.041 ms** | **47.123 ms** |
-| best p99 on the ladder | 78.237 ms at 6.46/s | 24.783 ms at 156.23/s |
-| p99 minus charged STW | 97.762 ms | 47.123 ms |
-| max | 212.528 ms | 62.007 ms |
-| GC cycles over the rung | 24,256 | 1,688 |
-| STW total | 1.457 s (0.047% of elapsed) | 133.9 ms (0.026%) |
-| GC CPU share | 1.0% | 0.0% |
+| sequential p50, warm, 200 samples | 36.656 ms | 6.364 ms |
+| headline rung (12.5% of own throughput) | 3.41/s | 19.64/s |
+| p50 | 83.371 ms | 15.401 ms |
+| p95 | 99.507 ms | 36.863 ms |
+| **p99** (headline rung) | **108.193 ms** | **57.525 ms** |
+| p99 minus charged STW | 107.782 ms | 57.436 ms |
+| best p99 on the ladder | 64.709 ms at 13.64/s | 25.370 ms at 157.13/s |
+| max | 126.370 ms | 64.027 ms |
+| GC cycles over the rung | 24,496 | 1,756 |
+| STW total | 1.829 s (0.062% of elapsed) | 157.5 ms (0.031%) |
+| GC CPU share | 1.1% | 0.1% |
 | major faults | 0 | 0 |
-| involuntary context switches | 2,066,685 | 288,580 |
-| peak RSS (process) | 115.1 MiB | 58.4 MiB |
+| involuntary context switches | 1,933,648 | 284,273 |
+| peak RSS (process) | 120.7 MiB | 58.9 MiB |
 | index on disk | 626 MiB (434 MiB of it vectors) | 150.6 MiB |
 | build time | 68 s of IVF training alone | 17 s |
 
-**The ratio the milestone is graded on is p99, and it is 2.08.** Every other row
-is context, and two of them matter for reading it: bleve's index is a fifth the
-size because it holds no vectors, and bleve's analyzer removes stop words while
+**The ratio the milestone is graded on is p99, and it is 1.88.** Every other row is
+context, and two of them matter for reading it: bleve's index is a fifth the size
+because it holds no vectors, and bleve's analyzer removes stop words while
 `engine.Tokenize` does not — so on a query like "what is the origin of COVID-19"
-bleve walks far shorter postings. [PERF.md](PERF.md) §4 has the full list of what
-is not matched and which way each biases. None of it is worth a factor of ten,
-which is the only claim being made.
+bleve walks far shorter postings. [PERF.md](PERF.md) §4 has the full list of what is
+not matched and which way each biases. None of it is worth a factor of ten, which is
+the only claim being made.
 
 ## 2. The prediction was wrong twice, and the conclusion is right anyway
 
@@ -1082,8 +1059,8 @@ The plan's §1 disagreed with the PRD's own risk table. The PRD had *Go GC로 p9
 reasoning from milestone 3a's 74,504-byte live heap and milestone 3b's 210 MiB of
 distinct pages per query.
 
-**Both are wrong, and in the same direction: the collector and the storage are
-each about one part in three hundred.**
+**Both are wrong, and in the same direction: below saturation the collector and the
+storage are each a fraction of a percent.**
 
 | | predicted | measured |
 | --- | --- | --- |
@@ -1091,7 +1068,7 @@ each about one part in three hundred.**
 | allocation per query, `text+vector` | ≤ 124 MiB | 181.9 MiB, 782,955 objects |
 | GC heap goal | 4 MiB (live is 74 KB, so the floor) | 46–53 MiB |
 | GC cycles per query, `text+vector` | ≈ 31 | 9.4 |
-| STW share of a query | ≈ 1.5% | **0.28%** |
+| STW share of the p99 | ≈ 1.5% | **0.38%** |
 | major faults per rung, warm | the binding constraint | **0** |
 
 The arithmetic error is worth naming because it is easy to repeat. The prediction
@@ -1106,46 +1083,47 @@ and milestone 3a's headline number was measured at rest.**
 The working-set half failed differently. 210 MiB of distinct pages per query is
 real ([milestone 3b §2](#milestone-3b--the-vector-scan)), and it costs nothing
 here, because a ladder replaying 50 queries 200 times finds every one of those
-pages in the page cache: **`majflt` is 0 across the whole rung.** The cold pass
-shows what the other regime looks like — 713 major faults and a 94 ms worst query
-against a 68 ms warm median — and that is 50 samples, which supports a maximum and
-not a tail. A steady-state server is warm, so warm is the honest headline; the
-number would be a different one on a host whose cache is contested, and this
-measurement cannot say what.
+pages in the page cache: **`majflt` is 0 across every rung of both ladders.** The
+cold pass shows what the other regime looks like — 713 major faults and a 94 ms
+worst query against an 83 ms warm median — and that is 50 samples, which supports a
+maximum and not a tail. A steady-state server is warm, so warm is the honest
+headline; the number would be a different one on a host whose cache is contested,
+and this measurement cannot say what.
 
 ## 3. What the tail actually is, which nothing predicted
 
-Neither GC nor storage leaves anything like the gap between 38.671 ms sequential
-and 68.356 ms at 12.5% of that throughput. And nothing in the plan predicted what
-the ladder found above it. Both ladders, in full:
+Neither GC nor storage leaves anything like the gap between 36.656 ms sequential and
+83.371 ms at 12.5% of that throughput. And nothing in the plan predicted what the
+ladder found above it. Both ladders, in full:
 
-| rate (weft) | 3.23/s | 6.46/s | 12.93/s | **25.86/s** | 51.72/s |
+| rate (weft) | 3.41/s | 6.82/s | 13.64/s | **27.28/s** | 54.56/s |
 | --- | --- | --- | --- | --- | --- |
-| p50 | 68.356 ms | 52.795 ms | 39.328 ms | **1.7995 s** | 2.1446 s |
-| p95 | 87.912 ms | 69.067 ms | 59.470 ms | 3.3333 s | 3.7602 s |
-| p99 | 98.041 ms | 78.237 ms | 81.070 ms | — | — |
-| shed | 0 | 0 | 0 | **2,363** | 6,516 |
-| peak RSS | 115.1 MiB | 118.0 MiB | 141.4 MiB | **816.8 MiB** | 801.0 MiB |
+| p50 | 83.371 ms | 51.515 ms | 39.187 ms | **1.2688 s** | 1.8816 s |
+| p95 | 99.507 ms | 73.021 ms | 57.644 ms | 2.7466 s | 3.4694 s |
+| p99 | 108.193 ms | 78.605 ms | 64.709 ms | — | — |
+| shed | 0 | 0 | 0 | **1,438** | 6,272 |
+| peak RSS | 120.7 MiB | 123.2 MiB | 126.3 MiB | **853.0 MiB** | 921.7 MiB |
 
-| rate (bleve) | 19.53/s | 39.06/s | 78.11/s | 156.23/s | 312.45/s |
+| rate (bleve) | 19.64/s | 39.28/s | 78.56/s | 157.13/s | 314.25/s |
 | --- | --- | --- | --- | --- | --- |
-| p50 | 13.686 ms | 9.954 ms | 7.367 ms | 7.248 ms | 9.501 ms |
-| p99 | 47.123 ms | 32.442 ms | 25.149 ms | 24.783 ms | — |
-| shed | 0 | 0 | 0 | 0 | 1 |
-| peak RSS | 58.4 MiB | 58.4 MiB | 58.4 MiB | 58.4 MiB | 65.6 MiB |
+| p50 | 15.401 ms | 11.745 ms | 8.350 ms | 7.797 ms | 8.208 ms |
+| p95 | 36.863 ms | 25.605 ms | 15.227 ms | 17.569 ms | 26.638 ms |
+| p99 | 57.525 ms | 35.390 ms | 25.597 ms | **25.370 ms** | 83.468 ms |
+| shed | 0 | 0 | 0 | 0 | **0** |
+| peak RSS | 58.9 MiB | 59.0 MiB | 59.1 MiB | 59.3 MiB | 67.6 MiB |
 
-Two separate things are in those tables and the milestone's registered rule saw
-neither.
+Three separate things are in those tables and the milestone's registered rule saw
+none of them.
 
-### 3.1 Latency falls as load rises, on both engines
+### 3.1 Latency falls as load rises, on both engines, until it does not
 
-p50 drops monotonically over a four-fold range on weft (68.4 → 39.3 ms) and an
-eight-fold range on bleve (13.7 → 7.2 ms), and bleve's *best* open-loop p50 —
-7.248 ms at full measured throughput — is within 13% of its 6.401 ms sequential
+p50 drops monotonically over a four-fold range on weft (83.4 → 39.2 ms) and an
+eight-fold range on bleve (15.4 → 7.8 ms), and bleve's *best* open-loop p50 —
+7.797 ms at full measured throughput — is within 23% of its 6.364 ms sequential
 baseline while its lowest rung is more than double it.
 
 The explanation that fits both is that the sequential baseline measures a warm
-machine and a sparse open loop does not. At 3.23/s a weft query is followed by 240
+machine and a sparse open loop does not. At 3.41/s a weft query is followed by 210
 ms of idle, over which caches are evicted and the core clocks down; back to back in
 a tight loop, none of that happens. So:
 
@@ -1158,7 +1136,10 @@ a tight loop, none of that happens. So:
    afterwards.
 3. **The comparison survives it** because both sides are quoted at the same relative
    load, 12.5% of their own sequential throughput, through the same driver. It is
-   also conservative for weft: its best measured p99 is 78.237 ms, not 98.041 ms.
+   also conservative for weft: its best measured p99 is 64.709 ms, not 108.193 ms,
+   and at their respective best rungs the ratio is 64.709/25.370 = **2.55×** — still
+   inside the bar, and worse than the headline's 1.88×, so the rule is not flattering
+   weft either.
 
 **What would fix the rule is a different denominator** — an open-loop rung at the
 lowest rate rather than a tight sequential loop. That is a change to a registered
@@ -1169,32 +1150,36 @@ it.
 
 This is the milestone's real finding and no part of the plan anticipated it.
 
-At 25.86/s — exactly the rate weft's own sequential replay achieved — the engine
-does not slow down, it **collapses**: p50 goes from 39.3 ms to **1.80 seconds**, a
-factor of 45; 2,363 of 10,000 requests are shed because the in-flight cap is
-permanently full; and peak RSS goes from 141 MiB to **817 MiB**. bleve at the
-corresponding rung of its own ladder, 156.23/s, has p50 7.248 ms, sheds nothing,
-and sits at the same 58.4 MiB it used at every other rate.
+At 27.28/s — the rate weft's own sequential replay achieved — the engine does not
+slow down, it **collapses**: p50 goes from 39.2 ms to **1.27 seconds**, a factor of
+32; 1,438 of 10,000 requests are shed because the in-flight cap is permanently full;
+and peak RSS goes from 126 MiB to **853 MiB**. bleve at the corresponding rung of
+its own ladder, 157.13/s, has p50 7.797 ms, its *best* p99 of the whole sweep, sheds
+nothing, and sits at 59.3 MiB.
 
 The mechanism is visible in the RSS column and it is not the collector's baseline
 cost:
 
 - A weft query allocates 43.6 MiB and holds much of it live at once — 30,549
   candidates and their decoded records (§2).
-- The in-flight cap is 40. Forty concurrent queries is therefore of order 800 MiB
-  of **live** heap, which is what the 816.8 MiB measures.
-- GOGC targets a multiple of live heap, so the collector's work per cycle scales
-  with concurrency here. More in flight makes each query slower, which puts more in
+- The in-flight cap is 40. Forty concurrent queries is therefore of order 800 MiB of
+  **live** heap, which is what the 853 MiB measures.
+- GOGC targets a multiple of live heap, so the collector's work per cycle scales with
+  concurrency here. More in flight makes each query slower, which puts more in
   flight.
 
-That is a positive feedback loop with a knee, and the knee sits between 12.93/s and
-25.86/s. **bleve has no such knee in the measured range** because its per-query live
-set is small enough that concurrency does not move its heap at all — 58.4 MiB at
-every rung.
+That is a positive feedback loop with a knee, and the knee sits between 13.64/s and
+27.28/s.
+
+**bleve has a knee too, and it is a different kind.** Its p99 turns around at
+314.25/s — 25.370 → 83.468 ms — but it sheds nothing, its RSS moves 59.3 → 67.6 MiB,
+and its p50 barely moves at all (7.797 → 8.208 ms). That is a queue forming under
+overload, which is what saturation is supposed to look like. weft's is a memory
+collapse, which is not.
 
 So the plan's §1 was wrong to acquit the collector and wrong about which resource
-would bind, but the corrected story is not the one it told either. Below the knee
-GC is 0.28% of the p99 and the working set is entirely page-cached. At the knee the
+would bind, but the corrected story is not the one it told either. Below the knee GC
+is 0.38% of the p99 and the working set is entirely page-cached. At the knee the
 binding constraint is **live heap under concurrency**, which is a property of
 `Index.Doc` decoding a whole record per candidate — the same decode
 [milestone 3b §3](#milestone-3b--the-vector-scan) costed at a 1.4× tax on the
@@ -1203,8 +1188,8 @@ working set, now reappearing as the thing that ends the throughput curve.
 **What this does not say.** The knee was found with `inflight = 40`; a lower cap
 would trade shed requests for a lower heap and might move it. Nothing here sweeps
 that, and the honest statement is that weft's usable throughput on this corpus and
-this machine is **at least 12.93/s and less than 25.86/s**, against a sequential
-25.86/s — bleve's usable throughput is at least its sequential 156/s.
+this machine is **at least 13.64/s and less than 27.28/s**, against a sequential
+27.3/s — bleve's is at least its sequential 157/s.
 
 ### 3.3 The write lock, and the 68 seconds that were not reproducible
 
@@ -1227,107 +1212,140 @@ partition floor — gives the ceiling:
 
 | | |
 | --- | --- |
-| write lock held | **11.641 s** |
-| reads due inside that window | 40 |
-| **worst read due inside** | **13.142 s** |
-| worst read due outside | 1.346 s |
-| p50 outside | 69.075 ms |
-| shed | 2 |
+| writer held the exclusive lock | **11.063 s** |
+| of which the commit itself | 11.014 s |
+| of which the 20,000 `Add` calls | **49 ms** |
+| reads due inside that window | 38 |
+| **worst read due inside** | **12.539 s** |
+| worst read due outside | 2.093 s |
+| p50 outside | 83.401 ms |
+| shed | 0 |
 
-Run twice, because a single lock window is one event: 11.641 s / 13.142 s the
-first time and 10.881 s / 12.414 s the second. Same order, and the figures quoted
-above are the first run's.
-
-**A read arriving during a partition-training commit waits 190× the median.** The
-1.346 s outside the window is the queue draining afterwards, so the damage outstays
+**A read arriving during a partition-training commit waits 150× the median.** The
+2.093 s outside the window is the queue draining afterwards, so the damage outstays
 the lock. Both numbers scale with the size of the commit rather than with the size
 of the index, which is the useful part: an ingest that commits in batches under
 `ivfMinDocs` never pays it, and one that commits a corpus pays it in full.
 
+The `Add`/`Commit` split is reported because it was the subject of a correction and
+turned out small: `engine.Add` takes the same exclusive lock, so 20,000 of them do
+block reads, but they cost 49 ms of the 11.063 s — 0.4%. The correction was right and
+its magnitude on this configuration is not what anyone would have guessed, which is
+the reason to print both halves rather than the total.
+
 The documents added are synthetic — the training cost is a function of count and
-vector width, not of content, and sourcing real vectors inside a latency
-measurement would mean re-reading the corpus. Stated here because it is the kind of
-shortcut that should not be discovered in the code.
+vector width, not of content, and sourcing real vectors inside a latency measurement
+would mean re-reading the corpus. Stated here because it is the kind of shortcut that
+should not be discovered in the code.
 
 ## 4. Known costs
 
-### 4.1 The instrument was measuring itself, and a review caught it
+### 4.1 The instrument was wrong three times, and every number here is the re-measurement
 
-`GCPauseTotal` allocated a fresh `[]metrics.Sample` per call, because
-`metrics.Read` fills a `Float64Histogram` in place only when handed one of the
-right shape and otherwise allocates a 163-bucket one. At two calls per request and
-100,000 calls per ladder that is roughly 150 MiB of garbage produced **by the
-pause counter**, driving collections the report then charged to the query — and
-about 190 ns inside every latency window, since the opening read sits in the
-measurement.
+A review found three defects that move published figures. All three are fixed, every
+figure above was produced afterwards, and the pre-fix numbers are recorded here so
+the direction of each error is visible rather than merely asserted.
 
-The file already carried the argument against this. It refuses
-`runtime.ReadMemStats` in as many words — *an instrument that pauses the program
-once per request would be measuring pauses it caused* — and the same objection
-applied one function down, unchecked. The fix is a reused buffer under a mutex,
-0 B and 0 allocs, asserted with `testing.AllocsPerRun`.
+| | pre-fix | corrected |
+| --- | --- | --- |
+| headline p99 | 98.041 ms | **108.193 ms** |
+| p99 minus STW | 97.762 ms | 107.782 ms |
+| collector's share of the p99 | 279 µs (0.28%) | **411 µs (0.38%)** |
+| bleve headline p99 | 47.123 ms | **57.525 ms** |
+| ratio | 2.08× | **1.88×** |
+| write lock held | 11.641 s | 11.063 s |
 
-A second finding in the same pass: `GC CPU share` was the ratio of two
-process-since-start totals, so by the fifth rung a rung that gave a third of its
-CPU to the collector and one that gave none printed the same number — and the
-HEADLINE line quoted exactly that. It is now the ratio of two differences.
+**`GCPause` was charged over a shorter window than the `Lat` it is subtracted from.**
+`Lat` starts at the request's due time; the pause total was read inside the request's
+goroutine, so a stop-the-world landing in the queue before dispatch was in `Lat` and
+not in `GCPause`. Measured on this tree at 3,000 qps: 64% of the p99 elapsed before
+pause accounting began. The collector's published share was an under-estimate, which
+is the direction that flatters the engine.
 
-**Two ladder runs were discarded** for these: one contaminated by a concurrent
-bleve index build, one measured by the pre-fix instrument. The numbers in §1 come
-from a run after both.
+**`-writes` stamped its window after the `Add` loop.** `engine.Add` takes the same
+exclusive lock `Commit` does, so the writer blocked reads twenty thousand times
+before the window opened and `SplitByWindow` filed every one of those stalls under
+`outside` — the baseline the lock's cost is compared against. §3.3 has what it turned
+out to be worth: 49 ms of 11 s.
+
+**The unloaded median was 50 samples**, which `loadgen.Printable` rejects for a p50 —
+the package's own rule, applied everywhere except to the number that is the
+denominator of all five arrival rates and the reference the saturation rule compares
+every rung against. Now 200 on both sides, through `Summarize` so the two
+denominators have one spelling.
+
+**Two earlier defects, found in an earlier review, are why two ladders before these
+were discarded.** `GCPauseTotal` allocated a fresh `[]metrics.Sample` per call —
+roughly 150 MiB of garbage per ladder, produced *by* the pause counter and then
+charged to the query — and `GC CPU share` was the ratio of two process-since-start
+totals rather than of two differences, so by the fifth rung a rung that gave a third
+of its CPU to the collector and one that gave none printed the same number. The file
+already carried the argument against `runtime.ReadMemStats` — *an instrument that
+pauses the program once per request would be measuring pauses it caused* — and it
+applied one function down, unchecked.
+
+**Five instrument defects across two reviews is itself the finding.** Every one of
+them biased toward a flattering number, and none was visible in the output: a
+latency distribution looks equally plausible whether or not the clock around it is
+honest.
 
 ### 4.2 The first GC attribution design was degenerate and was measured, not reasoned, out
 
 Classifying each sample as GC-hit or GC-free by the cycle counter produced 200 hits
-out of 200 on a smoke run: at 485 collections over 200 queries every request
-overlaps one. Charging pause time per sample replaced it. The limit of the
-replacement is stated where the number is: **mark assist is not stop-the-world**,
-so a request charged zero pause can still have spent time marking, which is why
-`GC CPU share` is printed beside it. At 1.0% for weft, neither figure leaves room
-for the collector to be the tail.
+out of 200 on a smoke run: at 485 collections over 200 queries every request overlaps
+one. Charging pause time per sample replaced it. The limit of the replacement is
+stated where the number is: **mark assist is not stop-the-world**, so a request
+charged zero pause can still have spent time marking, which is why `GC CPU share` is
+printed beside it. At 1.1% for weft, neither figure leaves room for the collector to
+be the tail.
 
-### 4.3 A rung is silent for fifty-one minutes
+### 4.3 A rung is silent for forty-nine minutes
 
-`bench` prints nothing between the header and the end of a rung. The headline rung
-is 10,000 requests at 3.23/s, which is 51 minutes of a process that looks hung and
-is not. That cost real time in this milestone. A progress line every thousand
-samples would fix it and was not written, because it is the kind of change that
-wants to land after the numbers rather than between two of them.
+`bench` prints nothing between the header and the end of a rung. The headline rung is
+10,000 requests at 3.41/s, which is 49 minutes of a process that looks hung and is
+not. That cost real time in this milestone. A progress line every thousand samples
+would fix it and was not written, because it is the kind of change that wants to land
+after the numbers rather than between two of them.
 
 ### 4.4 The `text+vector` arm was not laddered
 
-The deployable arm is four times slower per query, so 10,000 samples at 12.5% of
-its throughput is over five hours. Its allocation figures are in §2 and
+The deployable arm is four times slower per query, so 10,000 samples at 12.5% of its
+throughput is over five hours. Its allocation figures are in §2 and
 [PERF.md](PERF.md) §6; its tail is not measured. **The published p99 is for the arm
 bleve can be compared against, not the arm a user would run**, and that gap is the
 price of [D-009](DECISIONS.md)'s scope decision.
 
 ### 4.5 One repetition, not three
 
-[PERF.md](PERF.md) §5 fixes the headline as the median of three runs with the
-spread reported. **This is one run.** Milestone 4 §4.2 is the standing lesson about
-publishing a number whose variance nobody measured; the honest reading of 98.041 ms
-is that it is a single observation of a quantity whose run-to-run spread is
-unknown, and the 2.08× ratio has correspondingly unknown error bars. It clears a
-10× bar by a wide enough margin that no plausible spread reaches it, which is why
-the verdict stands and the caveat is still recorded.
+[PERF.md](PERF.md) §5 fixes the headline as the median of three runs with the spread
+reported. **This is one run of the corrected instrument.** Milestone 4 §4.2 is the
+standing lesson about publishing a number whose variance nobody measured; the honest
+reading of 108.193 ms is that it is a single observation of a quantity whose
+run-to-run spread is unknown, and the 1.88× ratio has correspondingly unknown error
+bars. It clears a 10× bar by a wide enough margin that no plausible spread reaches
+it, which is why the verdict stands and the caveat is still recorded.
+
+The one cross-run comparison available is not reassuring about precision: the same
+rung measured by the pre-fix and post-fix instruments gave 98.041 ms and 108.193 ms.
+Most of that is the `GCPause` correction and the 200-sample denominator moving the
+rate from 3.23/s to 3.41/s, but nothing here separates those from run-to-run noise,
+and only three runs of one instrument would.
 
 ## 5. Carried forward
 
-1. **Nothing bounds a commit's lock window.** §3.3 prices it — 11.641 s for 20,000
-   documents, and a read caught in it waits 13.142 s — but the repayment is
-   unbuilt. Two shapes are visible from here and neither is scheduled: train the
-   partition outside the write lock (both argmax passes touch no shared state,
+1. **Nothing bounds a commit's lock window.** §3.3 prices it — 11.063 s for 20,000
+   documents, and a read caught in it waits 12.539 s — but the repayment is unbuilt.
+   Two shapes are visible from here and neither is scheduled: train the partition
+   outside the write lock (both argmax passes touch no shared state,
    [milestone 3b §4.3](#milestone-3b--the-vector-scan) says so), or give `Commit` a
    context so an operator can abandon one.
-2. **The saturation rule's denominator is wrong** (§3.1), and fixing it changes a
+2. **The throughput knee is live heap under concurrency** (§3.2), and it is the first
+   measurement that puts a number on the cost of `Index.Doc` decoding a whole record
+   per candidate. Milestone 3b costed that decode as a 1.4× tax on the working set
+   and registered a repayment trigger against page counts; the trigger that actually
+   fired is a different one. Whether a lower in-flight cap moves the knee is unswept.
+3. **The saturation rule's denominator is wrong** (§3.1), and fixing it changes a
    registered rule.
-3. **The throughput knee is live heap under concurrency** (§3.2), and it is the
-   first measurement that puts a number on the cost of `Index.Doc` decoding a whole
-   record per candidate. Milestone 3b costed that decode as a 1.4× tax on the
-   working set and registered a repayment trigger against page counts; the trigger
-   that actually fired is a different one. Whether a lower in-flight cap moves the
-   knee is unswept.
 4. **Below the knee the tail is neither the collector nor the storage** (§2), so the
    210 MiB working set and the centroid-ordered `docs` layout milestone 3b costed
    remain unjustified by any measurement here. They would bind on a host whose page

@@ -110,7 +110,7 @@ and the gap between the two p99s is the collector's contribution to the tail.
 
 Stop-the-world is not all the collector costs. Mark assist charges collection work
 to the goroutine that allocated — which is the query — and none of it is
-stop-the-world or visible in either distribution above. The smoke run showed
+stop-the-world or visible in either distribution above. The smoke run that prompted it showed
 exactly this: STW was 0.053% of the wall clock while the median query ran 66.9 ms
 against an unloaded 35.7 ms. `GC CPU share`, from
 `/cpu/classes/gc/total:cpu-seconds`, is reported for that reason.
@@ -249,8 +249,8 @@ the lesson [FINDINGS](FINDINGS.md) milestone 4 §4.2 paid for once already.
 | GOMAXPROCS | 10 |
 | GOGC | 100 (default) |
 | corpus | 171,332 documents, 50 judged TREC-COVID queries, k=10 |
-| repetitions | **1** — the median-of-three rule above is not yet satisfied. See [FINDINGS](FINDINGS.md) milestone 5 §4.5 |
-| weft ladder | rung 1 in one process; rungs 2–5 as four separate `-rate` invocations, each with its own warm-up. Stated because it is a deviation from one-process-per-ladder |
+| repetitions | **1 of the corrected instrument** — the median-of-three rule above is not yet satisfied. Two earlier ladders were discarded and a third was superseded by instrument fixes; see [FINDINGS](FINDINGS.md) milestone 5 §4.1 and §4.5 |
+| weft ladder | one process, five rungs, `-rotations 200` |
 
 The numbers measured on it are in [FINDINGS.md](FINDINGS.md) milestone 5 §1.
 
