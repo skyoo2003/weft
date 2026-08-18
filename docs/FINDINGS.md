@@ -996,6 +996,32 @@ diff would be the honest price of D-008 being wrong.
 <!-- markdownlint-disable-next-line MD025 -->
 # Milestone 5 — Performance
 
+> **STALE — being re-measured.** Every number in this milestone below was produced
+> by an instrument that a review has since corrected in three ways that move
+> published figures, and the corrections are in the tree while these numbers are
+> not. **Do not quote anything here until this banner is gone.**
+>
+> 1. **`-writes` stamped its window after the `Add` loop.** `engine.Add` takes the
+>    same exclusive lock `Commit` does, so at `-writedocs 20000` the writer blocked
+>    reads twenty thousand times *before* the window opened, and every one of those
+>    stalls was filed under `outside` — the baseline the lock's cost is compared
+>    against. The bias pointed at making the lock look cheap, and it grew with the
+>    parameter the experiment sweeps. §3.3's figures are the ones this hits.
+> 2. **`GCPause` was charged over a shorter window than the `Lat` it is subtracted
+>    from.** The pause total was read inside the request's goroutine, so a pause
+>    landing in the queue before dispatch was in `Lat` and not in `GCPause` —
+>    measured at 64% of the p99 elapsing before accounting began. `p99 minus STW`
+>    under-subtracted the tail it exists to explain, so the collector's share
+>    published in §1 and §2 is an **under**-estimate.
+> 3. **The unloaded median was 50 samples**, which the package's own `Printable`
+>    rule rejects for a p50. It is the denominator of all five arrival rates and the
+>    reference the saturation rule compares every rung against, so it can move which
+>    rung is called saturated. Now 200 on both sides.
+>
+> The re-measurement is running. What is *not* expected to move: the shape of §3.1
+> and §3.2 — both engines' ladders and the collapse at 25.86/s — because neither
+> depends on any of the three.
+
 **Verdict: both clauses hold, and the prediction that got them there was wrong.**
 weft's p99 at the registered load point is **98.041 ms**, of which the collector
 accounts for **279 µs — 0.28%**. bleve on the same machine, corpus, query set, arm
