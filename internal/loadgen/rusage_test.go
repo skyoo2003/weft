@@ -3,6 +3,7 @@
 package loadgen
 
 import (
+	"os"
 	"runtime"
 	"testing"
 )
@@ -29,20 +30,24 @@ func TestProcFaultsCountsMinorFaultsOnTouch(t *testing.T) {
 		t.Skipf("getrusage reports nothing on %s", runtime.GOOS)
 	}
 
-	// Fresh, untouched, and large enough that the fault count cannot be lost in
-	// noise: 64 MiB is 16,384 pages. Written to rather than merely allocated,
-	// because Go may hand back memory it already faulted in.
+	// Fresh, untouched, and large enough that the fault count cannot be lost in noise.
+	// Written to rather than merely allocated, because Go may hand back memory it
+	// already faulted in — and strided by the real page size rather than a hardcoded
+	// 4096, which is the number this had and which is wrong on the platform the
+	// milestone was measured on: darwin/arm64 pages are 16 KiB, so 4096 touched four
+	// addresses per page and the stated margin of "16,384 pages" was 4,096.
 	const n = 64 << 20
+	page := os.Getpagesize()
 	buf := make([]byte, n)
-	for i := 0; i < n; i += 4096 {
+	for i := 0; i < n; i += page {
 		buf[i] = 1
 	}
 	runtime.KeepAlive(buf)
 
 	after := ProcFaults()
 	if after.Minor <= before.Minor {
-		t.Errorf("minor faults %d -> %d after touching %d MiB; the counter is not moving",
-			before.Minor, after.Minor, n>>20)
+		t.Errorf("minor faults %d -> %d after touching %d MiB in %d %d-byte pages; the "+
+			"counter is not moving", before.Minor, after.Minor, n>>20, n/page, page)
 	}
 	if after.Major < before.Major {
 		t.Errorf("fault counters went backwards: %+v -> %+v", before, after)

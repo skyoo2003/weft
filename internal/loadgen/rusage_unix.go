@@ -38,7 +38,7 @@ func MaxRSS() int64 {
 	return int64(ru.Maxrss) * 1024 //nolint:unconvert // int32 on 32-bit unix
 }
 
-// procFaults reads the counters that say what a load test was waiting on.
+// ProcFaults reads the counters that say what a load test was waiting on.
 //
 // Unlike Maxrss these need no unit branch: all four are plain counts on every
 // unix. What they are counts *of* is the part worth stating, because milestone
@@ -58,8 +58,8 @@ func MaxRSS() int64 {
 // none of it is visible in latency alone.
 //
 // Process-wide and monotonic, so a run's figure is always a difference between two
-// snapshots — see sub. Reading them costs one syscall, which is why this is called
-// once around a run rather than once around a request.
+// snapshots — see FaultCounts.Sub. Reading them costs one syscall, which is why this
+// is called once around a run rather than once around a request.
 func ProcFaults() FaultCounts {
 	var ru syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {

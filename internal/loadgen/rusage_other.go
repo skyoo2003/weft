@@ -19,11 +19,12 @@ package loadgen
 // platform quirk is the point of it living here.
 func MaxRSS() int64 { return 0 }
 
-// procFaults reports nothing where getrusage does not exist, for the reason
+// ProcFaults reports nothing where getrusage does not exist, for the reason
 // above: a zero prints as absent, and absent is the honest answer.
 //
-// The bench report reads this to decide whether a tail is storage or scheduling.
-// On a platform that cannot answer, that question stays open rather than being
-// answered from a fabricated zero — the report prints the counters only when they
-// moved, so a run here shows a latency distribution and no fault line.
+// The bench report reads this to decide whether a tail is storage or scheduling. On
+// a platform that cannot answer, that question stays open — and the report says so
+// rather than printing four zeros a reader would compare against the Linux figures:
+// the rusage line is omitted when every counter is zero, which on unix cannot happen
+// over a run and here always does.
 func ProcFaults() FaultCounts { return FaultCounts{} }

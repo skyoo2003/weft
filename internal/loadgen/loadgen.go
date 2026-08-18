@@ -60,14 +60,25 @@ func DefaultInflight() int { return 4 * runtime.GOMAXPROCS(0) }
 type Sample struct {
 	Lat time.Duration
 
-	// gcPause is the process-wide stop-the-world time that elapsed inside this
+	// GCPause is the process-wide stop-the-world time that elapsed inside this
 	// request's window. A pause stops every goroutine, so it is time this request
 	// provably spent stopped whatever else it was doing, and subtracting it gives
 	// the counterfactual the milestone asks for.
 	//
+	// The window has to be the same one Lat measures or the subtraction is not a
+	// counterfactual. Lat starts at Due, so Drive reads the pause total in the send
+	// loop at dispatch rather than inside the request's goroutine: read inside, the
+	// window would begin only once the goroutine got a P, and a pause landing in the
+	// wait before that would be in Lat and not in GCPause. That wait is the queue,
+	// which is exactly where a pause is most likely, so the asymmetry made
+	// p99(exGC) under-subtract most of the tail it exists to explain. What no clock
+	// read can recover is the span from Due to dispatch when the loop is already
+	// behind schedule; that is the coordinated-omission queue, and it is reported as
+	// latency rather than as pause.
+	//
 	// It is not all of what the collector costs. Mark assist charges allocation to
 	// the goroutine performing it — here, the query — and none of that is
-	// stop-the-world or visible in this field. GCCPUShare is what reports it.
+	// stop-the-world or visible in this field. GCCPUShareBetween is what reports it.
 	GCPause time.Duration
 
 	// Due is when this request was scheduled to be sent, as an offset from the
@@ -337,19 +348,24 @@ func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) 
 				return samples, shed
 			}
 		}
+		// Read here, not inside the goroutine, and the reason is in Sample.GCPause:
+		// this is the closest the loop can get to the due time the latency is
+		// measured from, and a pause charged over a shorter window than the latency
+		// it is subtracted from is not a counterfactual. A shed request pays one
+		// read for nothing, which at 260 ns is not a cost worth a branch.
+		before := GCPauseTotal()
 		select {
 		case slots <- struct{}{}:
 		default:
-			mu.Lock()
+			// Only the send loop touches shed, so no lock: the worker goroutines
+			// below publish through mu and never reach this branch.
 			shed++
-			mu.Unlock()
 			continue
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
-			before := GCPauseTotal()
 			do(i)
 			s := Sample{Lat: time.Since(due), GCPause: GCPauseTotal() - before, Due: offset}
 			mu.Lock()
@@ -458,29 +474,6 @@ func GCPauseTotal() time.Duration {
 	return time.Duration(total * float64(time.Second))
 }
 
-// GCCPUShare is the fraction of the process's CPU time the collector has taken,
-// pauses and assists together.
-//
-// It is here because the pause total is the collector's most visible cost and not
-// its largest. A smoke run of this command against the evaluation corpus put
-// stop-the-world at 0.051% of the wall clock while the median query ran at 67.8 ms
-// against an unloaded 35.1 ms, at 14% of measured capacity. Nothing in
-// /gc/pauses:seconds explains that gap; mark assist does, and assist is charged to
-// the goroutine that allocated — which is the query. A report that published the
-// STW figure alone would invite exactly the wrong conclusion.
-//
-// Cumulative over the process, so this is the whole-process figure and a *run's*
-// figure is GCCPUShareBetween of two snapshots. It is a ratio of two totals rather
-// than a rate: what a reader wants is "how much of this machine went to the
-// collector", which is dimensionless.
-func GCCPUShare() float64 {
-	gc, total := GCCPUSeconds()
-	if total <= 0 {
-		return 0
-	}
-	return gc / total
-}
-
 // GCCPUSeconds is the collector's CPU time and the process's total, both cumulative
 // since the process started.
 //
@@ -489,6 +482,14 @@ func GCCPUShare() float64 {
 // before the rung began — mapping the index, the cold pass, every earlier rung — and
 // by the fifth rung the running ratio has stopped moving whatever the collector is
 // doing now. GCCPUShareBetween is the arithmetic that does hold.
+//
+// Both counters are accumulated when a collection ends, not continuously, so they read
+// 0 until the first cycle completes and they do not move again inside a cycle. An
+// interval with no completed cycle therefore reports a share of 0, which is
+// indistinguishable in the printed report from a collector that took nothing. Not a
+// problem for the figures this package exists to produce — a rung makes hundreds of
+// cycles, 485 over 200 queries on the evaluation corpus — and a real one for anyone
+// reusing this over a short window. Measured: 0/0 before the first GC, moving after it.
 func GCCPUSeconds() (gc, total float64) {
 	s := []metrics.Sample{
 		{Name: "/cpu/classes/gc/total:cpu-seconds"},
@@ -504,6 +505,17 @@ func GCCPUSeconds() (gc, total float64) {
 // GCCPUShareBetween is the collector's share of the CPU the process burned between
 // two GCCPUSeconds snapshots — the ratio of the differences, which is the only form
 // of it that describes one rung rather than the process's whole history.
+//
+// It is reported at all because the pause total is the collector's most visible cost
+// and not its largest. A smoke run against the evaluation corpus put stop-the-world
+// at 0.051% of the wall clock while the median query ran at 67.8 ms against an
+// unloaded 35.1 ms, at 14% of measured capacity. Nothing in /gc/pauses:seconds
+// explains that gap; mark assist does, and assist is charged to the goroutine that
+// allocated — which is the query. A report publishing the STW figure alone would
+// invite exactly the wrong conclusion.
+//
+// A ratio rather than a rate: what a reader wants is "how much of this machine went
+// to the collector", which is dimensionless.
 func GCCPUShareBetween(gc0, total0, gc1, total1 float64) float64 {
 	d := total1 - total0
 	if d <= 0 {

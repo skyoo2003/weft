@@ -46,6 +46,11 @@ lint:
 		exit 1; \
 	}
 	golangci-lint run ./...
+	# bench/ too, for the reason bench-build exists: `./...` does not descend into a
+	# nested module, so without this line bench/main.go is the one committed .go file
+	# in the repository no lint gate ever reads. It picks up this same .golangci.yaml
+	# by walking up from bench/.
+	cd bench && golangci-lint run ./...
 
 # Markdown is most of what a first-time reader of this repository actually
 # reads, so it gets the same treatment as the Go.
@@ -208,12 +213,21 @@ bench-compare:
 		cd bench && go run . -data $(abspath $(EVAL_DATA)) $(BENCHFLAGS); \
 	fi
 
-# The bleve side compiled, vetted and tested. Its own target because it is its own
+# The bleve side type-checked and tested. Its own target because it is its own
 # module: `go build ./...` at the root does not descend into a nested module, so
 # without this nothing in the gate ever compiles bench/main.go and the comparison
 # rots silently between the runs that use it.
+#
+# `go build ./...` is not among the three: it type-checks nothing vet does not, and it
+# writes a 20 MiB executable into bench/ that nothing runs — the binary .gitignore had
+# to be taught about and `make clean` did not remove. vet fails on a compile error,
+# which is the guarantee this target exists for.
+#
+# `go test ./...` is here for when bench/ has tests rather than because it has them
+# now: the parsing it used to own moved to internal/eval, which is tested in the root
+# module, and what is left is the bleve calls themselves.
 bench-build:
-	cd bench && go build ./... && go vet ./... && go test ./...
+	cd bench && go vet ./... && go test ./...
 
 # Everything milestone 4 publishes: the degeneracy diagnostic, the frozen arms, the
 # sensitivity sweep, and the fusion weight sweep behind the README's claim that no
@@ -258,3 +272,7 @@ example:
 clean:
 	go clean ./...
 	rm -f weft
+	# bench/ is its own module, so `go clean ./...` above does not reach it, and a
+	# `go build` run there by hand leaves a 20 MiB executable named after the directory.
+	cd bench && go clean ./...
+	rm -f bench/bench

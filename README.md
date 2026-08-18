@@ -179,7 +179,7 @@ make eval-full  # adds the graph tie analysis and the 28-configuration sweep
 make bench      # milestone 5's latency ladder (needs a prepared corpus, ~90 min)
 ```
 
-CI runs `make all` plus four targets kept out of it because each costs a tool to install or a minute of wall clock: `make spdx`, `make lint`, `make lint-docs`, and `make fuzz` — the last being 30 seconds each against the two segment-decoder fuzz targets, which is where a hostile file would land. [CONTRIBUTING](CONTRIBUTING.md#the-gate) has the detail.
+CI runs `make all` plus five targets kept out of it because each costs a tool to install or a minute of wall clock: `make spdx`, `make bench-build`, `make lint`, `make lint-docs`, and `make fuzz` — the last being 30 seconds each against the two segment-decoder fuzz targets, which is where a hostile file would land. [CONTRIBUTING](CONTRIBUTING.md#the-gate) has the detail.
 
 `make eval` needs data that is not in the repository. [EVAL.md §7](docs/EVAL.md) lists the downloads and the one-time `weft-eval prepare` step.
 

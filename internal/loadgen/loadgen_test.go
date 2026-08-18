@@ -5,6 +5,7 @@ package loadgen
 import (
 	"context"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -250,9 +251,9 @@ func TestGCPauseIsChargedPerSampleNotClassified(t *testing.T) {
 	}
 }
 
-// TestGCCPUShareIsAFraction covers the metric that explains the smoke run: a median
-// that doubled under 14% of capacity while stop-the-world totalled 0.05% of the
-// wall clock.
+// TestGCCPUSecondsReadsBothCounters covers the metric that explains the smoke run: a
+// median that doubled under 14% of capacity while stop-the-world totalled 0.05% of
+// the wall clock.
 //
 // Pause time is the collector's most visible cost and not its largest. Mark assist
 // charges allocation to the goroutine doing it, which is the query, and none of that
@@ -260,10 +261,31 @@ func TestGCPauseIsChargedPerSampleNotClassified(t *testing.T) {
 // figure next to an inflated latency and leave the gap unexplained — the reader's
 // obvious conclusion being that the collector is cheap here, which the assist number
 // contradicts.
-func TestGCCPUShareIsAFraction(t *testing.T) {
-	share := GCCPUShare()
-	if share < 0 || share > 1 {
-		t.Errorf("GCCPUShare() = %v, want a fraction in [0,1]", share)
+//
+// Asserted against the live runtime rather than arithmetic, because the failure worth
+// catching is a metric name that stopped existing or changed Kind: both reads would
+// then return 0, every share the report prints would be 0.0%, and nothing would say the
+// counter was never found. The predecessor of this test asked only whether the ratio
+// fell in [0,1], which 0 satisfies — a tautology that would have passed over exactly
+// that.
+//
+// runtime.GC() first, and that is the caveat rather than test scaffolding: the
+// /cpu/classes counters are accumulated when a cycle ends, so they read 0 until one
+// has. See GCCPUSeconds.
+func TestGCCPUSecondsReadsBothCounters(t *testing.T) {
+	runtime.GC()
+	gc, total := GCCPUSeconds()
+	if total <= 0 {
+		t.Fatalf("GCCPUSeconds() = %v, %v after a completed cycle; the counter is "+
+			"missing or changed Kind", gc, total)
+	}
+	if gc <= 0 {
+		t.Errorf("GCCPUSeconds() = %v, %v after a completed cycle; the collector's own "+
+			"counter is not moving", gc, total)
+	}
+	if gc > total {
+		t.Errorf("GCCPUSeconds() = %v, %v; the collector cannot have taken more CPU "+
+			"than the process burned", gc, total)
 	}
 }
 
