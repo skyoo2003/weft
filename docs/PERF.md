@@ -226,7 +226,8 @@ want.
 §5 has said "the median of three repetitions with the spread reported beside it"
 since milestone 5, and milestone 5 published one run
 ([FINDINGS](FINDINGS.md) milestone 5 §4.5). The rule was never wrong; it was never
-made operable. This is the operable form.
+made operable. This is the operable form, and the choice behind it — with what
+would show it was the wrong one — is [D-011](DECISIONS.md).
 
 A repetition is **not another sweep of the ladder.** Every rung's rate is derived
 from `benchUnloaded` — 200 sequential requests, taken fresh each run — so three

@@ -731,3 +731,99 @@ A weaker signal, and mechanical: `ExampleScorer` and the three paragraphs added 
 `doc.go` and `search.go` never change again while the same three questions keep
 being asked. That would mean the repair was aimed at the trial rather than at
 readers.
+
+---
+
+## D-011 — A repetition is a rung, not a ladder, and the arm nobody can afford to ladder gets a staged depth
+
+**Date:** 2026-08-20
+**Milestone:** 7 — a baseline nobody has to qualify
+**Status:** accepted, **registered before the campaign measured anything**
+
+### Context
+
+[PERF.md](PERF.md) §5 has said "the headline is the median of three repetitions with
+the spread reported beside it" since milestone 5 was planned. Milestone 5 published
+one run ([FINDINGS](FINDINGS.md) milestone 5 §4.5). It also published no tail at all
+for `text+vector` — the arm a user would actually deploy — because at four times the
+per-query cost, ten thousand samples is over five hours (§4.4).
+
+Neither is a rule that was wrong. Both are rules that were never made operable, and a
+rule with no procedure is a rule right up until the first time it is inconvenient.
+
+Milestone 8's pass line is an absolute figure at a named load. It is measured against
+this baseline. If the baseline is one observation of unknown spread, every claim built
+on it inherits that.
+
+### Question
+
+What, exactly, is a repetition — and how does an arm that cannot be laddered three
+times get a publishable tail without lowering the bar that makes a tail worth reading?
+
+### Decision
+
+**A repetition is the same rung measured again, not the ladder swept again.**
+
+Repetition 1 sweeps with `-rate 0` and rule 1 selects the headline rate R.
+Repetitions 2 and 3 run `-rate R`. The published figure is their median, with the
+minimum and maximum beside it.
+
+**And sample depth is staged for `text+vector` rather than the quantile rule
+relaxed.** A thin ladder (`-rotations 40`, 2,000 samples per rung) selects the load
+point, because a p50 needs 200 samples and rule 1 reads p50s. A deep rung
+(`-rotations 200`) at that rate produces the p99.
+
+Both are written as rules 3 and 4 in [PERF.md](PERF.md) §3, with the commands in
+§5.1, and this file is committed alongside them — before any figure they govern
+exists.
+
+### Why
+
+**Three sweeps have no common rung.** Every rate on the ladder is `benchUnloaded`
+scaled by `loadgen.Ladder`, and `benchUnloaded` is 200 sequential requests taken
+fresh at the start of each run. Three sweeps produce three different sets of five
+rates. "The 100% rung" in two of them is two different loads, and a median over them
+is a median over a quantity that changed between observations. This is not a
+refinement of the median-of-three rule; it is the only reading of it that computes.
+
+The cost is named: repetitions 2 and 3 do not re-derive R, so they cannot detect that
+the machine's sequential throughput moved. That is why each run's unloaded p50 is
+recorded beside its p99 — the drift is then visible as data rather than absorbed into
+the spread. R is also quoted to two decimals, so repetitions 2 and 3 run about 0.04%
+off repetition 1's actual rung.
+
+**Relaxing `Printable` was the alternative, and it was refused.** Printing a p99 off
+two thousand samples would have given `text+vector` a tail immediately. It would also
+have made every published quantile in this repository mean something different from
+what [PERF.md](PERF.md) §2.3 says it means, to buy one number. Staging the depth costs
+an extra run and changes no rule. The honest cost of staging is that selection and
+measurement happen at different depths, so a thin ladder could in principle select a
+different rung than a deep one would — registered as a finding to publish if it
+happens, not as an error to hide.
+
+**Registered before, not written after.** [D-004](#d-004--the-graph-verdict-needs-two-conditions-and-they-are-fixed-before-the-numbers-exist)
+fixed milestone 4's verdict conditions before its numbers existed and
+[D-010](#d-010--adoption-is-decided-by-a-trial-and-the-extension-point-is-not-designed-before-it)
+committed `ADOPTION.md` before the trial ran. A decision record written after the
+campaign would be a description of what was done, and the thing that makes these
+rules worth anything is that they were not available to be chosen once the numbers
+were on screen. Rule 5 in particular — *the median becomes the published figure, and
+if the worst observation reaches the 10× bar the verdict says so* — decides in
+advance how to report a result nobody wants.
+
+### What would show this decision was wrong
+
+Two signals, both mechanical:
+
+**The three observations agree to within noise, run after run, across milestones.**
+Then the repetition campaign is 3.1 hours of `text` arm time buying a spread that was
+never in doubt, and rule 3 should collapse back to one run with the spread quoted from
+history. Milestone 7's own §4 is where that first becomes checkable — if nothing the
+three runs say changes any verdict, that is the finding, and it gets published as one
+rather than quietly justifying the next campaign.
+
+**The thin ladder selects a different rung than the deep one.** Then rule 4's
+staging is not a cost-saving on one arm, it is a claim that sample depth does not move
+rule 1 — and that claim would be false. The repair is not to widen the thin ladder but
+to say so in `text+vector`'s published figure, because the same doubt then applies to
+every headline rule 1 has ever selected.
