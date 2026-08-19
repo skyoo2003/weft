@@ -325,9 +325,14 @@ func (ix *Index) Len() int {
 // gets what it would get for an id that was never assigned: the index becomes
 // empty rather than dangerous. Calling it twice is a no-op.
 //
-// An index that was never opened from disk holds no mappings and Close is free.
-// Callers who only ever New and Add need not call it, which is why nothing in
-// the read path checks whether it has happened.
+// An index that never touched disk holds no mappings and Close is free. Callers
+// who only ever New and Add need not call it, which is why nothing in the read
+// path checks whether it has happened.
+//
+// Open is not the only way to acquire mappings, and this is the sentence a caller
+// has to read: Commit adopts the generation it just wrote, which maps it into the
+// index Commit was called on. So New + Add + Commit holds mappings and does need
+// Close, exactly as an opened index does.
 func (ix *Index) Close() error {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -382,6 +387,12 @@ func (ix *Index) Doc(id DocID) (Document, bool) {
 
 // Resolve maps a caller-supplied Key to its DocID. The bool is false for a Key
 // that was never added — which is exactly how dangling Links are detected.
+//
+// It is also the join a scorer written outside this module needs. Document is
+// closed, so a signal whose data is not one of its fields keeps that data in a
+// table of the caller's own keyed by Key, and Resolve turns each Key into the
+// DocID a Candidate carries. See Document for the whole pattern and its one
+// cost, and ExampleScorer for it in a compiling program.
 func (ix *Index) Resolve(key string) (DocID, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()

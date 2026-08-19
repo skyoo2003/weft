@@ -56,9 +56,10 @@ one, two, three and four scorers, and a reordered list, through one call shape.
 
 ### 2.1 Two things the design bought without touching `pkg/`
 
-**Over-fetch needed no new engine API.** `pkg/engine/search.go` line 112 carries a
-`ponytail:` marker naming milestone 4 as the moment over-fetching would earn a
-parameter on `Search`. It does not need one. `fusion.Fuse` scores a document from
+**Over-fetch needed no new engine API.** `engine.Search` carried a `ponytail:`
+marker naming milestone 4 as the moment over-fetching would earn a parameter on
+`Search`. It does not need one, and the marker is now withdrawn in favour of the
+reason. `fusion.Fuse` scores a document from
 its ranks alone and passes `k` only to `TopK`, so
 
 ```go

@@ -123,8 +123,12 @@ func Search(ctx context.Context, q Query, k int, fuse Fuser, scorers ...Scorer) 
 		return nil, err
 	}
 
-	// ponytail: each scorer is asked for exactly k. Over-fetching (asking for
-	// k*m and fusing deeper streams) is known to improve RRF quality; deferred
-	// to milestone 4, where there is a quality metric to justify it against.
+	// Each scorer is asked for exactly k, and this is settled rather than
+	// deferred: milestone 4 withdrew the over-fetch marker rather than repaying
+	// it, because Fuse(streams, k*m)[:k] is Fuse(streams, k) — over-fetching
+	// inside Search would be truncation, not a different ranking (docs/EVAL.md,
+	// TestOverfetchIsTruncationNotADifferentRanking). What over-fetching does buy
+	// is the caller's to take, by passing a k above its display size and slicing,
+	// which is the paragraph above the Precondition.
 	return fuse(streams, k), nil
 }

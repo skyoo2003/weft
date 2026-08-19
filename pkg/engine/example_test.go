@@ -110,17 +110,30 @@ func (n *nearby) Name() string { return "nearby" }
 // only documents this scorer has an opinion about, and a key the index never saw
 // is skipped rather than rejected. The score scale is arbitrary on purpose —
 // fusion reads rank, never Candidate.Score.
+//
+// The three guards around the loop are the shape every scorer in this tree
+// keeps, and scorer/recency states why each one earns its line: k <= 0 declines
+// the work before allocating, the poll inside the loop stops a cancelled query
+// walking a table that may be corpus-sized, and the poll after it stops a
+// cancellation arriving on the last key from still paying for TopK's O(n log n)
+// sort and then reporting success past the deadline.
 func (n *nearby) Candidates(ctx context.Context, _ engine.Query, k int) ([]engine.Candidate, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if k <= 0 {
+		return nil, nil
 	}
 	cands := make([]engine.Candidate, 0, len(n.at))
 	for key, pos := range n.at {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		id, ok := n.ix.Resolve(key)
 		if !ok {
 			continue
 		}
 		cands = append(cands, engine.Candidate{Doc: id, Score: 1 / (1 + math.Abs(pos-n.origin))})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	// TopK breaks ties on DocID, so map iteration order cannot reach the ranking.
 	return engine.TopK(cands, k), nil
@@ -134,9 +147,14 @@ func (n *nearby) Candidates(ctx context.Context, _ engine.Query, k int) ([]engin
 func ExampleScorer() {
 	ix := engine.New()
 	for _, d := range []engine.Document{
+		// The three texts are deliberately different lengths. BM25 normalizes by
+		// document length, so this is what makes the text stream an ordering
+		// rather than a three-way tie — and a tie here would be settled by TopK on
+		// DocID, which is insertion order, so the ranking below would say more
+		// about the order these three were added than about either signal.
 		{Key: "palace", Text: "cafe by the palace"},
-		{Key: "harbour", Text: "cafe on the harbour"},
-		{Key: "hillside", Text: "cafe up the hillside"},
+		{Key: "harbour", Text: "cafe on the harbour by the water"},
+		{Key: "hillside", Text: "cafe up the hillside above the old town wall"},
 	} {
 		if _, err := ix.Add(d); err != nil {
 			fmt.Println("add:", err)
@@ -160,6 +178,12 @@ func ExampleScorer() {
 			txt, nearbyFrom(ix, at, origin))
 		if err != nil {
 			fmt.Println("search:", err)
+			return
+		}
+		// Search returns no results and no error when every stream is empty, so
+		// the copyable shape checks before indexing.
+		if len(results) == 0 {
+			fmt.Println("no results")
 			return
 		}
 		d, _ := ix.Doc(results[0].Doc)

@@ -7,19 +7,23 @@
 // someone holding the whole tree. Every one of those four reads a field
 // engine.Document already has — Text, Vector, Links, Time — so none of them ever
 // had to answer where an outsider's own data lives. Document is closed and Query
-// is closed, and doc.go tells a fifth scorer to "add a field here", which is a
-// maintainer's instruction and not available to anyone else.
+// is closed, and doc.go used to tell a fifth scorer to "add a field here", which
+// is a maintainer's instruction and not available to anyone else. That sentence is
+// gone — this milestone replaced it — so read doc.go for the answer, not this
+// paragraph for the problem.
 //
-// So the path an outsider actually has is a side store of their own, joined to
-// the corpus through the two exported halves of the identity map, Resolve and
-// Doc. Whether that is sufficient is what these tests decide. They are plain
-// Test functions rather than Examples on purpose: godoc renders Examples, and
-// the adoption trial in docs/ADOPTION.md is blind by construction — it must not
-// be able to read the answer out of the documentation it is handed.
+// The path an outsider actually has is a side store of their own, joined to the
+// corpus through the two exported halves of the identity map, Resolve and Doc.
+// Whether that is sufficient is what these tests decide. They were plain Test
+// functions rather than Examples because pkg.go.dev renders Examples and the
+// adoption trial in docs/ADOPTION.md had to stay blind — it must not have been
+// able to read the answer out of the documentation it was handed. The trial has
+// since run, and ExampleScorer next door now publishes that answer deliberately.
 package engine_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -54,8 +58,20 @@ func (p *popularity) Name() string { return "popularity" }
 // implementation an outsider has to copy — sweeps every DocID and calls Doc on
 // each, which decodes a whole record per document. Milestone 5 section 3.2 found
 // that same decode to be where throughput collapses under concurrency. A side
-// store does not have to inherit that: its keys are its own, so the loop is over
-// what the caller knows rather than over the corpus, and Doc is never called.
+// store bounds the loop by what the caller knows rather than by the corpus,
+// which is the only part of that cost it removes for free.
+//
+// It does not remove the per-document read. Resolve is cheap only while byKey is
+// populated: persist.go clears that map when a generation is adopted, so on a
+// restored index every Resolve takes ix.mu.RLock, binary-searches each segment's
+// key table, and then decodes the record's key to verify the entry it found. A
+// side store the size of the corpus therefore pays the same per-document,
+// lock-taking, mmap-touching sweep the recency scorer does, through a different
+// door. The escape is to resolve once and keep DocIDs, which is safe only because
+// nothing renumbers one: TestASideStoreSurvivesCommitAndOpen pins the Commit and
+// Open half, and merge.go's adjacent-segment concatenation with its own tests
+// pins the merge half. This exemplar resolves per query instead, because for five
+// keys the simpler shape is worth more than the saving.
 func (p *popularity) Candidates(ctx context.Context, q engine.Query, k int) ([]engine.Candidate, error) {
 	if k <= 0 {
 		return nil, nil
@@ -72,6 +88,11 @@ func (p *popularity) Candidates(ctx context.Context, q engine.Query, k int) ([]e
 			continue
 		}
 		cands = append(cands, engine.Candidate{Doc: id, Score: float64(n)})
+	}
+	// The check recency documents as the one that pays: without it a cancellation
+	// arriving on the last key still buys TopK's sort and reports success.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return engine.TopK(cands, k), nil
 }
@@ -154,6 +175,12 @@ func TestASideStoreSurvivesCommitAndOpen(t *testing.T) {
 	if err := ix.Commit(dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
+	// Closed because it was committed, not because it was opened: Commit adopts
+	// the generation it just wrote, so ix now holds a mapping over files inside
+	// t.TempDir() — see Index.Close. Leaving it open outlives the test and makes
+	// the directory's cleanup fail on platforms that refuse to remove a mapped
+	// file.
+	defer ix.Close()
 
 	restored, err := engine.Open(dir)
 	if err != nil {
@@ -181,12 +208,12 @@ func TestASideStoreSurvivesCommitAndOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search after Open: %v", err)
 	}
-	if len(got) != len(want) {
-		t.Fatalf("ranking after Open has %d results, before had %d", len(got), len(want))
-	}
-	for i := range got {
-		if got[i].Doc != want[i].Doc {
-			t.Fatalf("rank %d after Open is doc %v, was %v: the side store no longer points where it did", i+1, got[i].Doc, want[i].Doc)
-		}
+	// slices.Equal, the same comparison restore_test.go uses and for the same
+	// reason: Candidate is two comparable fields, so this demands the same
+	// documents, the same order and bit-identical scores. Comparing DocIDs alone
+	// would accept a restored index that ranks the right documents with drifted
+	// fused scores.
+	if !slices.Equal(got, want) {
+		t.Fatalf("ranking after Open differs — the side store no longer points where it did:\n got %+v\nwant %+v", got, want)
 	}
 }

@@ -17,8 +17,10 @@ Every scorer weft ships — text, vector, graph, recency — reads a field
 `engine.Document` already has. None of them has ever had to answer where an
 outsider's own data lives, and both carrier types are closed: `Document` has five
 fields and `Query` has three, with no map, no `any`, and no extension point.
-`pkg/engine/doc.go` tells a fifth scorer to "add a field here", which is an
-instruction available only to whoever owns the repository.
+`pkg/engine/doc.go` told a fifth scorer to "add a field here", which is an
+instruction available only to whoever owns the repository. That is the state the
+trial was run against; section 6 is what it found, and the sentence has since been
+replaced.
 
 So milestone 6 registered two predictions before measuring anything.
 

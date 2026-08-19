@@ -25,7 +25,7 @@ If you need text + vector hybrid search today, [bleve](https://github.com/bleves
 
 ## Status
 
-Milestones 1 through 5 are done. **Not usable in production:** documents cannot be deleted, a commit holds a write lock for as long as it takes — 11 seconds for a 20,000-document batch, with reads queueing behind it — and sustained query load collapses at 27 queries per second on the machine measured rather than degrading.
+Milestones 1 through 6 are done. **Not usable in production:** documents cannot be deleted, a commit holds a write lock for as long as it takes — 11 seconds for a 20,000-document batch, with reads queueing behind it — and sustained query load collapses at 27 queries per second on the machine measured rather than degrading.
 
 | # | Milestone | State |
 | --- | --- | --- |
@@ -34,7 +34,7 @@ Milestones 1 through 5 are done. **Not usable in production:** documents cannot 
 | 3 | Scale — segment merge, lazy loading, ANN | ✅ both paths hold. `Open` 979 ms → 54 ms, ANN recall@10 0.992 at 4.6× the query speed — but the vector gain is smaller than hoped |
 | 4 | Quality — graph contribution to nDCG | ✅ measured, and the answer is **no** — see below |
 | 5 | Performance — p99 including GC pauses | ✅ p99 **108.193 ms**, of which the collector is 411 µs (0.38%); 1.88× bleve v2.6.0 against a 10× bar |
-| 6 | External contribution readiness | ✅ measured — two outside developers added a signal from the documentation alone, which found three documentation defects: [ADOPTION.md](docs/ADOPTION.md) |
+| 6 | External contribution readiness | ✅ measured — two subjects with no prior sight of the tree added a signal from the documentation alone, which found three documentation defects. Both subjects were **agents, not people**, so this is a lower bound and not a user study: [ADOPTION.md](docs/ADOPTION.md) |
 
 No tag yet; the first will be `v0.1.0`. Until then `go get` resolves to a pseudo-version naming a commit, which is the honest state — a tag would give you a shorter name without changing anything the warning above says. [CHANGELOG](CHANGELOG.md) is where a version tells you whether you have work to do, and it records three things only: the exported API of every package under `pkg/`, the on-disk format version, and the minimum Go version. The milestone numbers in this table are not among them.
 
@@ -98,10 +98,10 @@ query> ranking fusion
   5. tfidf      0.01639  text:1  vector:-  graph:-  recency:-
 ```
 
-Trailing columns are each scorer's rank *before* fusion. The demo fuses with `FuseWeighted(1, 1, 0.1, 1)`, discounting the graph stream to a tenth of a vote, because that is what the [limitations](#limitations) below tell you to do and a demo that ignored its own project's advice would be worth less than no demo.
+Trailing columns are each scorer's rank *before* fusion. The demo fuses with `FuseWeighted(1, 1, 0.1, 1)`, discounting the graph stream to a tenth of a vote, because that is the one weight this project has measured — the **graph proximity** row of the [limitations](#limitations) below — and a demo that ignored its own project's advice would be worth less than no demo. Every other stream is at 1, which is `Fuse`.
 
 - `tfidf` leads text but lands fifth: no other scorer agreed. One scorer's confidence does not beat consensus.
-- `hnsw`, `bm25` and `ivf` are invisible to text — graph traversal found them.
+- `hnsw`, `ivf` and `bm25` are invisible to text — graph traversal nominated them, and at a tenth of a vote recency decides the order among them. Graph's own first pick, `bm25`, lands last of the three: that is the discount doing what milestone 4 measured it should.
 - `-` means the document is absent from that scorer's stream, for one of three reasons. No opinion, which costs nothing: `vector:-` is everywhere because the query had no vector, so append `@ 0,1,0` and the vector scorer joins. Deliberately withheld: `graph:-` on `rrf` and `tfidf` marks them as traversal seeds, which are excluded ([FINDINGS §2.3](docs/FINDINGS.md)). Or simply below the cut — every scorer is asked for `k`, so `recency:-` on `tfidf` is truncation, not abstention. Raise `-k` and it fills in.
 
 Minimal embedding: [`examples/basic`](examples/basic/main.go). Godoc example: `Example` in `pkg/engine`.
@@ -123,13 +123,13 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 Then add one element at the call site:
 
 ```go
-scorers := []engine.Scorer{txt, vec, gr, rec, popularity.New(ix)}
+scorers := []engine.Scorer{txt, vec, gr, rec, pop} // pop is yours, from above
 results, err := engine.Search(ctx, q, 10, fusion.Fuse, scorers...)
 ```
 
 **Three things that are not obvious from the skeleton.** Each cost a trial subject time in [ADOPTION.md](docs/ADOPTION.md), and `ExampleScorer` in `pkg/engine` is all three in one compiling program.
 
-*Your data does not go in `engine.Document`.* Those five fields are what weft's own scorers read, and you cannot add a sixth from outside the module. Keep your table keyed by `Document.Key` — a map, a database, whatever you have — and call `Index.Resolve` to turn a `Key` into a `DocID`. `Commit` does not carry it, so rebuild after `Open`; `Key` still names the same document, which is what makes the rebuild safe.
+*Your data does not go in `engine.Document`.* Four of its five fields are what weft's own scorers read — `Text`, `Vector`, `Links`, `Time`; the fifth, `Key`, is your identifier, not a signal — and you cannot add a sixth from outside the module. Keep your table keyed by `Document.Key` — a map, a database, whatever you have — and call `Index.Resolve` to turn a `Key` into a `DocID`. `Commit` does not carry it, so rebuild after `Open`; `Key` still names the same document, which is what makes the rebuild safe.
 
 *An input that changes per query does not go in `engine.Query` either.* Bind it when you construct the scorer and construct one per search — `recency.NewAt(ix, now)` is that shape with a clock. A scorer value is small; this costs an allocation, not corpus work. Do not reuse `Query.Seeds`, which `scorer/graph` reads.
 
@@ -208,7 +208,7 @@ CI runs `make all` plus five targets kept out of it because each costs a tool to
 | Durability stops at fsync | Atomic against process death; best-effort against power loss, with no platform write barrier: [FORMAT.md §6](docs/FORMAT.md). |
 | No early termination | The top-k candidate interface forecloses WAND-style skipping. Cost and extension path: [FINDINGS §3.1](docs/FINDINGS.md). |
 | **Graph proximity measured worthless** | +0.0000 nDCG@10 at its best fusion weight — no weight in the tested grid beats the baseline, and at 0.1 and below the arm is the baseline exactly — and −0.1227 if fused at equal weight. Kept for the milestone 1 assertions and marked in its package doc: [D-005](docs/DECISIONS.md). Do not enable `scorer/graph` expecting quality, and weight it down if you enable it at all. |
-| Fusion weights have no source | `FuseWeighted` exists, but nothing decides what the weights should be. Hand-tuning per corpus reintroduces the per-deployment burden this design avoids; learning them from judgments is unbuilt. Use `Fuse` unless you have measured your own ([FINDINGS milestone 4 §7](docs/FINDINGS.md)). |
+| Fusion weights have no source | `FuseWeighted` exists, but nothing decides what the weights should be. Hand-tuning per corpus reintroduces the per-deployment burden this design avoids; learning them from judgments is unbuilt. Use `Fuse` unless you have measured your own. The one exception this project publishes is the 0.1 graph discount, which milestone 4 did measure and which `cmd/weft` and `examples/basic` therefore use ([FINDINGS milestone 4 §7](docs/FINDINGS.md)). |
 | Scorers must share one index | `DocID` is index-relative, so scorers built against different indexes fuse unrelated documents. A precondition on `Search`, not a check: [FINDINGS §3.4](docs/FINDINGS.md). |
 | No CJK tokenization | Whitespace and punctuation splitting only, so CJK runs collapse into one token. |
 | No embedding generation | Vectors are supplied by the caller. |

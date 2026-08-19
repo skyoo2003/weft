@@ -34,7 +34,8 @@ each. Interpretation taken, recorded here rather than assumed silently:
 
 - **(a) trial runner is an agent, not a person** — accepted at the plan's default.
 - **(b) no production code changes to close a blocker** — accepted at the plan's
-  default, and honoured below: `pkg/` gained 192 lines, all of them test.
+  default, and honoured below: `pkg/` gained 279 test lines and 41 comment lines,
+  and no production statement.
 - **(c) cut `v0.1.0` in this milestone** — **not** taken as answered, because it is
   the one irreversible action in the plan. See [Open gates](#open-gates).
 
@@ -154,8 +155,11 @@ Every package is above the 80% threshold. Full gate: `make all` green
 (`go test -race ./...`, 89.4s in `pkg/engine`), `make arch` green, `make spdx`
 green.
 
-**The price tag this milestone has paid so far:** `pkg/` is 192 lines heavier and
-every one of them is test. `git diff --stat main -- pkg/fusion` prints nothing,
+**The price tag this milestone has paid so far:** at this checkpoint `pkg/` was 192
+lines heavier and every one of them test; at the branch tip it is 320 insertions
+over four files — 279 test lines plus 41 lines of comment in `doc.go` and
+`search.go`, and no production statement.
+`git diff --stat main -- pkg/fusion` prints nothing,
 and `pkg/engine/testdata/engine_api.txt` and `public_api.txt` are byte-identical —
 so `TestEngineAPISurfaceIsUnchanged` and `TestPublicAPISurfaceIsUnchanged` pass
 without being refreshed. The plan's pass line 5 holds.
@@ -176,12 +180,14 @@ without being refreshed. The plan's pass line 5 holds.
 
 ## Open gates
 
-Two things stop here and need the user rather than more code.
+Two things stopped at this checkpoint and needed the user rather than more code.
+Task 3 has since run — `docs/ADOPTION.md` section 6 carries both trials — and
+task 4's repair has landed, so only task 5 is still open.
 
 | Gate | Why it stopped | What unblocks it |
 | --- | --- | --- |
-| **Task 3 — the blind trial** | It runs in a fresh session with a restricted view of the tree, which means spawning a subagent. Standing instruction in this session is not to call the Agent tool unless asked. | An explicit "run the trial", or the user running it themselves in a fresh session against `docs/ADOPTION.md`. |
-| **Task 5 — `v0.1.0`** | Irreversible and outward-facing. The module proxy does not forget a version it has served. | Explicit approval of decision (c). Task 4's documentation repair must land first — `RELEASE.md` section 1 requires it, and the README currently states milestones 3 and 5 as "Not started". |
+| **Task 3 — the blind trial** | It runs in a fresh session with a restricted view of the tree, which means spawning a subagent. Standing instruction in this session was not to call the Agent tool unless asked. | ~~An explicit "run the trial"~~ — done, two trials on 2026-08-19: `docs/ADOPTION.md` section 6. |
+| **Task 5 — `v0.1.0`** | Irreversible and outward-facing. The module proxy does not forget a version it has served. | Explicit approval of decision (c). Task 4's documentation repair had to land first — `RELEASE.md` section 1 requires it — and it now has. |
 
 ## Merge evidence
 

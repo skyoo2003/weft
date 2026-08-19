@@ -28,7 +28,7 @@ Compiling alone proved insufficient — a scorer returning nothing passes it too
 
 **Assertion 2 — a new scorer is cheap.** `pkg/scorer/recency` is 99 implementation lines against a 100-line budget, and `fusion/` needed no change at all.
 
-The engine side is not zero, and an earlier version of this document claimed it was. `Document.Time` exists only for the recency scorer and was written before that scorer existed, so the figure was flattered by pre-provisioning the field. Stated generally: a scorer needing new input data has to read it from `engine.Document`, because scorers may not keep their own store (§2.2). **The engine cost of a new input type is one field on `Document`.** A scorer reusing existing fields costs nothing there.
+The engine side is not zero, and an earlier version of this document claimed it was. `Document.Time` exists only for the recency scorer and was written before that scorer existed, so the figure was flattered by pre-provisioning the field. Stated generally: a scorer *in this module* needing new input data has to read it from `engine.Document`, because scorers here may not keep their own store (§2.2). **The engine cost of a new input type is one field on `Document`.** A scorer reusing existing fields costs nothing there. This rule is about scorers inside `pkg/`; a scorer written outside the module cannot add a field and does not have to — milestone 6 §3 records the caller-held table joined through `Index.Resolve` as the supported path, at the cost that `Commit` does not carry it.
 
 Two checks measure different things, and neither substitutes for the other:
 
@@ -78,7 +78,11 @@ Generally: "one write entry point" plus "no scorer keeps its own store" together
 
 Scoring `1/(1+hops)` puts seeds at 1.0, i.e. top. With seeds drawn from the text scorer, the graph stream's head becomes a copy of the text stream's head, and RRF counts one piece of evidence as two independent votes.
 
-Measured on the `cmd/weft` corpus, query `ranking fusion`:
+Measured on the `cmd/weft` corpus, query `ranking fusion`, fusing every stream at
+an equal vote — which is `fusion.Fuse`, and is what the demo used at the time. The
+demo now discounts the graph stream to 0.1 (milestone 6), so re-running it does not
+reproduce the "included" figure below; `fusion.Fuse` and
+`graph.NewIncludingSeeds` do.
 
 | | Graph stream | Overlap with text stream |
 | --- | --- | --- |
@@ -504,7 +508,7 @@ unmeasured, and this is where that is recorded.
 3. **`internal/eval` outlives the graph.** Any future signal inherits a harness, a
    verified metric, a judgment rule fixed in advance and committed reference goldens.
    That is the durable output.
-4. **`search.go:112`'s over-fetch marker is withdrawn**, not repaid (§2).
+4. **`engine.Search`'s over-fetch marker is withdrawn**, not repaid (§2).
 
 ## 7. Weighted fusion — the thing this milestone actually found
 
@@ -1355,6 +1359,7 @@ and only three runs of one instrument would.
 
 ---
 
+<!-- markdownlint-disable-next-line MD025 -->
 # Milestone 6 — Adoption
 
 **Verdict: the claim holds, and the milestone's value is the three defects it found
@@ -1370,9 +1375,9 @@ defects, one of them named independently by both subjects. Design and rules are
 | --- | --- |
 | The trial runs for both tasks and every blocker is published | **holds.** 3 blockers, [ADOPTION §6](ADOPTION.md) |
 | Blockers classified; code-required ones named, not fixed | **holds vacuously.** There were none — all three were documentation |
-| README does not lie; the extension snippet points at something that compiles | **holds.** Status table matches the PRD row for row, `ExampleScorer` is checked by `go test` |
+| README does not lie; the extension snippet points at something that compiles | **holds in part.** `ExampleScorer` is checked by `go test`, and the status table matches the PRD on milestones 1 to 5. Row 6 does not: the PRD carries this milestone as `in-progress` because pass line 4 is unmet, and the README marks it ✅. Both are deliberate and neither is silent — the ✅ is the measurement, `v0.1.0` is §4.4 — but "row for row" is not what the table does |
 | `v0.1.0` tagged and resolvable | **pending.** Deliberately gated on the maintainer, §4 |
-| `pkg/fusion` 0 lines | **holds.** 0 lines, and both golden API files byte-identical |
+| `pkg/fusion` 0 lines, and any `pkg/` diff's line count published here | **holds.** `pkg/fusion` 0 lines, and both golden API files byte-identical. The `pkg/` price tag is **320 insertions, 4 deletions** across four files: `adoption_test.go` +192 and `example_test.go` +87 are test, `doc.go` +29/−4 and `search.go` +12 are comment only — no production statement changed |
 
 ## 1. Result
 

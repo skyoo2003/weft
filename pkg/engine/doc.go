@@ -28,15 +28,18 @@ type DocID uint32
 // read by the vector scorer, Links by the graph scorer, Time by the recency
 // scorer.
 //
-// These are the fields weft's own scorers read, and adding a fifth of those
-// means adding a field here. A scorer written outside this module cannot do
-// that, and does not need to: nothing in Scorer says where a scorer's data comes
-// from. Keep your own table keyed by Document.Key — a map, a database, whatever
-// you already have — and use Index.Resolve to turn a Key into the DocID a
-// Candidate carries. Only data that must survive Commit needs a field here,
-// because Commit writes documents and knows of nothing else, so a caller-held
-// table is rebuilt after every Open. Key is what makes that rebuild safe: it
-// still names the same document afterwards.
+// Text, Vector, Links and Time are the four a scorer reads; Key is the caller's
+// identifier and no scorer ranks on it. A fifth signal *inside this module* means
+// a fifth field here. A scorer written outside it cannot add one, and does not
+// need to: nothing in Scorer says where a scorer's data comes from. Keep your own
+// table keyed by Document.Key — a map, a database, whatever you already have —
+// and use Index.Resolve to turn a Key into the DocID a Candidate carries.
+//
+// What that costs, stated plainly rather than left as a field to reach for:
+// Commit writes documents and knows of nothing else, so a caller-held table is
+// not persisted and is rebuilt after every Open. Key is what makes the rebuild
+// safe — it still names the same document afterwards, because neither Commit nor
+// Merge renumbers a DocID.
 //
 // Both trials in docs/ADOPTION.md reached for a field here first, and this
 // paragraph is what they were missing.

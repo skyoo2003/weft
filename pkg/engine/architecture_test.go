@@ -187,10 +187,14 @@ func TestNeitherEngineNorFusionImportsAScorer(t *testing.T) {
 //
 // The import check proves engine and fusion never name a scorer package. It does
 // not prove that adding a scorer required no engine change, and that distinction
-// matters: a scorer needing new input data has to read it from engine.Document,
-// because scorers are not allowed their own store (docs/FINDINGS.md section 2.2).
-// Document.Time exists solely for the recency scorer and was written before that
-// scorer existed, which flattered the original "zero lines changed" figure.
+// matters: a scorer *in this module* needing new input data has to read it from
+// engine.Document, because scorers here are not allowed their own store
+// (docs/FINDINGS.md section 2.2). Document.Time exists solely for the recency
+// scorer and was written before that scorer existed, which flattered the original
+// "zero lines changed" figure. A scorer outside the module cannot add a field and
+// does not have to — it keeps its own table joined through Index.Resolve, which
+// is why this golden file is not the measure of an external scorer's cost
+// (docs/FINDINGS.md milestone 6 section 3).
 //
 // This golden file fails when engine's exported surface changes, so the engine
 // cost of a new scorer becomes a deliberate edit instead of passing unnoticed.

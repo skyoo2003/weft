@@ -710,7 +710,7 @@ milestone would have spent that budget on a problem nobody had demonstrated —
 and, as it turned out, on a problem that does not exist. Both subjects found the
 caller-held-table pattern unaided. **What was missing was three sentences.**
 
-This is the same rule [D-002](#d-002--no-optimization-before-the-measurement-is-published)
+This is the same rule [D-002](#d-002--deliberate-shortcuts-are-repaid-on-evidence-not-on-schedule)
 applies to performance, moved to documentation: fix what a measurement pointed at,
 and let the diff be the receipt.
 
