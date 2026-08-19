@@ -1352,3 +1352,136 @@ and only three runs of one instrument would.
    cache is contested; this one's is not.
 5. **`text+vector` has no published tail** (§4.4).
 6. **Three repetitions** (§4.5).
+
+---
+
+# Milestone 6 — Adoption
+
+**Verdict: the claim holds, and the milestone's value is the three defects it found
+holding it.** Two subjects with no prior sight of the tree each added a fifth
+ranking signal using only published documentation — no `.go` file under `pkg/`,
+`internal/`, `cmd/` or `bench/` was opened, weft was not modified, and both landed
+inside the 100-line figure. **Zero code-required blockers.** Three documentation
+defects, one of them named independently by both subjects. Design and rules are
+[ADOPTION.md](ADOPTION.md), fixed before the trial ran; the decision is
+[D-010](DECISIONS.md).
+
+| Pass line | Result |
+| --- | --- |
+| The trial runs for both tasks and every blocker is published | **holds.** 3 blockers, [ADOPTION §6](ADOPTION.md) |
+| Blockers classified; code-required ones named, not fixed | **holds vacuously.** There were none — all three were documentation |
+| README does not lie; the extension snippet points at something that compiles | **holds.** Status table matches the PRD row for row, `ExampleScorer` is checked by `go test` |
+| `v0.1.0` tagged and resolvable | **pending.** Deliberately gated on the maintainer, §4 |
+| `pkg/fusion` 0 lines | **holds.** 0 lines, and both golden API files byte-identical |
+
+## 1. Result
+
+| | Task A — popularity | Task B — per-query geo |
+| --- | --- | --- |
+| verdict | possible from docs alone | possible from docs alone |
+| blockers | 1, documentation | 2, documentation |
+| source files opened | **0** | **0** |
+| implementation | 31 lines | 76 lines |
+| call-site wiring | 8 lines | 1 line |
+| time to first correct ranking | ~4.5 min | ~4 min |
+
+## 2. The prediction was half right, and the wrong half is the interesting one
+
+The plan predicted that the documented extension path is **a fork** for an
+outsider: `engine.Document` has five fields, `engine.Query` has three, neither is
+open, and `doc.go` says a fifth scorer means adding a field.
+
+**The public API was sufficient the whole time.** `pkg/engine/adoption_test.go`
+established it before the trial: `Index.Resolve` and `Index.Doc` are a real join,
+a caller-held table keyed by `Key` reaches fusion like any other stream, and it
+still names the right documents after `Commit` and `Open`. Then both subjects
+found the same path unaided.
+
+So prediction A collapses from *"an outsider must fork"* to *"an outsider must
+assemble a pattern nothing documents"* — and that is not a small correction, it is
+the whole milestone. **Every part of the answer was documented and the assembly
+was not.** `Resolve`'s godoc, `Scorer`'s silence about where data comes from, and
+`Key`'s stability across a restart are each written down; the sentence that puts
+them together did not exist, and the one sentence that addressed the question
+pointed the other way.
+
+Prediction B stands and was never tested by the trial. `scorer/recency` — the only
+scorer an outsider can copy — sweeps every `DocID` calling `Doc`, which is
+[milestone 5 §3.2](#milestone-5--performance)'s throughput wall. Both subjects
+avoided it, and neither did so because a document said to: their data was a map,
+so looping over the map was simply the obvious thing. **The exemplar is still
+shaped like the wall, and the trial got past it by luck of task shape.**
+
+## 3. The defect both subjects named
+
+`engine.Document`: *"Adding a fifth scorer means adding a field here, not touching
+anything else."*
+
+A said it "actively points the wrong way" and nominated it as *the single sentence
+I would change*. B said it "points an external adopter at a door they cannot
+open". Neither saw the other's report.
+
+**The sentence was true.** For weft's own scorers a fifth signal does mean a new
+field. It was written from inside the repository and read from outside it, and
+that is the entire failure. No test could have caught it —
+`TestEngineAPISurfaceIsUnchanged` records declarations, not the prose above them,
+and prose that is accurate for the author is exactly the kind that survives review.
+
+That is the reusable lesson, and it is not about this sentence: **a project that
+documents its own internals well produces documentation that reads as authoritative
+to someone it was never written for.** The other two defects have the same shape —
+`Query` promising to carry "every scorer's input", `Search`'s `k` quietly doing two
+jobs — both true from inside, both misleading from outside.
+
+## 4. Known costs
+
+### 4.1 The subjects were agents, and this is a lower bound
+
+Four minutes to a working scorer is a number produced by a reader that consumes
+`go doc -all` in one pass and never loses interest. A human meeting the `Document`
+sentence does not necessarily recover by reading `Resolve`'s godoc and inferring a
+join; they may conclude the library requires a fork and leave, and that outcome is
+invisible to this instrument. **The PRD's "zero user interviews" risk is not
+discharged, not reduced, and not addressed by this milestone.**
+
+### 4.2 The boundary was self-reported
+
+Nothing prevented either subject from reading `pkg/engine/index.go`. Both reported
+zero source reads, and this design cannot verify that. Registered in
+[ADOPTION §2.2](ADOPTION.md) before the trial rather than noticed after it.
+
+### 4.3 One run per task
+
+No variance is measured. Milestone 5 §4.5 owed three repetitions and paid one;
+this milestone inherits the same debt knowingly and at a lower cost, because the
+output here is a blocker list rather than a distribution.
+
+### 4.4 `v0.1.0` is not cut
+
+The remaining pass line. Deliberate: a tag freezes a tree and the documentation
+repair had to land first, which it now has. Gated on the maintainer rather than
+scheduled — the module proxy does not withdraw a version it has served.
+
+## 5. D-005's check, executed
+
+D-005 said it would be shown wrong if `FuseWeighted` acquired no caller outside
+`internal/eval` and `scorer/graph` were still present and still unweighted at
+milestone 6. Both halves were run.
+
+**It acquired callers** — `examples/basic` and `cmd/weft-eval`'s weight sweep.
+**And the demo was still unweighted**: `cmd/weft`, the binary README's quick start
+tells a newcomer to run, fused the graph stream at a full vote while README's
+limitations table and the scorer's own package doc both said to weight it down.
+Half the falsifying signal was live, in the most-read place in the project. Now
+`FuseWeighted(1, 1, 0.1, 1)`, and the README sample output is the new ranking.
+
+## 6. Carried forward
+
+1. **The exemplar scorer is shaped like the throughput wall** (§2). `scorer/recency`
+   is what an outsider copies and what milestone 5 measured collapsing. Nothing
+   documents the difference and no test enforces it.
+2. **Resolve at construction or per query is an undocumented choice.** A resolved
+   once, B on every call. Both correct, the trade unwritten.
+3. **`v0.1.0`, and with it the adoption metric's start date** (§4.4).
+4. **No human subject** (§4.1). Every number here is a lower bound until there is
+   one.

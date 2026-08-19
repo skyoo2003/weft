@@ -1,0 +1,9 @@
+kind: Changed
+body: '`cmd/weft` fuses the graph stream at a tenth of a vote instead of a full one, so the
+  demo now agrees with the advice the rest of the project gives about that scorer: milestone
+  4 measured it contributing +0.0000 at its best weight and −0.1227 at equal weight, and both
+  the README limitations table and the scorer''s own package documentation say to weight it
+  down. Rankings printed by the demo change. Nothing in `pkg/` changed — the weights index by
+  stream position, so fusion still does not learn what a graph scorer is.'
+time: 2026-08-19T00:00:00.000000000+09:00
+custom:
