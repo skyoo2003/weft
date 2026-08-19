@@ -35,6 +35,19 @@ type Progress struct {
 	done atomic.Int64
 }
 
+// ProgressEvery is how often a running rung says how far it has got.
+//
+// Thirty seconds, against a headline rung of forty-nine minutes: often enough that an
+// operator can tell a running rung from a hung one, rare enough that the reporting
+// goroutine's own allocations are nothing beside a query's 43.6 MiB.
+//
+// Here rather than once per command, for the reason the package doc gives for sharing
+// the driver at all: the comparison is two commands over one instrument, and a
+// cadence that differed between them would be one more thing not matched. Two
+// spellings of one figure is how one of them comes to say something the other does
+// not.
+const ProgressEvery = 30 * time.Second
+
 // Count wraps do so completions are counted, and does nothing else.
 //
 // The add is after do returns rather than before it: what the line reports is
@@ -46,9 +59,6 @@ func (p *Progress) Count(do func(int)) func(int) {
 		p.done.Add(1)
 	}
 }
-
-// Done is how many wrapped calls have returned.
-func (p *Progress) Done() int64 { return p.done.Load() }
 
 // Report writes a progress line to w every `every` until the returned stop is
 // called, and returns a stop that does not come back until the writing has ended.

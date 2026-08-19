@@ -145,6 +145,21 @@ func TestProgressStopWaitsSoNothingWritesAfterIt(t *testing.T) {
 	}
 }
 
+// TestProgressReportingCanBeSwitchedOffWithoutPanicking covers the guard rather than
+// a feature, and the guard is not decoration: time.NewTicker panics on a
+// non-positive duration. A caller that wants a silent rung passes zero, and the
+// alternative — branching around the defer at each call site — is how one of two call
+// sites comes to leak the goroutine the other stops.
+func TestProgressReportingCanBeSwitchedOffWithoutPanicking(t *testing.T) {
+	var w syncBuf
+	var p Progress
+	stop := p.Report(&w, 10, 0)
+	stop()
+	if w.Len() != 0 {
+		t.Errorf("a switched-off reporter wrote %q", w.String())
+	}
+}
+
 // TestProgressCountsEveryConcurrentCompletion pins the counter under the shape Drive
 // actually calls it: one goroutine per in-flight request, up to four per core.
 //

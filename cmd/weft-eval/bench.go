@@ -371,15 +371,6 @@ type benchReport struct {
 	elapsed   time.Duration
 }
 
-// benchProgressEvery is how often a running rung says how far it has got.
-//
-// Thirty seconds, against a headline rung of forty-nine minutes: often enough that an
-// operator can tell a running rung from a hung one, rare enough that the reporting
-// goroutine's own allocations are nothing beside a query's 43.6 MiB. The line is
-// written by loadgen.Progress from its own goroutine — never from the request — for
-// the reason that type documents.
-const benchProgressEvery = 30 * time.Second
-
 // benchRung applies one arrival rate and collects everything measured around it.
 func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int)) benchReport {
 	var progress loadgen.Progress
@@ -392,7 +383,7 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int))
 	// four rungs before this one rather than by what the collector is doing now.
 	gcCPU0, totalCPU0 := loadgen.GCCPUSeconds()
 	start := time.Now()
-	stopProgress := progress.Report(os.Stdout, n, benchProgressEvery)
+	stopProgress := progress.Report(os.Stdout, n, loadgen.ProgressEvery)
 
 	samples, shed := loadgen.Drive(ctx, rate, n, inflight, do)
 

@@ -401,13 +401,6 @@ func warmup(ctx context.Context, qs []eval.EvalQuery, do func(int), failed *atom
 	return unloaded, nil
 }
 
-// progressEvery is how often a running rung says how far it has got, matching the
-// figure cmd/weft-eval uses. The comparison is two commands over one driver, and a
-// reporting cadence that differed between them would be one more thing not matched —
-// small, but this file's whole purpose is that the two sides differ only where
-// docs/PERF.md §4 says they do.
-const progressEvery = 30 * time.Second
-
 // measureRung applies one arrival rate and collects everything measured around it.
 func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) rung {
 	var progress loadgen.Progress
@@ -419,7 +412,7 @@ func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) 
 	// stops moving after the first rung whatever the collector then does.
 	gcCPU0, totalCPU0 := loadgen.GCCPUSeconds()
 	start := time.Now()
-	stopProgress := progress.Report(os.Stdout, n, progressEvery)
+	stopProgress := progress.Report(os.Stdout, n, loadgen.ProgressEvery)
 	samples, shed := loadgen.Drive(ctx, r, n, inflight, do)
 
 	// Stopped before the counters are read, not deferred: a reporter still ticking
