@@ -63,6 +63,26 @@ func TestBenchSummaryQuotesARuleSelectedHeadlineOnAFullLadder(t *testing.T) {
 	}
 }
 
+// TestBenchSummaryOnALadderThatNeverSaturatesQuotesItsTopRung covers the other half
+// of the rule, and it is not a hypothetical branch: a ladder whose every rung stays
+// under twice the unloaded median has no midpoint to quote, so the honest answer is
+// the most load actually applied, said in words rather than left to be inferred.
+func TestBenchSummaryOnALadderThatNeverSaturatesQuotesItsTopRung(t *testing.T) {
+	rates := []float64{1, 2, 4, 8, 16}
+	p50s := benchMillis(40, 41, 43, 50, 60) // none past 2x the 40ms unloaded median
+	var w bytes.Buffer
+
+	benchSummary(&w, benchArmText, rates, p50s, benchLadderReports(rates, p50s), 40*time.Millisecond)
+
+	got := w.String()
+	if !strings.Contains(got, "not reached") {
+		t.Errorf("a ladder that never saturated did not say so:\n%s", got)
+	}
+	if !strings.Contains(got, "HEADLINE") || !strings.Contains(got, "16.00") {
+		t.Errorf("the headline is not the top rung the run actually applied:\n%s", got)
+	}
+}
+
 // TestBenchSummaryPublishesNoHeadlineForALadderCutShort is the defect.
 //
 // A run interrupted during rung three of five slices its rates down to the three it

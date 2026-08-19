@@ -53,6 +53,25 @@ func TestSummarizeQuotesARuleSelectedHeadlineOnAFullLadder(t *testing.T) {
 	}
 }
 
+// TestSummarizeOnALadderThatNeverSaturatesQuotesItsTopRung is the branch bleve is
+// likelier than weft to take: milestone 5 measured it staying flat through rungs weft
+// had already collapsed on.
+func TestSummarizeOnALadderThatNeverSaturatesQuotesItsTopRung(t *testing.T) {
+	rates := []float64{20, 40, 80, 157, 314}
+	p50s := millis(8, 8, 9, 10, 12) // none past 2x the 8ms unloaded median
+	var w bytes.Buffer
+
+	summarize(&w, rungsAt(rates, p50s), rates, p50s, 8*time.Millisecond)
+
+	got := w.String()
+	if !strings.Contains(got, "not reached") {
+		t.Errorf("a ladder that never saturated did not say so:\n%s", got)
+	}
+	if !strings.Contains(got, "HEADLINE") || !strings.Contains(got, "314.00") {
+		t.Errorf("the headline is not the top rung the run actually applied:\n%s", got)
+	}
+}
+
 // TestSummarizePublishesNoHeadlineForALadderCutShort is the same defect weft's side
 // carries, in the file that has to stay in step with it.
 func TestSummarizePublishesNoHeadlineForALadderCutShort(t *testing.T) {
