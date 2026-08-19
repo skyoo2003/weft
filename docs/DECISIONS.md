@@ -661,3 +661,73 @@ published in [PERF.md](PERF.md).
 3. **Somebody needs the hybrid comparison.** Then faiss enters `bench/`, the "Go engine
    against Go engine" framing goes with it, and this record stops being precedent for what
    the comparison means.
+
+---
+
+## D-010 — Adoption is decided by a trial, and the extension point is not designed before it
+
+**Date:** 2026-08-19
+**Milestone:** 6 — adoption
+**Status:** accepted
+
+### Context
+
+Milestone 6's outcome is a claim about readers — *an external Go developer can add
+their own signal from the documentation and examples alone* — and claims about
+readers have a failure mode the other milestones did not. There is no metric to
+compute. The tempting substitute is to look at the API, decide it seems adequate,
+and ship a paragraph.
+
+Two facts made that substitute unsafe. `engine.Document` and `engine.Query` are
+both closed structs, so a signal carrying data weft does not model has no field to
+live in — which reads, from inside the repository, like a missing feature. And
+`pkg/engine/doc.go` said "adding a fifth scorer means adding a field here", which
+is the maintainer's own procedure written as if it were everyone's.
+
+### Question
+
+Do we design an extension point — a `Document.Meta` map, a `Query` payload — or do
+we first measure whether one is needed?
+
+### Decision
+
+**Measure first, and forbid production changes inside the milestone.**
+
+1. The instrument is a trial: a subject with no prior sight of the tree implements
+   a fifth signal with only `.md` files, `examples/` and `go doc` output, and every
+   point at which it is blocked is recorded. The rules, the boundary and the five
+   pass lines are [ADOPTION.md](ADOPTION.md), committed before the trial ran.
+2. A blocker is **docs-closable** or **code-required**, decided by attempting the
+   API arrangement rather than by how hard it felt. Code-required blockers are
+   named and costed, **not fixed here**.
+3. `pkg/` changes default to zero, and any diff is the milestone's price tag.
+
+### Why
+
+An extension point touches the on-disk format and `Commit`'s atomicity at once, so
+designing one is milestone-sized work. Doing it speculatively inside an adoption
+milestone would have spent that budget on a problem nobody had demonstrated —
+and, as it turned out, on a problem that does not exist. Both subjects found the
+caller-held-table pattern unaided. **What was missing was three sentences.**
+
+This is the same rule [D-002](#d-002--deliberate-shortcuts-are-repaid-on-evidence-not-on-schedule)
+applies to performance, moved to documentation: fix what a measurement pointed at,
+and let the diff be the receipt.
+
+The cost is real and worth naming. A trial run by an agent is a lower bound, not a
+user study, and this decision accepts a weaker instrument in exchange for one that
+exists. The alternative on offer was not a better measurement; it was no
+measurement and a designed feature.
+
+### What would show this decision was wrong
+
+An external user files an issue that a signal cannot be expressed at all — not
+"undocumented", but genuinely unrepresentable through `Resolve` and a caller-held
+table. That would mean the trial's two tasks were too narrow to find the class of
+signal that needs an extension point, and that the tasks were chosen for what was
+easy to measure. The check is not mechanical; it arrives as a bug report.
+
+A weaker signal, and mechanical: `ExampleScorer` and the three paragraphs added to
+`doc.go` and `search.go` never change again while the same three questions keep
+being asked. That would mean the repair was aimed at the trial rather than at
+readers.

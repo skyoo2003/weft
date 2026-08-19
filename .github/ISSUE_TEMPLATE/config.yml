@@ -16,8 +16,8 @@ contact_links:
   - name: Known limitations
     url: https://github.com/skyoo2003/weft/blob/main/README.md#limitations
     about: >-
-      Corpus must fit in memory, no deletion, no CJK tokenization, no query
-      language. Nine of these are documented and deliberate.
+      No deletion, a commit blocks reads, throughput collapses under sustained
+      load, no CJK tokenization, no query language. All documented and deliberate.
 
   - name: Already decided against
     url: https://github.com/skyoo2003/weft/blob/main/docs/DECISIONS.md

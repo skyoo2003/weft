@@ -6,14 +6,17 @@ A search engine where ranking signals are interchangeable. Go, from scratch, sta
 
 This site is the `docs/` directory of [the repository](https://github.com/skyoo2003/weft), rendered. Nothing here is written for the site — these are the same files you get when you clone, and the README is deliberately not duplicated onto this page.
 
-**weft is not usable in production.** Every commit rewrites the whole corpus and every open reads it all into memory. The [README](https://github.com/skyoo2003/weft#status) carries the current status and the full list of limitations.
+**weft is not usable in production.** Documents cannot be deleted, a commit holds a write lock for as long as it takes with reads queueing behind it, and sustained query load collapses rather than degrading. The [README](https://github.com/skyoo2003/weft#status) carries the current status and the full list of limitations.
 
 ## The documents
 
 - [FINDINGS](docs/findings/) — what the milestones actually proved, what they cost, and what is still open
-- [FORMAT](docs/format/) — the on-disk format, version 1
+- [FORMAT](docs/format/) — the on-disk format, versions 1 to 3
 - [DECISIONS](docs/decisions/) — decisions expensive to reverse, and why
 - [DATASETS](docs/datasets/) — the evaluation dataset survey behind milestone 4
+- [EVAL](docs/eval/) — how milestone 4's numbers were produced, and why to doubt them
+- [PERF](docs/perf/) — how milestone 5's latency numbers are produced, and the load-point rule
+- [ADOPTION](docs/adoption/) — how milestone 6 tested whether the documentation is enough
 - [RESEARCH](docs/research/) — one round of community and competitive research
 
 ## Elsewhere
