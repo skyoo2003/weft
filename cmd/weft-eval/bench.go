@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -199,7 +200,10 @@ func bench(ctx context.Context, args []string) error {
 		}
 	}
 
-	benchSummary(o.arm, rates[:len(p50s)], p50s, reports, unloaded)
+	// The full `rates`, not rates[:len(p50s)]. Trimming them here is what made an
+	// interrupted ladder indistinguishable from a complete shorter one by the time the
+	// rule saw it.
+	benchSummary(os.Stdout, o.arm, rates, p50s, reports, unloaded)
 	if f := failed.Load(); f > 0 {
 		fmt.Printf("\nWARNING: %d requests returned an error and are counted in the distributions above\n", f)
 	}
@@ -312,44 +316,46 @@ func startCPUProfile(path string) (func(), error) {
 // benchSummary applies the load-point rule and prints the one line the milestone
 // quotes. Separate from bench so the rule is read in one place rather than at the
 // bottom of a function that also parses flags and opens an index.
-func benchSummary(arm string, rates []float64, p50s []time.Duration, reports []benchReport, unloaded time.Duration) {
-	// A one-rung ladder has no load point to find, and saying otherwise is the exact
-	// failure the rule exists to prevent. SaturationRate over a single rate returns
-	// that rate whenever its p50 exceeds twice the unloaded median — there is nothing
-	// for it to be *first* past — and HeadlineRate returns it on both branches. So an
-	// explicit -rate used to print "saturation: R/s (first rung past 2x ...)" and
-	// "HEADLINE ... rate=R" for a rate the operator chose, which is a hand-picked load
-	// point wearing the label of a measured one. The rung's own figures are printed
-	// above by rep.print() and are not in doubt; what is suppressed is the claim that
-	// a rule selected them.
-	if len(reports) < 2 {
+//
+// `rates` is the ladder that was *intended*, not the rungs that were reached: the
+// difference between the two is the only evidence a run was cut short, and
+// loadgen.RuleApplies is what reads it.
+func benchSummary(w io.Writer, arm string, rates []float64, p50s []time.Duration,
+	reports []benchReport, unloaded time.Duration,
+) {
+	rung := func(label string, rep *benchReport) {
+		fmt.Fprintf(w, "%s   %s  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
+			label, arm, rep.rate, fmtQ(rep.all.P99, rep.all.P99ok),
+			fmtQ(rep.exGC.P99, rep.exGC.P99ok), 100*rep.gcCPU)
+	}
+
+	// The rungs' own figures are printed above by rep.print() and are not in doubt.
+	// What is suppressed here is the claim that a rule selected one of them.
+	if !loadgen.RuleApplies(rates, p50s) {
 		if len(reports) == 0 {
 			return
 		}
-		rep := &reports[0]
-		fmt.Printf("\none rung measured — an explicit -rate, or a ladder cut short — so there is no "+
-			"saturation point and no headline; sweep with -rate 0 to give the rule something to apply\n"+
-			"rung       %s  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
-			arm, rep.rate, fmtQ(rep.all.P99, rep.all.P99ok),
-			fmtQ(rep.exGC.P99, rep.exGC.P99ok), 100*rep.gcCPU)
+		fmt.Fprintf(w, "\n%d of %d rungs measured — an explicit -rate, or a ladder cut short — so the "+
+			"load-point rule has nothing to apply and there is no saturation point and no "+
+			"headline; sweep with -rate 0 and let it finish to give the rule a ladder\n",
+			len(reports), len(rates))
+		for i := range reports {
+			rung("rung    ", &reports[i])
+		}
 		return
 	}
 	sat := loadgen.SaturationRate(rates, p50s, unloaded)
 	head := loadgen.HeadlineRate(rates, sat)
 	if sat == 0 {
-		fmt.Printf("\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
+		fmt.Fprintf(w, "\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
 	} else {
-		fmt.Printf("\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
+		fmt.Fprintf(w, "\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
 			sat, unloaded.Round(time.Microsecond), head)
 	}
 	for i := range reports {
-		rep := &reports[i]
-		if rep.rate != head {
-			continue
+		if reports[i].rate == head {
+			rung("HEADLINE", &reports[i])
 		}
-		fmt.Printf("HEADLINE   %s  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
-			arm, rep.rate, fmtQ(rep.all.P99, rep.all.P99ok),
-			fmtQ(rep.exGC.P99, rep.exGC.P99ok), 100*rep.gcCPU)
 	}
 }
 

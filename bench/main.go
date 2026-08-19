@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"math"
@@ -313,7 +314,9 @@ func measure(ctx context.Context, data, indexPath string, rate float64, rotation
 		}
 	}
 
-	summarize(rungs, rates[:len(p50s)], p50s, unloaded)
+	// The full `rates`, not rates[:len(p50s)]: trimming them is what made an interrupted
+	// ladder look like a complete shorter one to the rule.
+	summarize(os.Stdout, rungs, rates, p50s, unloaded)
 	if f := failed.Load(); f > 0 {
 		fmt.Printf("\nWARNING: %d searches returned an error and are counted in the distributions above\n", f)
 	}
@@ -443,40 +446,43 @@ func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) 
 }
 
 // summarize applies the load-point rule, in the same shape cmd/weft-eval's
-// benchSummary does.
-func summarize(rungs []rung, rates []float64, p50s []time.Duration, unloaded time.Duration) {
-	// A one-rung ladder has no load point to find. SaturationRate over a single rate
-	// returns that rate whenever its p50 exceeds twice the unloaded median — there is
-	// nothing for it to be *first* past — and HeadlineRate returns it either way, so an
-	// explicit -rate used to print a hand-chosen load point under the label of a
-	// measured one.
-	if len(rungs) < 2 {
+// benchSummary does — and through the same predicate, which is the part that matters.
+// Rule 2 is a ratio, so a claim this side admits and the other suppresses moves the
+// published number.
+//
+// `rates` is the intended ladder, not the rungs reached. See loadgen.RuleApplies.
+func summarize(w io.Writer, rungs []rung, rates []float64, p50s []time.Duration, unloaded time.Duration) {
+	// By index, not by value: a rung is 192 bytes and copying one per iteration to
+	// compare a float is what gocritic's rangeValCopy names.
+	line := func(label string, g *rung) {
+		fmt.Fprintf(w, "%s   bleve text  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
+			label, g.rate, fmtQ(g.all.P99, g.all.P99ok), fmtQ(g.exGC.P99, g.exGC.P99ok), 100*g.gcCPU)
+	}
+
+	if !loadgen.RuleApplies(rates, p50s) {
 		if len(rungs) == 0 {
 			return
 		}
-		g := &rungs[0]
-		fmt.Printf("\none rung measured — an explicit -rate, or a ladder cut short — so there is no "+
-			"saturation point and no headline; sweep with -rate 0 to give the rule something to apply\n"+
-			"rung       bleve text  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
-			g.rate, fmtQ(g.all.P99, g.all.P99ok), fmtQ(g.exGC.P99, g.exGC.P99ok), 100*g.gcCPU)
+		fmt.Fprintf(w, "\n%d of %d rungs measured — an explicit -rate, or a ladder cut short — so the "+
+			"load-point rule has nothing to apply and there is no saturation point and no "+
+			"headline; sweep with -rate 0 and let it finish to give the rule a ladder\n",
+			len(rungs), len(rates))
+		for i := range rungs {
+			line("rung    ", &rungs[i])
+		}
 		return
 	}
 	sat := loadgen.SaturationRate(rates, p50s, unloaded)
 	head := loadgen.HeadlineRate(rates, sat)
 	if sat == 0 {
-		fmt.Printf("\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
+		fmt.Fprintf(w, "\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
 	} else {
-		fmt.Printf("\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
+		fmt.Fprintf(w, "\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
 			sat, unloaded.Round(time.Microsecond), head)
 	}
-	// By index, not by value: a rung is 192 bytes and copying one per iteration to
-	// compare a float is what gocritic's rangeValCopy names. cmd/weft-eval's
-	// benchSummary already reads its reports this way.
 	for i := range rungs {
-		g := &rungs[i]
-		if g.rate == head {
-			fmt.Printf("HEADLINE   bleve text  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
-				g.rate, fmtQ(g.all.P99, g.all.P99ok), fmtQ(g.exGC.P99, g.exGC.P99ok), 100*g.gcCPU)
+		if rungs[i].rate == head {
+			line("HEADLINE", &rungs[i])
 		}
 	}
 }
