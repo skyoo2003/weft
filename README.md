@@ -25,20 +25,22 @@ If you need text + vector hybrid search today, [bleve](https://github.com/bleves
 
 ## Status
 
-Milestones 1, 2 and 4 are done. **Not usable in production:** every commit rewrites the whole corpus and every open reads it all into memory, so the corpus must fit in RAM.
+Milestones 1 through 5 are done. **Not usable in production:** documents cannot be deleted, a commit holds a write lock for as long as it takes — 11 seconds for a 20,000-document batch, with reads queueing behind it — and sustained query load collapses at 27 queries per second on the machine measured rather than degrading.
 
 | # | Milestone | State |
 | --- | --- | --- |
 | 1 | Scorer-agnostic fusion | ✅ 3/3 assertions pass |
 | 2 | Persistence | ✅ restores identically, commits atomically |
-| 3 | Scale — segment merge, ANN | Not started |
+| 3 | Scale — segment merge, lazy loading, ANN | ✅ both paths hold. `Open` 979 ms → 54 ms, ANN recall@10 0.992 at 4.6× the query speed — but the vector gain is smaller than hoped |
 | 4 | Quality — graph contribution to nDCG | ✅ measured, and the answer is **no** — see below |
-| 5 | Performance — p99 including GC pauses | Not started |
-| 6 | External contribution readiness | Not started |
+| 5 | Performance — p99 including GC pauses | ✅ p99 **108.193 ms**, of which the collector is 411 µs (0.38%); 1.88× bleve v2.6.0 against a 10× bar |
+| 6 | External contribution readiness | ✅ measured — two outside developers added a signal from the documentation alone, which found three documentation defects: [ADOPTION.md](docs/ADOPTION.md) |
 
 No tag yet; the first will be `v0.1.0`. Until then `go get` resolves to a pseudo-version naming a commit, which is the honest state — a tag would give you a shorter name without changing anything the warning above says. [CHANGELOG](CHANGELOG.md) is where a version tells you whether you have work to do, and it records three things only: the exported API of every package under `pkg/`, the on-disk format version, and the minimum Go version. The milestone numbers in this table are not among them.
 
 Milestone 4 ran ahead of 3 because the dataset fits in memory and the project's second falsification condition was waiting on it.
+
+Two things milestone 5 owes and has not paid, stated here rather than left in a findings document: its headline is **one run, not the three repetitions [PERF.md](docs/PERF.md) requires**, and the arm you would actually deploy — `text + vector` — **has no published tail**, because at four times the cost per query 10,000 samples take over five hours. The published p99 is comparable to bleve's; it is not the number a `text + vector` user will see.
 
 ### Published numbers
 
@@ -90,13 +92,13 @@ go run ./cmd/weft
 ```text
 query> ranking fusion
   1. rrf        0.03226  text:2  vector:-  graph:-  recency:2
-  2. hnsw       0.03200  text:-  vector:-  graph:2  recency:3
-  3. bm25       0.03178  text:-  vector:-  graph:1  recency:5
-  4. ivf        0.03150  text:-  vector:-  graph:3  recency:4
+  2. hnsw       0.01749  text:-  vector:-  graph:2  recency:3
+  3. ivf        0.01721  text:-  vector:-  graph:3  recency:4
+  4. bm25       0.01702  text:-  vector:-  graph:1  recency:5
   5. tfidf      0.01639  text:1  vector:-  graph:-  recency:-
 ```
 
-Trailing columns are each scorer's rank *before* fusion.
+Trailing columns are each scorer's rank *before* fusion. The demo fuses with `FuseWeighted(1, 1, 0.1, 1)`, discounting the graph stream to a tenth of a vote, because that is what the [limitations](#limitations) below tell you to do and a demo that ignored its own project's advice would be worth less than no demo.
 
 - `tfidf` leads text but lands fifth: no other scorer agreed. One scorer's confidence does not beat consensus.
 - `hnsw`, `bm25` and `ivf` are invisible to text — graph traversal found them.
@@ -124,6 +126,14 @@ Then add one element at the call site:
 scorers := []engine.Scorer{txt, vec, gr, rec, popularity.New(ix)}
 results, err := engine.Search(ctx, q, 10, fusion.Fuse, scorers...)
 ```
+
+**Three things that are not obvious from the skeleton.** Each cost a trial subject time in [ADOPTION.md](docs/ADOPTION.md), and `ExampleScorer` in `pkg/engine` is all three in one compiling program.
+
+*Your data does not go in `engine.Document`.* Those five fields are what weft's own scorers read, and you cannot add a sixth from outside the module. Keep your table keyed by `Document.Key` — a map, a database, whatever you have — and call `Index.Resolve` to turn a `Key` into a `DocID`. `Commit` does not carry it, so rebuild after `Open`; `Key` still names the same document, which is what makes the rebuild safe.
+
+*An input that changes per query does not go in `engine.Query` either.* Bind it when you construct the scorer and construct one per search — `recency.NewAt(ix, now)` is that shape with a clock. A scorer value is small; this costs an allocation, not corpus work. Do not reuse `Query.Seeds`, which `scorer/graph` reads.
+
+*Fuse deeper than you display.* `Search`'s `k` is both the per-scorer request size and the result size. A signal orthogonal to the built-in ones surfaces documents they rank below their own cut, so at a shared `k` it appears in one stream only — and RRF is built so a single vote does not win. Ask for more than you show and slice.
 
 `make arch` verifies this mechanically:
 
@@ -153,13 +163,15 @@ internal/
 cmd/weft-eval/     prepare / build / diagnose / run / sweep / weights / recall / bench
 bench/             separate module: the bleve comparison, so weft keeps zero deps
 docs/
-  FINDINGS.md      milestone 1, 2 and 4 results, known costs, open questions
-  FORMAT.md        the on-disk format, version 1
+  FINDINGS.md      every milestone's result, known costs, open questions
+  FORMAT.md        the on-disk format, versions 1 to 3
   DECISIONS.md     decisions expensive to reverse
   DATASETS.md      evaluation dataset survey for milestone 4
   EVAL.md          how milestone 4's numbers were produced, and why to doubt them
   PERF.md          how milestone 5's latency numbers are produced, and the load-point rule
+  ADOPTION.md      how milestone 6 tested whether the documentation is enough
   RESEARCH.md      one round of community and competitive research
+  testing/         TDD evidence per milestone
 ```
 
 `internal/eval` is under `internal/` on purpose: an evaluation harness is not part of the library contract, and keeping it out of `pkg/` leaves `engine`'s exported API — and the golden file guarding it — untouched by the measurement. It uses the standard library only, so `make deps` still prints one module.
@@ -189,8 +201,10 @@ CI runs `make all` plus five targets kept out of it because each costs a tool to
 
 | Limitation | Detail |
 | --- | --- |
-| Corpus must fit in memory | `Commit` rewrites the whole corpus and `Open` loads all of it. Incremental segments and lazy loading are milestone 3: [FORMAT.md §8](docs/FORMAT.md). |
-| No deletion | Documents can be added, never removed. Tombstones and DocID namespacing are one design problem, taken together in milestone 3: [FINDINGS, milestone 2 §4](docs/FINDINGS.md). |
+| Sustained throughput collapses rather than degrades | At 27 queries/s — its own sequential rate — p50 goes 39 ms to 1.27 s, 14% of queries are shed and RSS goes 126 to 853 MiB. The wall is live heap under concurrency: every candidate decodes a whole record. Usable throughput is somewhere in 13.6–27.3/s: [FINDINGS milestone 5 §3.2](docs/FINDINGS.md). |
+| A commit blocks reads for as long as it takes | 11.063 s for a 20,000-document batch, and a read arriving inside that window waited 12.539 s — 150× the p50 beside it. Nothing bounds the window and `Commit` takes no context: [FINDINGS milestone 5 §5](docs/FINDINGS.md). |
+| No deletion | Documents can be added, never removed. Tombstones and DocID namespacing are one design problem and neither is built: [FINDINGS, milestone 2 §4](docs/FINDINGS.md). |
+| Caller-held scorer data is not persisted | A signal whose data is not an `engine.Document` field lives in your program, so `Commit` does not write it and `Open` does not restore it. Rebuild it keyed by `Document.Key` after every open. |
 | Durability stops at fsync | Atomic against process death; best-effort against power loss, with no platform write barrier: [FORMAT.md §6](docs/FORMAT.md). |
 | No early termination | The top-k candidate interface forecloses WAND-style skipping. Cost and extension path: [FINDINGS §3.1](docs/FINDINGS.md). |
 | **Graph proximity measured worthless** | +0.0000 nDCG@10 at its best fusion weight — no weight in the tested grid beats the baseline, and at 0.1 and below the arm is the baseline exactly — and −0.1227 if fused at equal weight. Kept for the milestone 1 assertions and marked in its package doc: [D-005](docs/DECISIONS.md). Do not enable `scorer/graph` expecting quality, and weight it down if you enable it at all. |

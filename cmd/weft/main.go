@@ -119,10 +119,19 @@ func run(ix *engine.Index, scorers []engine.Scorer, q engine.Query, k int) error
 	// print a reconstruction instead of what happened — and the two can disagree
 	// the moment a scorer is not deterministic, which is the one thing this
 	// display exists to rule out. It also halves the work per query.
+	// The graph stream is discounted to a tenth of a vote. Milestone 4 measured
+	// that scorer as contributing +0.0000 at its best weight and −0.1227 at a
+	// full one, and both README and the scorer's own package documentation tell a
+	// user to weight it down if they enable it at all. This demo is the first
+	// weft most readers run, so fusing it at equal weight was the project
+	// demonstrating the opposite of its own advice. Note what the weights still
+	// do not require: a number for slot three, not the knowledge that slot three
+	// holds a graph scorer.
 	var streams [][]engine.Candidate
+	weighted := fusion.FuseWeighted(1, 1, 0.1, 1)
 	fuse := func(s [][]engine.Candidate, k int) []engine.Candidate {
 		streams = s
-		return fusion.Fuse(s, k)
+		return weighted(s, k)
 	}
 
 	// The fused ranking. Note that this call names no scorer and no count.

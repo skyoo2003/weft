@@ -191,6 +191,90 @@ go run .
 
 ## 6. Results
 
-Filled by the trial. Until then this section is empty on purpose — publishing the
-design and the results in one commit would leave no evidence that the rules
-preceded the numbers.
+Two trials, 2026-08-19, one session each, subject an agent with no prior sight of
+the tree.
+
+```text
+weft adoption trial   task=A (popularity)   subject=agent   2026-08-19
+  blockers    docs-closable 1   code-required 0   source-opened 0
+  size        impl 31 lines (budget 100)   call-site 8 lines   pkg/ diff 0 lines
+  time        ~4.5 min to first correct ranking
+  verdict     possible from documentation alone
+
+weft adoption trial   task=B (per-query geo)   subject=agent   2026-08-19
+  blockers    docs-closable 2   code-required 0   source-opened 0
+  size        impl 76 lines (budget 100)   call-site 1 line    pkg/ diff 0 lines
+  time        ~4 min to first correct ranking
+  verdict     possible from documentation alone
+```
+
+**The claim holds.** Both subjects produced a working fifth signal without reading
+a single `.go` file under `pkg/`, `internal/`, `cmd/` or `bench/`, without
+modifying weft, and inside the 100-line figure. Neither needed a new exported
+name, a new `Document` field or a new `Query` field, so under §3 there are **zero
+code-required blockers** and nothing is carried forward as an API gap.
+
+**Three documentation defects were found, and one of them was named identically by
+both subjects, who could not see each other's work.**
+
+| # | Defect | Found by | Class |
+| --- | --- | --- | --- |
+| 1 | `engine.Document`'s "adding a fifth scorer means adding a field here" sends an outsider to a door they cannot open. The real answer — keep your own table keyed by `Key`, join with `Index.Resolve` — is nowhere stated, though every part of it is documented separately. | **both, independently** | docs |
+| 2 | `engine.Query`'s "carries every scorer's input in one value" is true of the four in-tree scorers and false of the fifth the README invites you to write. Nothing says how a per-query input reaches an external scorer. | B | docs |
+| 3 | `Search`'s `k` is both the per-scorer request size and the result-set size, and nothing says so. A signal orthogonal to the built-in ones is exactly the signal whose documents every other stream truncates away, so its single vote is arithmetically incapable of winning. | A | docs |
+
+### 6.1 Defect 1 is the one that matters
+
+Two subjects, two different tasks, no shared context, and both singled out the same
+sentence. A said it "actively points the wrong way" and nominated it as *the single
+sentence I would change*; B said it "points an external adopter at a door they
+cannot open".
+
+It is worth being precise about why a sentence that is *true* is the worst defect
+here. `doc.go` is correct: for weft's own scorers, a fifth signal does mean a new
+`Document` field. It is written from inside the repository, and it is the first
+thing an outsider reads when they ask where their data goes. **A document that is
+accurate for the maintainer and misleading for the reader is not a small error**,
+and no test catches it — `TestEngineAPISurfaceIsUnchanged` records declarations,
+not the prose above them.
+
+### 6.2 What each subject had to establish by experiment
+
+Both are things one clause would have prevented.
+
+- **B wrote a throwaway probe** to find out whether `Search` passes its context to
+  `Candidates` unmodified. It does. Nothing documents it, and B noted the silence
+  read as deliberate in a tree that documents NaN ordering in `TopK`.
+- **A had to reshape its demo** to discover that fusing at the display depth
+  structurally outvotes a new orthogonal signal — `viral`, at 1.2M views, sat at
+  rank 5 until the fusion depth was raised above the display cut, whereupon it
+  reached rank 3.
+
+### 6.3 What the trials confirmed rather than found
+
+- **The architecture claim held literally.** Both subjects added the fifth scorer as
+  one more element in a slice, with no change to `fusion`, `engine`, or the `Search`
+  call. A: *"the architectural claim is not just documented, it is pre-answered"*.
+- **Rank-only fusion paid off in the place it was designed for.** A returned raw
+  view counts — 1,200,000 — alongside cosine similarities and normalized nothing,
+  because `Fuse` never reads `Candidate.Score`. That is the milestone 1 design
+  claim being used by someone who did not know it was a claim.
+- **Equal-weight RRF buried the new signal in both trials**, exactly as
+  [FINDINGS milestone 4 §7](FINDINGS.md) says it does. B declined to reach for
+  `FuseWeighted` because the README is emphatic that unmeasured weights are
+  unearned — the documentation successfully talked a user out of a footgun.
+- **The two subjects resolved `Key` to `DocID` at different times** — A once at
+  construction, B on every query — and neither documented path told them which. Both
+  work; the choice is a real one nobody has written down.
+
+### 6.4 What this result is not
+
+Every limit in §4 stands, and the first one binds hardest here: **the subjects were
+agents.** Four minutes to a working scorer is a lower bound produced by a reader
+that consumes `go doc -all` in one pass and never gets bored. A human meeting
+defect 1 does not necessarily recover by reading `Index.Resolve`'s godoc and
+inferring a join. The PRD's "zero user interviews" risk is untouched by this
+milestone.
+
+Both subjects also reported honestly under a boundary that was self-reported
+(§2.2), which is the outcome this design hoped for and cannot verify.

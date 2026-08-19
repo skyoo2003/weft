@@ -26,8 +26,20 @@ type DocID uint32
 // Document is what a caller hands to Index.Add. Every field feeds a different
 // scorer, and the index itself understands none of them beyond Text: Vector is
 // read by the vector scorer, Links by the graph scorer, Time by the recency
-// scorer. Adding a fifth scorer means adding a field here, not touching
-// anything else.
+// scorer.
+//
+// These are the fields weft's own scorers read, and adding a fifth of those
+// means adding a field here. A scorer written outside this module cannot do
+// that, and does not need to: nothing in Scorer says where a scorer's data comes
+// from. Keep your own table keyed by Document.Key — a map, a database, whatever
+// you already have — and use Index.Resolve to turn a Key into the DocID a
+// Candidate carries. Only data that must survive Commit needs a field here,
+// because Commit writes documents and knows of nothing else, so a caller-held
+// table is rebuilt after every Open. Key is what makes that rebuild safe: it
+// still names the same document afterwards.
+//
+// Both trials in docs/ADOPTION.md reached for a field here first, and this
+// paragraph is what they were missing.
 type Document struct {
 	// Key is the caller's own stable identifier. Links reference other
 	// documents by Key, not DocID, so a document may link to a document that
@@ -55,8 +67,21 @@ type Candidate struct {
 	Score float64
 }
 
-// Query carries every scorer's input in one value. A scorer reads the fields it
-// understands and ignores the rest.
+// Query carries the input of every scorer in this module. A scorer reads the
+// fields it understands and ignores the rest.
+//
+// Like Document, it is closed: a scorer outside this module cannot add a field,
+// so a signal needing an input that changes per query — a searcher's location, a
+// tenant, a personalization profile — receives it another way. Bind it when you
+// construct the scorer and construct one per search. recency.NewAt does exactly
+// this with a clock, and a scorer value is small enough that building one per
+// query costs an allocation rather than any corpus work. Search also passes its
+// context to every Candidates call unmodified, so a context value reaches a
+// scorer too; prefer the constructor, because a missing context value is a
+// runtime surprise where a missing constructor argument will not compile.
+//
+// Do not reuse Seeds for this. The graph scorer reads it, and two scorers
+// sharing one field is how one of them silently stops working.
 type Query struct {
 	Text   string
 	Vector []float32

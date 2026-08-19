@@ -49,6 +49,18 @@ type Fuser func(streams [][]Candidate, k int) []Candidate
 // site, and nothing in this function changes. If a future scorer forces an edit
 // here, that edit is the milestone 1 hypothesis failing.
 //
+// k does two jobs: it is what each scorer is asked for and it is the size of the
+// fused result. Fusing deeper than you display is usually right, and it matters
+// most for the scorer you just added. A signal orthogonal to the built-in ones —
+// popularity, price, licence — surfaces documents the other streams rank below
+// their own cut, so at a shared k those documents appear in one stream only, and
+// RRF is built so a single vote does not win. Pass a k above your display size
+// and slice the result. docs/ADOPTION.md section 6.2 is a trial subject meeting
+// this and having to reshape its program to find it.
+//
+// ctx reaches every scorer's Candidates unmodified, so a context value reaches a
+// scorer too. Query documents the type-checked alternative and why to prefer it.
+//
 // Precondition: every scorer must read the same Index. DocID is dense and
 // index-relative, so scorers built against different indexes return IDs from
 // namespaces that both start at 0; fusion would read the collision as two
