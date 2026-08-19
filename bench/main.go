@@ -401,15 +401,32 @@ func warmup(ctx context.Context, qs []eval.EvalQuery, do func(int), failed *atom
 	return unloaded, nil
 }
 
+// progressEvery is how often a running rung says how far it has got, matching the
+// figure cmd/weft-eval uses. The comparison is two commands over one driver, and a
+// reporting cadence that differed between them would be one more thing not matched —
+// small, but this file's whole purpose is that the two sides differ only where
+// docs/PERF.md §4 says they do.
+const progressEvery = 30 * time.Second
+
 // measureRung applies one arrival rate and collects everything measured around it.
 func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) rung {
+	var progress loadgen.Progress
+	do = progress.Count(do)
+
 	fb, cb, pb := loadgen.ProcFaults(), loadgen.GCCycles(), loadgen.GCPauseTotal()
 	// Both CPU totals rather than their ratio, for the reason cmd/weft-eval
 	// states: a ratio of running totals does not subtract, so the raw figure
 	// stops moving after the first rung whatever the collector then does.
 	gcCPU0, totalCPU0 := loadgen.GCCPUSeconds()
 	start := time.Now()
+	stopProgress := progress.Report(os.Stdout, n, progressEvery)
 	samples, shed := loadgen.Drive(ctx, r, n, inflight, do)
+
+	// Stopped before the counters are read, not deferred: a reporter still ticking
+	// would charge this rung with its own progress lines, and its next line would land
+	// inside the distribution table below. Stop is synchronous, so past here nothing
+	// else writes. Same position cmd/weft-eval's benchRung puts it in.
+	stopProgress()
 
 	// Every after-snapshot taken before any of them is reduced. Read inside the
 	// composite literal they were evaluated in lexical order, which put both Summarize
