@@ -87,7 +87,7 @@ by milliseconds between runs. It is left out rather than printed with a caveat,
 because a caveat beside a number is not what a reader carries away. This is why a
 rung is 200 rotations of the 50-query set, and why the `text+vector` arm — four
 times slower per query — is reported without a p99 unless it was given the same
-10,000 samples.
+10,000 samples. Rule 4 is how that arm is given them without relaxing this table.
 
 ### 2.4 GC accounting, and the design that was measured and discarded
 
@@ -165,11 +165,14 @@ support. There is no portable way to drop the page cache, so "cold" here means
 warm host cache is warmer than the first. The cold line is read for its `majflt`,
 not for its latency.
 
-## 3. Judgment rule — fixed before the numbers exist
+## 3. Judgment rules — fixed before the numbers exist
 
-Both rules below were registered in `.claude/plans/weft-m5.plan.md` before the
+Rules 1 and 2 were registered in `.claude/plans/weft-m5.plan.md` before the
 instrument produced a publishable figure, the same discipline
-[D-004](DECISIONS.md) applied in milestone 4.
+[D-004](DECISIONS.md) applied in milestone 4. Rules 3 to 6 were registered in
+`.claude/plans/weft-m7.plan.md` and committed here **before milestone 7's campaign
+measured anything** — the order is checkable with
+`git log --oneline -- docs/PERF.md`, and it is checkable on purpose.
 
 **Rule 1 — which load point the headline is quoted at.**
 
@@ -187,6 +190,28 @@ is how a performance claim is made to say whatever its author wants. So:
 Every rung is published regardless. The rule selects which one the one-line
 summary quotes.
 
+*The rule is not asked unless there is a ladder to ask it about.*
+`loadgen.RuleApplies` is the guard, and both commands ask it rather than each
+spelling a check for itself — rule 2 produces a ratio, so a claim admitted on one
+side alone moves the published number. A ladder is at least two rungs **and every
+rung intended**. Two shapes fail it:
+
+- **An explicit `-rate`** is one rung an operator chose. `SaturationRate` returns
+  it whenever its p50 passed twice the unloaded median, because there is nothing
+  for it to be *first* past, and `HeadlineRate` returns it either way — so the
+  summary would print a hand-picked load point wearing a measured one's label.
+- **A ladder cut short.** A run interrupted during rung three of five has three
+  medians for five intended rates. Until milestone 7 both commands trimmed their
+  rates to match before asking, which made the two indistinguishable: the summary
+  said "saturation: not reached on this ladder" about a ladder whose top rungs
+  never ran, and quoted a headline off the rung the interrupt truncated. They now
+  pass the ladder they *intended*.
+
+In either case the summary says how far the run got, suppresses the claim, and
+still prints every rung's own figures. Suppressing a claim is not suppressing a
+measurement — rule 3's second and third repetitions are read off exactly that
+path. No published milestone 5 figure moves: that ladder completed.
+
 **Rule 2 — what counts as the same order of magnitude.**
 
 `p99(weft, text, headline rung) ≤ 10 × p99(bleve, text, headline rung)`, both
@@ -195,6 +220,96 @@ and the same 50 judged queries at k=10, through the same driver. A miss is
 recorded as a miss, with the profile that explains it — which is what milestone 4
 did to the graph scorer and what this repository does with a result it did not
 want.
+
+**Rule 3 — what a repetition is, and what the headline is the median of.**
+
+§5 has said "the median of three repetitions with the spread reported beside it"
+since milestone 5, and milestone 5 published one run
+([FINDINGS](FINDINGS.md) milestone 5 §4.5). The rule was never wrong; it was never
+made operable. This is the operable form.
+
+A repetition is **not another sweep of the ladder.** Every rung's rate is derived
+from `benchUnloaded` — 200 sequential requests, taken fresh each run — so three
+sweeps produce three different sets of five rates, and "the same rung" in two of
+them is two different loads. There is nothing to take a median of.
+
+So:
+
+| | command | what it produces |
+| --- | --- | --- |
+| repetition 1 | `-rate 0` | the full ladder. Rule 1 selects the headline rate **R** |
+| repetition 2 | `-rate R` | one rung at R, same `n` |
+| repetition 3 | `-rate R` | one rung at R, same `n` |
+
+The published p99 is the **median of the three**, with the spread reported as the
+minimum and maximum beside it. Repetitions 2 and 3 print no headline label, and
+that is rule 1's guard working rather than a defect: R was selected by the rule in
+repetition 1 and is being *reused*, not selected again.
+
+Two things are recorded alongside, because they are the only evidence about what
+the spread is made of:
+
+- **Each repetition's own unloaded p50.** If the three drift, the machine drifted,
+  and part of the spread is that rather than the engine.
+- **That R is quoted to two decimals.** The summary prints `%.2f`, and repetitions
+  2 and 3 are run at the rounded figure — about 0.04% off repetition 1's actual
+  rung. Stated rather than discovered later.
+
+**Rule 4 — how the `text+vector` arm gets a p99.**
+
+[§2.3](#23-quantiles-nearest-rank-and-absent-when-thin) refuses a p99 below 10,000
+samples, and that rule is **not relaxed here.** The arm is four times slower per
+query, which is why milestone 5 published no tail for it — the arm a user would
+actually deploy. Lowering the bar to print something would trade the one property
+that makes a published tail worth reading.
+
+The sample depth is staged instead:
+
+1. **A thin ladder**, `-arm text+vector -rotations 40` — 2,000 samples per rung.
+   A p50 needs 200, so rule 1 has everything it needs to select a load point; p95
+   prints, p99 does not, and its absence there is correct.
+2. **A deep rung** at the rate that ladder selected, `-rotations 200` — 10,000
+   samples. This is where the arm's p99 comes from.
+
+Selection and measurement therefore run at different sample depths. Registered
+here so that it is a design rather than a later excuse — and if the thin ladder
+picks a different rung than a deep one would, that is a finding about how sample
+depth moves rule 1, and it gets published as one.
+
+**Rule 5 — what happens if the re-measurement disagrees with milestone 5.**
+
+1. **Milestone 7's median becomes the published figure.** Milestone 5's 108.193 ms
+   moves to a footnote and is labelled what it is: a single observation.
+2. **Rule 2 is re-judged on the new medians**, weft's against bleve's.
+3. **If the worst of the three observations exceeds 10× bleve's median**, the
+   verdict is published as *"clears the bar at the median, and the spread reaches
+   it"*. Pass or fail is not decided by the median alone when the spread is the
+   thing this milestone exists to measure.
+4. **If the three observations spread by more than 20%, that is the result.** No
+   fourth run is added. Measuring until the answer settles is the failure this
+   whole section is built to prevent.
+
+**Rule 6 — the budget, and what gets cut first.**
+
+The campaign is roughly 14.6 hours of machine time, derived from milestone 5's
+measured rates:
+
+| | estimate |
+| --- | --- |
+| `text` ladder (repetition 1) | 1.5 h |
+| `text` headline rung × 2 | 1.6 h |
+| bleve ladder + headline × 2 | 0.5 h |
+| `text+vector` thin ladder | 1.2 h |
+| `text+vector` deep rung × 3 | 9.8 h |
+
+If it overruns, the order of cuts is fixed **now**:
+
+1. `text+vector`'s deep rung drops from three repetitions to **one**. That arm's
+   goal is that a p99 exists at all; the spread comes from the `text` arm.
+2. The thin ladder drops to `-rotations 20`. A p50 still prints at 1,000 samples.
+3. **The `text` arm's three repetitions are not cut.** They are the milestone.
+
+Anything cut is published as cut, beside the figure it affects.
 
 ## 4. What is not matched, and which way each biases
 
@@ -232,9 +347,46 @@ run sharing a host with anything else is measuring the neighbour. The first
 attempt at these numbers overlapped a bleve index build with a weft ladder and was
 discarded for exactly that reason.
 
-The headline is the median of three repetitions with the spread reported beside
-it. A single run on a shared machine is a number nobody can reproduce, which is
-the lesson [FINDINGS](FINDINGS.md) milestone 4 §4.2 paid for once already.
+A rung prints a progress line every 30 seconds — `... 3000/10000 done, 15m0s
+elapsed`. It is written from a goroutine that serves no request, for the reason
+[loadgen.Progress](../internal/loadgen/progress.go) documents: a line printed from
+inside the request lands in the latency that request records, and ten such samples
+reach a p99 taken over ten thousand.
+
+### 5.1 The campaign, in order
+
+Rules 3 and 4 in commands. Roughly 14.6 hours, so it is written down rather than
+remembered.
+
+```bash
+# ---- text arm: one ladder, then the same rung twice more (rule 3)
+make bench                                   # repetition 1. Read R off the HEADLINE line.
+make bench BENCHFLAGS='-rate R'              # repetition 2
+make bench BENCHFLAGS='-rate R'              # repetition 3
+
+# ---- bleve: the same treatment, so rule 2 compares like with like
+cd bench && go run . -build                  # once, ~20s
+make bench-compare                           # ladder. Read R_bleve off its HEADLINE line.
+make bench-compare BENCHFLAGS='-rate R_bleve'
+make bench-compare BENCHFLAGS='-rate R_bleve'
+
+# ---- text+vector: thin to select, deep to measure (rule 4)
+make bench BENCHFLAGS='-arm text+vector -rotations 40'   # selects R_v
+make bench BENCHFLAGS='-arm text+vector -rate R_v'       # 10,000 samples, the p99
+```
+
+Record from each run: the rate, `n`, `inflight`, `GOMAXPROCS`, the unloaded p50,
+and whether `shed` was zero. Repetitions whose unloaded p50 has drifted from the
+others are **discarded and re-run, and the discard is published** — a run thrown
+away silently is indistinguishable from one that was never made.
+
+Logs go outside the repository. What gets committed is the figures in
+[FINDINGS](FINDINGS.md), not the transcripts.
+
+The reason any of this is a procedure rather than a habit: a single run on a
+shared machine is a number nobody can reproduce, which is the lesson
+[FINDINGS](FINDINGS.md) milestone 4 §4.2 paid for once already, and milestone 5
+§4.5 paid for again.
 
 ### Machine
 
@@ -249,7 +401,7 @@ the lesson [FINDINGS](FINDINGS.md) milestone 4 §4.2 paid for once already.
 | GOMAXPROCS | 10 |
 | GOGC | 100 (default) |
 | corpus | 171,332 documents, 50 judged TREC-COVID queries, k=10 |
-| repetitions | **1 of the corrected instrument** — the median-of-three rule above is not yet satisfied. Two earlier ladders were discarded and a third was superseded by instrument fixes; see [FINDINGS](FINDINGS.md) milestone 5 §4.1 and §4.5 |
+| repetitions | **1 of the corrected instrument.** Two earlier ladders were discarded and a third was superseded by instrument fixes; see [FINDINGS](FINDINGS.md) milestone 5 §4.1 and §4.5. Rule 3 now says what a repetition is and §5.1 has the commands — **the campaign has not been run**, and until it is, every figure below is a single observation whose spread is unknown |
 | weft ladder | one process, five rungs, `-rotations 200` |
 
 The numbers measured on it are in [FINDINGS.md](FINDINGS.md) milestone 5 §1.
