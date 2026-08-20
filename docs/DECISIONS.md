@@ -827,3 +827,90 @@ staging is not a cost-saving on one arm, it is a claim that sample depth does no
 rule 1 — and that claim would be false. The repair is not to widen the thin ladder but
 to say so in `text+vector`'s published figure, because the same doubt then applies to
 every headline rule 1 has ever selected.
+
+---
+
+## D-012 — D-011's premise is false; mark the rule, do not replace it from inside the campaign that broke it
+
+**Date:** 2026-08-21
+**Milestone:** 7 — a baseline nobody has to qualify
+**Status:** accepted
+**Context:** [FINDINGS milestone 7](FINDINGS.md), [D-011](#d-011--a-repetition-is-a-rung-not-a-ladder-and-the-arm-nobody-can-afford-to-ladder-gets-a-staged-depth)
+
+### Context
+
+[D-011](#d-011--a-repetition-is-a-rung-not-a-ladder-and-the-arm-nobody-can-afford-to-ladder-gets-a-staged-depth)
+decided, one day before the campaign ran, that a repetition is the same rung measured
+again rather than the ladder swept again. The argument was arithmetic and still holds:
+every rung's rate derives from a fresh `benchUnloaded`, so three sweeps give three
+different sets of rates and there is nothing common to take a median of.
+
+The campaign then measured 25.67 q/s three times. One observation shed nothing and
+held a 37.9 ms median at 114 MiB. Two collapsed — 1.539 s and 416 ms, 14% and 11% of
+the load shed, 1021 MiB and 765 MiB resident. Same corpus, same binary, same machine,
+same day, no suspension in any of them.
+
+The difference that survives every check in [FINDINGS §2](FINDINGS.md) is that the
+flat observation was the fourth rung of a ladder and the two collapses were single
+rungs out of a warm-up. **A rung measured alone is not the rung D-011 thought it was
+repeating.**
+
+### Question
+
+Rule 3 is falsified. Do we replace it now — three full sweeps, a pinned-rate ladder
+flag, a fixed prefix — or mark it and stop?
+
+### Decision
+
+**Mark it. Publish the falsification. Do not choose a replacement inside the
+milestone whose numbers produced it.**
+
+1. [PERF.md](PERF.md) §3 rule 3 stays on the page, with what falsified it named
+   beside it. It is not edited into something that would have worked.
+2. "What must a repetition hold constant" becomes an open question against
+   milestone 8, carried in [FINDINGS §6](FINDINGS.md).
+3. No fourth run. [PERF.md](PERF.md) §3 rule 5 clause 4 already fixed that answer
+   for a spread this rule could not survive, and a 40× spread is past any reading of
+   it.
+
+### Why
+
+The discipline this repository runs on is that a rule is worth something only if it
+was not available to be chosen once the numbers were on screen. That constraint does
+not lift when the rule turns out to be wrong — it binds hardest exactly then, because
+the replacement would be picked by someone who has just seen which shapes produce
+which answers. Three candidate repairs are already visible from here, and the reason
+to prefer one of them over another is currently *which run it would have made look
+reproducible*.
+
+Marking costs a milestone's headline. [Milestone 7](FINDINGS.md) closes with no
+median and no spread, which is a worse artifact than the one it set out to produce
+and a better one than a median assembled from a rule known to be measuring two
+different things.
+
+There is also a positive result to protect. The campaign produced an instrument that
+refuses to publish what it did not measure — a suspended ladder, a ladder cut short,
+an operator-chosen rate wearing a rule's label. Those are assertions now, not
+comments. Rewriting rule 3 in the same breath would put the milestone's one solid
+output next to a rule chosen against its own evidence.
+
+The cost is named: milestone 8 inherits an unanswered procedural question on top of
+its engineering one, and its own pass line — *shed 0 at 27.28 q/s* — is not a
+predicate until it is answered, since [FINDINGS §4.5](FINDINGS.md) shows one rate
+both passing and failing. That is worse for milestone 8's schedule and better for
+whatever it eventually claims.
+
+### What would show this decision was wrong
+
+**The ladder prefix turns out not to be the variable.** §3's reading is a hypothesis
+with a named alternative — that `inflight` 40 admits a start-of-rung burst a process
+arriving from a lower rung never sees. If the prefix is ruled out, then rule 3 was
+falsified by something it could have been written to control, and marking it rather
+than fixing it will have cost a milestone for nothing. The experiment is cheap and it
+belongs to milestone 8: run the same rate behind two different prefixes and behind two
+`inflight` caps.
+
+**Nobody returns to the question.** A rule marked as falsified and left standing is
+one nobody has to argue with. If milestone 8 publishes a performance figure without
+first answering what a repetition holds constant, this decision will have converted a
+wrong rule into no rule, which is the outcome it was trying to avoid.

@@ -192,6 +192,47 @@ the first test in that module and exists for that sentence.
 to completion, so `RuleApplies` is true of it and the branch it takes is the one it
 always took. What changes is what a *future* interrupted run is allowed to claim.
 
+### Defect — the instrument could not see time the process did not run
+
+**Summary.** The campaign's first ladder ran 08:11 to 22:03 by the wall clock and
+reported 92 minutes of rungs. The lid had closed at 08:34:13, twenty-three minutes
+into the first rung, and the machine slept and dark-woke for thirteen hours.
+
+**Every figure in that report was plausible.** Each rung's elapsed matched its own
+schedule to within a second, shed was zero below the knee, `majflt` was 0, and the
+headline p99 came out 107.332 ms against milestone 5's 108.193 ms — a 0.8% agreement
+that reads as reproduction. `time.Since` uses the monotonic clock, which on Darwin
+does not advance during sleep. The run was caught only because a `date` happened to
+be piped either side of the command.
+
+**RED** — three targets, none compiled:
+
+```
+internal/loadgen/clock_test.go:57:14: undefined: unaccounted
+internal/loadgen/clock_test.go:72:41: undefined: SuspendTolerance
+cmd/weft-eval/bench_test.go:130:13:  benchReport has no field unaccounted
+bench/summary_test.go:98:8:          rung has no field unaccounted
+```
+
+Checkpoint `7cc7185`.
+
+**GREEN** — `loadgen.Elapsed` returns the monotonic span and the wall time it cannot
+account for. `time.Time` carries both readings and `Sub` uses the monotonic one only
+when both operands have it, so `Round(0)` strips it and the second subtraction is the
+wall clock's answer to the same question. Past `SuspendTolerance` a rung prints
+`SUSPENDED` as its **first** line — before the distribution, because a reader who
+takes the table and stops has taken the wrong thing — and both summaries refuse the
+run with what to do about it. That check runs **before** `RuleApplies`: a complete
+five-rung sweep across a sleeping machine satisfies the ladder shape and would
+otherwise be quoted. Every rung is inspected, not the headline's alone.
+
+The tolerance is pinned from both sides: a 2 s NTP step must not flag, 12h20m must.
+Checkpoint `84b0467`.
+
+**Verified in the field.** The re-run under `caffeinate -dimsu` printed no `SUSPENDED`
+line and closed with 100 m 48 s of wall clock against 100 m 39 s of rungs plus a 10 s
+warm-up — nine seconds unaccounted, which is the report printing.
+
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
@@ -208,7 +249,12 @@ always took. What changes is what a *future* interrupted run is allowed to claim
 | 10 | An interrupted ladder publishes no headline and no saturation claim, and says how far it got | `…PublishesNoHeadlineForALadderCutShort` (both modules) | unit | PASS | same |
 | 11 | An operator-chosen `-rate` publishes no rule label, but its rung's figures still print | `…PublishesNoHeadlineForAnExplicitRate` (both modules) | unit | PASS | same |
 | 12 | A run with no completed rung prints nothing at all | `…PrintsNothingWhenNothingWasMeasured` (both modules) | unit | PASS | same |
-| 13 | The engine is untouched by this milestone | `git diff --stat pkg/` | gate | PASS (empty) | `make all`, `make deps`, `make bench-build` |
+| 13 | Wall time a span cannot account for is wall minus monotonic, clamped at zero | `internal/loadgen/clock_test.go:TestUnaccountedIsWallMinusMonotonic` (4 cases) | unit | PASS | `go test -race ./internal/loadgen/` |
+| 14 | The tolerance admits a 2 s clock step and rejects 12h20m of sleep | `…:TestSuspendToleranceSeparatesClockJitterFromASleepingMachine` | unit | PASS | same |
+| 15 | `Elapsed` reads two clocks rather than one twice | `…:TestElapsedReadsBothClocksOverARealSpan` | unit | PASS | same |
+| 16 | A ladder that ran across a suspension publishes no headline and says how long the process was stopped | `…PublishesNoHeadlineWhenARungWasSuspended` (both modules) | unit | PASS | `go test ./cmd/weft-eval/`, `cd bench && go test ./...` |
+| 17 | A gap inside the tolerance does not suppress the headline | `cmd/weft-eval/bench_test.go:…IsUnmovedByAGapInsideTheTolerance` | unit | PASS | `go test ./cmd/weft-eval/` |
+| 18 | The engine is untouched by this milestone | `git diff --stat pkg/` | gate | PASS (empty) | `make all`, `make deps`, `make bench-build` |
 
 ## Coverage and known gaps
 

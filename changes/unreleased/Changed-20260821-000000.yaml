@@ -1,0 +1,15 @@
+kind: Changed
+body: '`weft-eval bench` and the bleve comparison refuse to publish figures they did not
+  measure. A rung reports how much wall time the process did not run for — the monotonic
+  clock does not advance while a machine sleeps, so a ladder measured across thirteen hours
+  of clamshell sleep previously reported every rung finishing exactly on schedule, with no
+  shed and a headline 0.8% from the published one. Past a five-second tolerance the rung
+  prints SUSPENDED and the summary refuses the run. A ladder cut short no longer prints a
+  saturation point or a headline either: both commands now pass the ladder they intended
+  rather than the rungs they reached, so an interrupted sweep is no longer indistinguishable
+  from a complete shorter one. Rungs also print progress every thirty seconds, from a
+  goroutine that serves no request. No exported API under `pkg/` moved — `git diff --stat
+  pkg/` is empty for the whole milestone.'
+time: 2026-08-21T00:00:00.000000000+09:00
+custom:
+  Issue: 14

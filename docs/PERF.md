@@ -222,6 +222,18 @@ did to the graph scorer and what this repository does with a result it did not
 want.
 
 **Rule 3 — what a repetition is, and what the headline is the median of.**
+**FALSIFIED 2026-08-21 by the campaign it governed. Left standing and marked rather
+than rewritten — [D-012](DECISIONS.md).**
+
+> The rule directs a median over three observations of one rung. Three observations
+> at 25.67 q/s gave 37.9 ms, 1.539 s and 416 ms, and two of them shed enough to fall
+> under the p99 sample floor. The flat one was the fourth rung of a ladder; the two
+> collapses were single rungs out of a warm-up. **A rung measured alone is not the
+> same rung.** So there is no median, and the arithmetic below — still correct about
+> why three sweeps cannot be compared — was answering the wrong question. What a
+> repetition must hold constant is an open question against milestone 8,
+> [FINDINGS milestone 7 §6](FINDINGS.md). Read the rest of this rule as the record of
+> an attempt rather than as a procedure to run.
 
 §5 has said "the median of three repetitions with the spread reported beside it"
 since milestone 5, and milestone 5 published one run
@@ -402,7 +414,7 @@ shared machine is a number nobody can reproduce, which is the lesson
 | GOMAXPROCS | 10 |
 | GOGC | 100 (default) |
 | corpus | 171,332 documents, 50 judged TREC-COVID queries, k=10 |
-| repetitions | **1 of the corrected instrument.** Two earlier ladders were discarded and a third was superseded by instrument fixes; see [FINDINGS](FINDINGS.md) milestone 5 §4.1 and §4.5. Rule 3 now says what a repetition is and §5.1 has the commands — **the campaign has not been run**, and until it is, every figure below is a single observation whose spread is unknown |
+| repetitions | **1, and milestone 7 established that a second is not currently definable.** The campaign ran and found the headline load point irreproducible — 37.9 ms, 1.539 s and 416 ms at one rate, [FINDINGS milestone 7 §1](FINDINGS.md) — which falsified rule 3 rather than producing a spread. Every figure below remains a single observation, now also known to be **one draw from a rule that flips on a few milliseconds of rung-1 median** (§4.2 there), taken on a machine whose sleep state was not recorded (§4.1 there) |
 | weft ladder | one process, five rungs, `-rotations 200` |
 
 The numbers measured on it are in [FINDINGS.md](FINDINGS.md) milestone 5 §1.
