@@ -88,6 +88,27 @@ func TestSummarizePublishesNoHeadlineForALadderCutShort(t *testing.T) {
 	}
 }
 
+// TestSummarizePublishesNoHeadlineWhenARungWasSuspended holds this side to the same
+// discipline. A comparison whose denominator was measured across a sleeping machine
+// is not a comparison, and the ratio would carry no sign of it.
+func TestSummarizePublishesNoHeadlineWhenARungWasSuspended(t *testing.T) {
+	rates := []float64{20, 40, 80, 157, 314}
+	p50s := millis(8, 8, 9, 12, 200)
+	rs := rungsAt(rates, p50s)
+	rs[0].unaccounted = 12*time.Hour + 20*time.Minute
+
+	var w bytes.Buffer
+	summarize(&w, rs, rates, p50s, 8*time.Millisecond)
+
+	got := w.String()
+	if strings.Contains(got, "HEADLINE") || strings.Contains(got, "saturation:") {
+		t.Errorf("a ladder that ran across a suspension published a rule's claim:\n%s", got)
+	}
+	if !strings.Contains(got, "12h20m0s") {
+		t.Errorf("the summary does not say how much time the process did not run:\n%s", got)
+	}
+}
+
 func TestSummarizePublishesNoHeadlineForAnExplicitRate(t *testing.T) {
 	rates := []float64{157}
 	p50s := millis(8)

@@ -114,6 +114,50 @@ func TestBenchSummaryPublishesNoHeadlineForALadderCutShort(t *testing.T) {
 	}
 }
 
+// TestBenchSummaryPublishesNoHeadlineWhenARungWasSuspended is milestone 7's first
+// repetition, turned into an assertion.
+//
+// That run's lid closed twenty-three minutes into a ninety-two minute ladder. Every
+// rung then matched its own schedule to within a second, shed was zero below the
+// knee, and the headline landed 0.8% from milestone 5's published figure — a report
+// with no symptom anywhere in it. A complete ladder measured across thirteen hours of
+// sleep is not a slightly worse measurement, it is not one, and the summary must say
+// so rather than quote a headline off it.
+func TestBenchSummaryPublishesNoHeadlineWhenARungWasSuspended(t *testing.T) {
+	rates := []float64{1, 2, 4, 8, 16}
+	p50s := benchMillis(40, 41, 43, 50, 900)
+	reports := benchLadderReports(rates, p50s)
+	reports[0].unaccounted = 12*time.Hour + 20*time.Minute
+
+	var w bytes.Buffer
+	benchSummary(&w, benchArmText, rates, p50s, reports, 40*time.Millisecond)
+
+	got := w.String()
+	if strings.Contains(got, "HEADLINE") || strings.Contains(got, "saturation:") {
+		t.Errorf("a ladder that ran across a suspension published a rule's claim:\n%s", got)
+	}
+	if !strings.Contains(got, "12h20m0s") {
+		t.Errorf("the summary does not say how much time the process did not run:\n%s", got)
+	}
+}
+
+// TestBenchSummaryIsUnmovedByAGapInsideTheTolerance keeps the guard from firing on
+// the clock adjustment every laptop makes.
+func TestBenchSummaryIsUnmovedByAGapInsideTheTolerance(t *testing.T) {
+	rates := []float64{1, 2, 4, 8, 16}
+	p50s := benchMillis(40, 41, 43, 50, 900)
+	reports := benchLadderReports(rates, p50s)
+	reports[0].unaccounted = 2 * time.Second
+
+	var w bytes.Buffer
+	benchSummary(&w, benchArmText, rates, p50s, reports, 40*time.Millisecond)
+
+	if got := w.String(); !strings.Contains(got, "HEADLINE") {
+		t.Errorf("a 2s clock adjustment suppressed the headline; every rung on a laptop "+
+			"would be thrown away:\n%s", got)
+	}
+}
+
 // TestBenchSummaryPublishesNoHeadlineForAnExplicitRate keeps the guard that already
 // existed, now asked of the same predicate rather than of a length check spelled here.
 func TestBenchSummaryPublishesNoHeadlineForAnExplicitRate(t *testing.T) {
