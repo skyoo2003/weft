@@ -431,7 +431,7 @@ func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) 
 	// own page faults while gcCPU1, captured first, excluded them. Same correction
 	// cmd/weft-eval's benchRung carries; an asymmetry here is a factor in the published
 	// ratio.
-	elapsed := time.Since(start)
+	elapsed, unaccounted := loadgen.Elapsed(start)
 	gcCPU1, totalCPU1 := loadgen.GCCPUSeconds()
 	fa, ca, pa, rss := loadgen.ProcFaults(), loadgen.GCCycles(), loadgen.GCPauseTotal(), loadgen.MaxRSS()
 
@@ -441,7 +441,8 @@ func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) 
 		shed:    shed,
 		gcCPU:   loadgen.GCCPUShareBetween(gcCPU0, totalCPU0, gcCPU1, totalCPU1),
 		pause:   pa - pb,
-		elapsed: elapsed, faults: fa.Sub(fb), cycles: ca - cb, peakRSS: rss,
+		elapsed: elapsed, unaccounted: unaccounted,
+		faults: fa.Sub(fb), cycles: ca - cb, peakRSS: rss,
 	}
 }
 
@@ -457,6 +458,20 @@ func summarize(w io.Writer, rungs []rung, rates []float64, p50s []time.Duration,
 	line := func(label string, g *rung) {
 		fmt.Fprintf(w, "%s   bleve text  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
 			label, g.rate, fmtQ(g.all.P99, g.all.P99ok), fmtQ(g.exGC.P99, g.exGC.P99ok), 100*g.gcCPU)
+	}
+
+	// Checked before the ladder's shape, for the reason weft's benchSummary gives: a
+	// complete sweep across a sleeping machine satisfies RuleApplies and would
+	// otherwise be quoted.
+	for i := range rungs {
+		if rungs[i].unaccounted <= loadgen.SuspendTolerance {
+			continue
+		}
+		fmt.Fprintf(w, "\nDISCARD this run: the process did not run for %v of the rung at "+
+			"%.2f/s, so the ladder was measured across a suspension. There is no headline. "+
+			"Re-run it on a machine that stays awake — `caffeinate -dimsu make bench-compare`.\n",
+			rungs[i].unaccounted.Round(time.Second), rungs[i].rate)
+		return
 	}
 
 	if !loadgen.RuleApplies(rates, p50s) {
@@ -495,8 +510,13 @@ type rung struct {
 	gcCPU     float64
 	pause     time.Duration
 	elapsed   time.Duration
-	faults    loadgen.FaultCounts
-	cycles    uint64
+	// unaccounted is wall time this rung cannot account for — the process was not
+	// running for it. See loadgen.Elapsed. The field exists on weft's side too, which
+	// is what keeps the two comparable: a ratio whose denominator slept carries no
+	// sign of it.
+	unaccounted time.Duration
+	faults      loadgen.FaultCounts
+	cycles      uint64
 	// peakRSS is captured when the rung ends rather than read at print time, which is
 	// what this did before. ru_maxrss is a high-water mark, so reading it after
 	// Summarize allocated and sorted two 10,000-element slices reported a peak that
@@ -511,6 +531,12 @@ type rung struct {
 func (g rung) print() {
 	fmt.Printf("\nrate=%.2f/s  n=%d  shed=%d  elapsed=%v\n",
 		g.rate, g.all.N, g.shed, g.elapsed.Round(time.Millisecond))
+	// First rather than last, as on weft's side: a reader who takes the distribution
+	// before reaching a trailing caveat has taken the wrong thing.
+	if g.unaccounted > loadgen.SuspendTolerance {
+		fmt.Printf("  SUSPENDED the process did not run for %v of this rung — the machine slept. "+
+			"Nothing below is a measurement.\n", g.unaccounted.Round(time.Second))
+	}
 	fmt.Printf("  latency   p50 %s  p95 %s  p99 %s  p99.9 %s  max %v\n",
 		fmtQ(g.all.P50, g.all.P50ok), fmtQ(g.all.P95, g.all.P95ok), fmtQ(g.all.P99, g.all.P99ok),
 		fmtQ(g.all.P999, g.all.P999ok), g.all.Max.Round(time.Microsecond))

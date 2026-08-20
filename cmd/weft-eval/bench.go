@@ -329,6 +329,23 @@ func benchSummary(w io.Writer, arm string, rates []float64, p50s []time.Duration
 			fmtQ(rep.exGC.P99, rep.exGC.P99ok), 100*rep.gcCPU)
 	}
 
+	// A suspended rung is checked before the ladder's shape, because it is the stronger
+	// failure: a complete five-rung sweep across a sleeping machine satisfies
+	// RuleApplies and would otherwise be quoted. Every rung is inspected rather than
+	// the headline's alone — the ladder is one process, and a machine that slept
+	// during rung one was not the same machine for rung five.
+	for i := range reports {
+		if reports[i].unaccounted <= loadgen.SuspendTolerance {
+			continue
+		}
+		fmt.Fprintf(w, "\nDISCARD this run: the process did not run for %v of the rung at "+
+			"%.2f/s, so the ladder was measured across a suspension. There is no headline. "+
+			"Re-run it on a machine that stays awake — `caffeinate -dimsu make bench` — and "+
+			"publish the discard.\n",
+			reports[i].unaccounted.Round(time.Second), reports[i].rate)
+		return
+	}
+
 	// The rungs' own figures are printed above by rep.print() and are not in doubt.
 	// What is suppressed here is the claim that a rule selected one of them.
 	if !loadgen.RuleApplies(rates, p50s) {
@@ -375,6 +392,12 @@ type benchReport struct {
 	gcCPU     float64
 	peakRSS   int64
 	elapsed   time.Duration
+
+	// unaccounted is wall time this rung cannot account for — the process was not
+	// running for it. Past loadgen.SuspendTolerance the rung is not a measurement and
+	// the summary refuses to quote it. loadgen.Elapsed says why this is not derivable
+	// from elapsed alone.
+	unaccounted time.Duration
 }
 
 // benchRung applies one arrival rate and collects everything measured around it.
@@ -407,22 +430,23 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int))
 	// rung with the reporter's own page faults and any collection its allocations
 	// provoked, while gcCPU1 — captured first — excluded all of it: one report whose
 	// GC CPU share and GC cycle count described different intervals.
-	elapsed := time.Since(start)
+	elapsed, unaccounted := loadgen.Elapsed(start)
 	gcCPU1, totalCPU1 := loadgen.GCCPUSeconds()
 	faultsAfter, cyclesAfter := loadgen.ProcFaults(), loadgen.GCCycles()
 	pausesAfter, peakRSS := loadgen.GCPauseTotal(), loadgen.MaxRSS()
 
 	raw, exGC := loadgen.SplitByGC(samples)
 	return benchReport{
-		all:      loadgen.Summarize(raw),
-		exGC:     loadgen.Summarize(exGC),
-		shed:     shed,
-		faults:   faultsAfter.Sub(faultsBefore),
-		gcCycles: cyclesAfter - cyclesBefore,
-		pause:    pausesAfter - pausesBefore,
-		gcCPU:    loadgen.GCCPUShareBetween(gcCPU0, totalCPU0, gcCPU1, totalCPU1),
-		peakRSS:  peakRSS,
-		elapsed:  elapsed,
+		all:         loadgen.Summarize(raw),
+		exGC:        loadgen.Summarize(exGC),
+		shed:        shed,
+		faults:      faultsAfter.Sub(faultsBefore),
+		gcCycles:    cyclesAfter - cyclesBefore,
+		pause:       pausesAfter - pausesBefore,
+		gcCPU:       loadgen.GCCPUShareBetween(gcCPU0, totalCPU0, gcCPU1, totalCPU1),
+		peakRSS:     peakRSS,
+		elapsed:     elapsed,
+		unaccounted: unaccounted,
 	}
 }
 
@@ -501,6 +525,14 @@ func fmtQ(d time.Duration, ok bool) string {
 func (r benchReport) print() {
 	fmt.Printf("\nrate=%.2f/s  n=%d  shed=%d  elapsed=%v\n",
 		r.rate, r.all.N, r.shed, r.elapsed.Round(time.Millisecond))
+	// First, not last, and in words rather than a field. Everything printed below it
+	// is arithmetic over samples taken while the process was stopped for part of this
+	// span, and a reader who takes the distribution before reaching the caveat has
+	// taken the wrong thing.
+	if r.unaccounted > loadgen.SuspendTolerance {
+		fmt.Printf("  SUSPENDED the process did not run for %v of this rung — the machine slept. "+
+			"Nothing below is a measurement.\n", r.unaccounted.Round(time.Second))
+	}
 	fmt.Printf("  latency   p50 %s  p95 %s  p99 %s  p99.9 %s  max %v\n",
 		fmtQ(r.all.P50, r.all.P50ok), fmtQ(r.all.P95, r.all.P95ok),
 		fmtQ(r.all.P99, r.all.P99ok), fmtQ(r.all.P999, r.all.P999ok),
