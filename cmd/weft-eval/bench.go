@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -63,8 +65,11 @@ func benchScorers(ix *engine.Index, arm string) ([]engine.Scorer, error) {
 
 // benchOpts is what the flags decide, validated.
 type benchOpts struct {
-	data        string
-	rate        float64
+	data string
+	rate float64
+	// rates is an operator-named ladder, from -rates. Non-empty means the sweep is not
+	// the rule's own, and benchRates says so to benchSummary.
+	rates       []float64
 	rotations   int
 	inflight    int
 	arm         string
@@ -78,8 +83,10 @@ type benchOpts struct {
 // answer is given before the index is mapped rather than after.
 func benchFlags(args []string) (benchOpts, error) {
 	var o benchOpts
+	var ratesRaw string
 	data, flagErr := dataFlags(cmdBench, args, func(fs *flag.FlagSet) {
 		fs.Float64Var(&o.rate, "rate", 0, "arrival rate in queries/sec; 0 sweeps the ladder")
+		fs.StringVar(&ratesRaw, "rates", "", "comma-separated arrival rates to run in order, instead of the sweep -rate 0 derives; the load-point rule is not applied to a ladder you chose")
 		fs.IntVar(&o.rotations, "rotations", 200, "passes over the query set per rung (50 queries x 200 = 10,000 samples)")
 		fs.IntVar(&o.inflight, "inflight", 0, "cap on concurrent requests; 0 is 4 per core")
 		fs.StringVar(&o.arm, "arm", benchArmText, "scorers to load: text or text+vector")
@@ -113,6 +120,30 @@ func benchFlags(args []string) (benchOpts, error) {
 	const maxRate = 1e9
 	if o.rate < 0 || math.IsNaN(o.rate) || o.rate > maxRate {
 		return o, fmt.Errorf("-rate=%v: an arrival rate is positive and below %g, or 0 to sweep the ladder", o.rate, maxRate)
+	}
+	if ratesRaw != "" {
+		// Both flags answer "which rates run", so one of them would win silently. Which
+		// one is not the point; that the operator cannot tell is.
+		if o.rate != 0 {
+			return o, fmt.Errorf("-rate=%v and -rates=%q both name the rates to run: pass one", o.rate, ratesRaw)
+		}
+		for _, f := range strings.Split(ratesRaw, ",") {
+			// Each entry gets the bounds a lone -rate gets, and gets them here rather
+			// than at dispatch. A list is not a place where a zero or a NaN stops
+			// dispatching the whole rung at once, and a four-rung sweep whose third
+			// entry was a typo is ninety minutes spent before anything says so.
+			r, err := strconv.ParseFloat(strings.TrimSpace(f), 64)
+			if err != nil {
+				return o, fmt.Errorf("-rates=%q: %q is not a number", ratesRaw, strings.TrimSpace(f))
+			}
+			if !(r > 0) || math.IsNaN(r) || r > maxRate { //nolint:staticcheck // written this way to reject NaN too
+				return o, fmt.Errorf("-rates=%q: %v is not an arrival rate — positive and below %g", ratesRaw, r, maxRate)
+			}
+			o.rates = append(o.rates, r)
+		}
+		if len(o.rates) == 0 {
+			return o, fmt.Errorf("-rates=%q names no rates", ratesRaw)
+		}
 	}
 	if o.inflight <= 0 {
 		o.inflight = loadgen.DefaultInflight()
@@ -182,7 +213,7 @@ func bench(ctx context.Context, args []string) error {
 	if o.writes {
 		return benchWrites(ctx, o, qs, n, unloaded)
 	}
-	rates := benchRates(o.rate, unloaded)
+	rates, ruleLadder := benchRates(o.rate, o.rates, unloaded)
 
 	fmt.Printf("\nweft  %s  warm  n=%d/rung  inflight=%d  GOMAXPROCS=%d\n",
 		o.arm, n, o.inflight, runtime.GOMAXPROCS(0))
@@ -203,7 +234,7 @@ func bench(ctx context.Context, args []string) error {
 	// The full `rates`, not rates[:len(p50s)]. Trimming them here is what made an
 	// interrupted ladder indistinguishable from a complete shorter one by the time the
 	// rule saw it.
-	benchSummary(os.Stdout, o.arm, rates, p50s, reports, unloaded)
+	benchSummary(os.Stdout, o.arm, ruleLadder, rates, p50s, reports, unloaded)
 	if f := failed.Load(); f > 0 {
 		fmt.Printf("\nWARNING: %d requests returned an error and are counted in the distributions above\n", f)
 	}
@@ -278,18 +309,30 @@ func benchWarmup(ctx context.Context, qs []eval.Query, do func(int), failed *ato
 	return unloaded, nil
 }
 
-// benchRates is the ladder, scaled from the sequential throughput, or the single
-// rung an explicit -rate asks for.
-func benchRates(rate float64, unloaded time.Duration) []float64 {
-	if rate != 0 {
-		return []float64{rate}
+// benchRates is the ladder, and whether it is the rule's own.
+//
+// Three sources, and only one of them earns a headline. `loadgen.Ladder` scaled by
+// this run's sequential throughput is the sweep docs/PERF.md §3 rule 1 was written
+// about. A single `-rate` and a named `-rates` list are both the operator's choice,
+// and rule 1 exists because choosing the load point by hand is how a performance
+// figure is made to say what its author wants — choosing the rungs and letting the
+// rule pick among them is the same act at one remove.
+//
+// So `ruleLadder` travels with the rates rather than being re-derived at the bottom
+// of benchSummary, where it would be a second spelling of the same condition.
+func benchRates(rate float64, explicit []float64, unloaded time.Duration) (rates []float64, ruleLadder bool) {
+	switch {
+	case len(explicit) > 0:
+		return explicit, false
+	case rate != 0:
+		return []float64{rate}, false
 	}
 	base := float64(time.Second) / float64(unloaded)
-	rates := make([]float64, 0, len(loadgen.Ladder))
+	rates = make([]float64, 0, len(loadgen.Ladder))
 	for _, f := range loadgen.Ladder {
 		rates = append(rates, base*f)
 	}
-	return rates
+	return rates, true
 }
 
 // startCPUProfile turns the flag into a stop function, so the caller has one defer
@@ -320,7 +363,7 @@ func startCPUProfile(path string) (func(), error) {
 // `rates` is the ladder that was *intended*, not the rungs that were reached: the
 // difference between the two is the only evidence a run was cut short, and
 // loadgen.RuleApplies is what reads it.
-func benchSummary(w io.Writer, arm string, rates []float64, p50s []time.Duration,
+func benchSummary(w io.Writer, arm string, ruleLadder bool, rates []float64, p50s []time.Duration,
 	reports []benchReport, unloaded time.Duration,
 ) {
 	rung := func(label string, rep *benchReport) {
@@ -348,13 +391,14 @@ func benchSummary(w io.Writer, arm string, rates []float64, p50s []time.Duration
 
 	// The rungs' own figures are printed above by rep.print() and are not in doubt.
 	// What is suppressed here is the claim that a rule selected one of them.
-	if !loadgen.RuleApplies(rates, p50s) {
+	if !ruleLadder || !loadgen.RuleApplies(rates, p50s) {
 		if len(reports) == 0 {
 			return
 		}
-		fmt.Fprintf(w, "\n%d of %d rungs measured — an explicit -rate, or a ladder cut short — so the "+
-			"load-point rule has nothing to apply and there is no saturation point and no "+
-			"headline; sweep with -rate 0 and let it finish to give the rule a ladder\n",
+		fmt.Fprintf(w, "\n%d of %d rungs measured — a ladder you named, an explicit -rate, or a "+
+			"ladder cut short — so the load-point rule has nothing to apply and there is no "+
+			"saturation point and no headline; sweep with -rate 0 and let it finish to give the "+
+			"rule a ladder\n",
 			len(reports), len(rates))
 		for i := range reports {
 			rung("rung    ", &reports[i])
