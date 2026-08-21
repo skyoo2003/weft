@@ -225,7 +225,7 @@ func bench(ctx context.Context, args []string) error {
 		rep.rate = r
 		reports = append(reports, rep)
 		p50s = append(p50s, rep.all.P50)
-		rep.print()
+		rep.print(os.Stdout)
 		if ctx.Err() != nil {
 			break
 		}
@@ -435,6 +435,11 @@ type benchReport struct {
 	pause     time.Duration
 	gcCPU     float64
 	peakRSS   int64
+	// rssRaised is how much *this* rung moved that mark: peakRSS at the end minus the
+	// mark as it stood before the rung began. It is the only per-rung memory statement
+	// getrusage can support, and without it the printed peak reads as this rung's when
+	// on a ladder it is whichever rung set it — see rssAttribution.
+	rssRaised int64
 	elapsed   time.Duration
 
 	// unaccounted is wall time this rung cannot account for — the process was not
@@ -451,6 +456,9 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int))
 
 	faultsBefore, cyclesBefore := loadgen.ProcFaults(), loadgen.GCCycles()
 	pausesBefore := loadgen.GCPauseTotal()
+	// Read here for the same reason the fault counters are: it is a running total, so
+	// the only per-rung statement available is the difference. It cannot be reset.
+	rssBefore := loadgen.MaxRSS()
 	// Both CPU totals, not their ratio: the ratio of two running totals cannot be
 	// subtracted, and by the fifth rung it is dominated by the index mapping and the
 	// four rungs before this one rather than by what the collector is doing now.
@@ -489,6 +497,7 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int))
 		pause:       pausesAfter - pausesBefore,
 		gcCPU:       loadgen.GCCPUShareBetween(gcCPU0, totalCPU0, gcCPU1, totalCPU1),
 		peakRSS:     peakRSS,
+		rssRaised:   peakRSS - rssBefore,
 		elapsed:     elapsed,
 		unaccounted: unaccounted,
 	}
@@ -566,25 +575,25 @@ func fmtQ(d time.Duration, ok bool) string {
 	return d.Round(time.Microsecond).String()
 }
 
-func (r benchReport) print() {
-	fmt.Printf("\nrate=%.2f/s  n=%d  shed=%d  elapsed=%v\n",
+func (r benchReport) print(w io.Writer) {
+	fmt.Fprintf(w, "\nrate=%.2f/s  n=%d  shed=%d  elapsed=%v\n",
 		r.rate, r.all.N, r.shed, r.elapsed.Round(time.Millisecond))
 	// First, not last, and in words rather than a field. Everything printed below it
 	// is arithmetic over samples taken while the process was stopped for part of this
 	// span, and a reader who takes the distribution before reaching the caveat has
 	// taken the wrong thing.
 	if r.unaccounted > loadgen.SuspendTolerance {
-		fmt.Printf("  SUSPENDED the process did not run for %v of this rung — the machine slept. "+
+		fmt.Fprintf(w, "  SUSPENDED the process did not run for %v of this rung — the machine slept. "+
 			"Nothing below is a measurement.\n", r.unaccounted.Round(time.Second))
 	}
-	fmt.Printf("  latency   p50 %s  p95 %s  p99 %s  p99.9 %s  max %v\n",
+	fmt.Fprintf(w, "  latency   p50 %s  p95 %s  p99 %s  p99.9 %s  max %v\n",
 		fmtQ(r.all.P50, r.all.P50ok), fmtQ(r.all.P95, r.all.P95ok),
 		fmtQ(r.all.P99, r.all.P99ok), fmtQ(r.all.P999, r.all.P999ok),
 		r.all.Max.Round(time.Microsecond))
-	fmt.Printf("  minus STW p50 %s  p95 %s  p99 %s  p99.9 %s\n",
+	fmt.Fprintf(w, "  minus STW p50 %s  p95 %s  p99 %s  p99.9 %s\n",
 		fmtQ(r.exGC.P50, r.exGC.P50ok), fmtQ(r.exGC.P95, r.exGC.P95ok),
 		fmtQ(r.exGC.P99, r.exGC.P99ok), fmtQ(r.exGC.P999, r.exGC.P999ok))
-	fmt.Printf("  gc        cycles %d  STW %v (%.3f%% of elapsed)  GC CPU share %.1f%%\n",
+	fmt.Fprintf(w, "  gc        cycles %d  STW %v (%.3f%% of elapsed)  GC CPU share %.1f%%\n",
 		r.gcCycles, r.pause.Round(time.Microsecond),
 		100*float64(r.pause)/float64(max(r.elapsed, 1)), 100*r.gcCPU)
 	// Omitted rather than printed as zeros where getrusage does not exist. Four
@@ -594,9 +603,29 @@ func (r benchReport) print() {
 	if r.faults == (loadgen.FaultCounts{}) && r.peakRSS == 0 {
 		return
 	}
-	fmt.Printf("  rusage    minflt %d  majflt %d  nvcsw %d  nivcsw %d  peakrss %.1f MiB (process)\n",
+	fmt.Fprintf(w, "  rusage    minflt %d  majflt %d  nvcsw %d  nivcsw %d  peakrss %.1f MiB (process, %s)\n",
 		r.faults.Minor, r.faults.Major, r.faults.Nvcsw, r.faults.Nivcsw,
-		float64(r.peakRSS)/(1<<20))
+		float64(r.peakRSS)/(1<<20), rssAttribution(r.rssRaised))
+}
+
+// rssAttribution says whether the peak beside it belongs to this rung.
+//
+// "(process)" alone was not enough. A reader holding a rung against a threshold of the
+// form "RSS ≤ N at this rate" reads the printed figure as that rung's, and on a ladder
+// it is the mark the process has reached by then — [FINDINGS](../../docs/FINDINGS.md)
+// milestone 8 §7 is the pass line that ran into it, judging 27.28 q/s against 345.2 MiB
+// that had been set two rungs earlier at half the rate.
+//
+// What a rung *can* say is how much it raised the mark, because that is a difference
+// between two readings and every other field here is already one. A rung that raised it
+// by nothing puts an upper bound on its own peak and no more, and saying so is the
+// whole point: `ru_maxrss` has no during-this-rung reading and nothing here can invent
+// one.
+func rssAttribution(raised int64) string {
+	if raised <= 0 {
+		return "unchanged by this rung — the mark is an earlier one's, and this rung's own peak is only bounded by it"
+	}
+	return fmt.Sprintf("raised %.1f MiB by this rung", float64(raised)/(1<<20))
 }
 
 // ---------------------------------------------------------------- writes
