@@ -9,9 +9,10 @@ milestone's engineering work. The journey below is taken from
 **Branch**: `m7-baseline`
 **Date**: 2026-08-21
 
-Two things are recorded: one RED/GREEN cycle for the instrument the first question
-needs, and the campaign that instrument was built for, which has no such cycle and says
-what stands in for one instead.
+Three things are recorded: one RED/GREEN cycle for the instrument the first question
+needs, the campaign that instrument was built for — which has no such cycle and says what
+stands in for one instead — and a second RED/GREEN cycle for the defect the campaign's
+last run found in the report itself.
 
 ## Why a milestone about throughput starts with a flag
 
@@ -161,6 +162,59 @@ most reproducible figure this project has is published as a rung and not as a he
 That is test 5 holding under the conditions it was written for, and the tension it creates
 is [D-013](../DECISIONS.md)'s second half rather than a defect.
 
+### Defect — a rung printed another rung's peak as its own
+
+**Summary.** The campaign's last run judged milestone 8's pass line, *RSS ≤ 250 MiB at
+27.28 q/s*, against **345.2 MiB** printed at that rung — which was the mark set two rungs
+earlier at 13.64 q/s, half the rate. `ru_maxrss` is a high-water mark the kernel never
+lowers, `benchReport`'s comment has said so since milestone 5, and the line has printed
+`(process)` the whole time. None of that stopped a registered pass line from being written
+as a per-rung threshold, or this milestone from trying to judge one.
+
+`benchRung` now reads the mark before the rung as well as after, and the report prints the
+difference: what **this** rung raised it by, or that it raised nothing and the figure is
+therefore not its own. That is the only per-rung memory statement `getrusage` supports —
+[FINDINGS milestone 8 §8](../FINDINGS.md) and [PERF.md](../PERF.md) §2.7 say what it still
+cannot decide, rather than inventing a per-rung peak.
+
+**RED** — `go test ./cmd/weft-eval/`:
+
+```
+cmd/weft-eval/bench_test.go:327:3: unknown field rssRaised in struct literal of type benchReport
+cmd/weft-eval/bench_test.go:331:10: too many arguments in call to r.print
+	have (*bytes.Buffer)
+	want ()
+cmd/weft-eval/bench_test.go:351:3: unknown field rssRaised in struct literal of type benchReport
+cmd/weft-eval/bench_test.go:355:10: too many arguments in call to r.print
+FAIL	github.com/skyoo2003/weft/cmd/weft-eval [build failed]
+```
+
+Compile-time RED: a field that does not exist and a method arity that does not match. The
+`io.Writer` on `print` is what makes the line assertable at all, which is the same reason
+and the same move milestone 7 made on `benchSummary`. Checkpoint `5360ad1`.
+
+**GREEN** — `go test -race -run TestBenchReport ./cmd/weft-eval/`:
+
+```
+--- PASS: TestBenchReportSaysWhichRungRaisedThePeak (0.00s)
+--- PASS: TestBenchReportRefusesToLetAnEarlierRungsPeakReadAsItsOwn (0.00s)
+ok  	github.com/skyoo2003/weft/cmd/weft-eval	1.516s
+```
+
+Checkpoint `dd33365`.
+
+**Field** — `make bench BENCHFLAGS='-rates 5,10 -rotations 2'`:
+
+```
+rusage  ... peakrss 116.1 MiB (process, raised 0.2 MiB by this rung)
+rusage  ... peakrss 117.6 MiB (process, raised 1.5 MiB by this rung)
+```
+
+**The fix postdates the run it was found by**, and that ordering is deliberate: the run is
+published as it was measured ([FINDINGS milestone 8 §7](../FINDINGS.md)) and no figure in
+that file moves. Changing the instrument first would have put a measurement and its
+instrument in the wrong order, which is what milestone 5 §4.1 discarded two ladders over.
+
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
@@ -171,15 +225,19 @@ is [D-013](../DECISIONS.md)'s second half rather than a defect.
 | 4 | The named ladder is what runs, and the run reports that no rule selected among its rungs | `…:TestBenchRatesPrefersTheExplicitLadderAndDisownsTheRule` | unit | PASS | same |
 | 5 | A four-rung ladder an operator typed publishes no saturation point and no headline, though it satisfies every shape check `RuleApplies` makes, and its rungs' own figures still print | `…:TestBenchSummaryPublishesNoHeadlineForAnOperatorChosenLadder` | unit | PASS | same |
 | 6 | Milestone 7's `benchSummary` guarantees are unmoved by the new parameter — rule-selected headline, never-saturates, cut short, suspended, gap inside tolerance, explicit `-rate`, nothing measured | `…:TestBenchSummary*` (7 tests) | regression | PASS | same |
-| 7 | The engine is untouched | `git diff --stat pkg/` | gate | PASS (empty) | `make all`, `make deps`, `make bench-build` |
+| 7 | A rung that raised the process peak says by how much, so the figure can be attributed to it | `…:TestBenchReportSaysWhichRungRaisedThePeak` | unit | PASS | `go test -race -run TestBenchReport ./cmd/weft-eval/` |
+| 8 | A rung that raised the peak by nothing says the mark is not its own, so it cannot be read against a per-rung threshold | `…:TestBenchReportRefusesToLetAnEarlierRungsPeakReadAsItsOwn` | unit | PASS | same |
+| 9 | The engine is untouched | `git diff --stat pkg/` | gate | PASS (empty) | `make all`, `make deps`, `make bench-build` |
 
 ## Coverage and known gaps
 
 ```
-go test -coverprofile … ./cmd/weft-eval/   →  44.3% of statements (package)
-go tool cover -func …                      →  benchRates   100.0%
-                                              benchSummary 100.0%
-                                              benchFlags    84.6%
+go test -coverprofile … ./cmd/weft-eval/   →  45.0% of statements (package)
+go tool cover -func …                      →  benchRates      100.0%
+                                              benchSummary    100.0%
+                                              rssAttribution  100.0%
+                                              benchFlags       84.6%
+                                              print            77.8%
 ```
 
 The package figure is not the metric, for the reason milestone 7's report gives: this
@@ -204,8 +262,16 @@ functions this change touched are the row that matters.
    measurement, and its procedure is registered rather than asserted — the same
    division milestone 7's report draws between its tasks 1 and 2.
 4. **`make lint-docs` was not run**: `markdownlint-cli2` is not installed on this
-   machine (`command -v` returns nothing). CI runs it. The changelog entry was
-   validated with `changie batch patch --dry-run`, which rendered it.
+   machine (`command -v` returns nothing). CI runs it. The changelog entries were
+   validated with `changie batch patch --dry-run`, which rendered them.
+5. **`print` at 77.8%.** The two branches the new tests do not enter are the `SUSPENDED`
+   line — asserted through `benchSummary` instead, where it changes a verdict — and the
+   no-`getrusage` omission, which is a characterisation of behaviour that predates this
+   cycle rather than something it introduced.
+6. **No test asserts `rssRaised` is wired correctly in `benchRung`.** It is one
+   subtraction between two `loadgen.MaxRSS()` reads, and asserting it needs the 626 MiB
+   corpus — the same gap as gap 1's family. The field smoke run above is what covers it,
+   quoted rather than summarised.
 
 ## Interpretation notes
 
@@ -237,3 +303,13 @@ If these checkpoints are squashed, the summary that must survive:
 - **Registration** — [PERF.md](../PERF.md) §3 rule 1 gains the third case the shape
   check cannot see, and §5.2 registers the four-run experiment with what each outcome
   licenses, before it runs.
+- **Campaign** `a662dfc` — four runs, 25.67 q/s reproduced to 0.07% behind a deep prefix,
+  rule 3 repaired, D-013. Then the pass-line run: shed 0 and p50 37.631 ms met at
+  27.28 q/s, RSS undecidable.
+- **RED** `5360ad1` — two assertions that a rung may not print another rung's peak as its
+  own; build failed on `unknown field rssRaised` and `too many arguments in call to
+  r.print`.
+- **GREEN** `dd33365` — `rssRaised` is the mark's increase across the rung, `print` takes
+  an `io.Writer`, and a rung that raised nothing says the figure is not its own. 2/2 PASS
+  under `-race`, `rssAttribution` 100%, field-verified. `pkg/` diff empty, and the fix
+  postdates the run that found it.

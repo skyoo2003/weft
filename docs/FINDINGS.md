@@ -1847,8 +1847,11 @@ rung rather than a headline. Preferring that to relaxing rule 1 is
 
 ## 6. Carried forward
 
-1. **`-rates 3.41,6.82,13.64,27.28`** — the one run that decides whether milestone 8
-   has engineering work in it. 97 minutes (§4).
+1. ~~**`-rates 3.41,6.82,13.64,27.28`** — the one run that decides whether milestone 8
+   has engineering work in it. 97 minutes (§4).~~ **Run — §7.** shed 0 and p50 37.631 ms
+   met; RSS not decidable (§8). What is left is not "the wall": it is a middle-rung
+   excursion — p99 849.853 ms at 13.64 q/s under a clean top rung — and a pass line whose
+   memory clause needs the PRD to choose a reading.
 2. **A deep prefix at `inflight` 10** is untested, so §5.2's outcome-1 condition is
    half-satisfied (§5.1).
 3. **The pacer explanation is a correlation over four runs** (§3). A heap-goal trace
@@ -1857,3 +1860,89 @@ rung rather than a headline. Preferring that to relaxing rule 1 is
    upper bound is a single caveated observation.
 5. **`text+vector` still has no published tail**, and under [D-013](DECISIONS.md) it
    can no longer afford three repetitions of one either (§5.2).
+6. **The middle-rung excursion is uncharacterised** (§7). Two ladders, and in one of them
+   the 50% rung produced a p99 thirteen times the other's and raised the process peak by
+   206.6 MiB while shedding nothing. It is invisible in p50 and it sits *below* a clean
+   top rung, so nothing in the current pass line would catch it.
+7. **The memory clause needs a reading chosen** (§8). Per-rung strict is undecidable with
+   `getrusage`; ladder-wide is a miss at 345.2 MiB and fires milestone 10. That choice is
+   a registered pass-line change and belongs to the PRD.
+
+## 7. The pass line, judged — 27.28 q/s with the prefix held
+
+Milestone 8's registered targets are shed 0, RSS ≤ 250 MiB and p50 ≤ 100 ms at
+27.28 q/s. §4 said one run decides it. That run is
+`-rates 3.41,6.82,13.64,27.28`, the same ladder scaled to milestone 5's baseline,
+`-rotations 200`, `inflight` 40:
+
+| rung | rate | p50 | p95 | p99 | shed | peak RSS | raised here | GC cycles |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 12.5% | 3.41/s | 75.480 ms | 96.165 ms | 107.807 ms | 0 | 116.6 MiB | +116.6 | 24,198 |
+| 25% | 6.82/s | 48.788 ms | 77.115 ms | 139.897 ms | 0 | 138.6 MiB | +22.0 | 23,466 |
+| 50% | 13.64/s | 40.974 ms | **214.244 ms** | **849.853 ms** | 0 | **345.2 MiB** | **+206.6** | 22,466 |
+| **100%** | **27.28/s** | **37.631 ms** | 52.663 ms | **68.485 ms** | **0** | 345.2 MiB | **+0** | 22,902 |
+
+**Two of three met, and the third is not decidable by the instrument that ran.**
+
+- **shed 0 at 27.28 q/s — met.** Zero of ten thousand.
+- **p50 ≤ 100 ms — met.** 37.631 ms, against an unloaded 35.332 ms.
+- **RSS ≤ 250 MiB — not decidable.** The 345.2 MiB printed at that rung is the mark
+  set two rungs earlier at half the rate; this rung added nothing to it. §8.
+
+**Milestone 5's collapse at 27.28 q/s does not reproduce.** That run reported p50
+1.27 s and 1,438 of 10,000 shed at this rate; this one reports 37.631 ms and shed 0.
+Taken with §4, the 6.3% band closes from above as well: with the prefix held, both
+25.67 and 27.28 q/s are flat, and the two figures are 0.5% apart (37.827 ms and
+37.631 ms). **What milestone 5 measured at 27.28 q/s was not a property of the rate.**
+
+**The excursion is at the middle rung, not the top.** 13.64 q/s shed nothing and still
+produced a p99 of 849.853 ms and raised the process peak by 206.6 MiB. The same rung
+position in the 25.67 ladder — 12.84 q/s, 6% less load — gave p99 62.999 ms and raised
+the mark by 0.1 MiB. Thirteen times the tail and two thousand times the memory, and
+**the p50 sees none of it**: 40.974 ms against 40.351 ms. Two ladders now place an
+excursion below a clean top rung, which is not the shape "the throughput wall" names.
+
+**Run hygiene.** 05:14:02 to 06:45:52, 91 m 50 s of wall clock against 91 m 38 s of
+rungs plus a 10 s warm-up and a 1.7 s cold pass. No `SUSPENDED`. The machine did sleep
+for 4.7 hours — the command was launched at 00:33 and the shell's own `date` printed
+05:14:02 — but the sleep is entirely *before* the process started, so it contains no
+measurement and there is nothing for the suspension check to see. A `date` either side
+is what makes that statement checkable rather than assumed, and it is the habit that
+caught [milestone 7 §4.1](#milestone-7--a-baseline-nobody-has-to-qualify). Unloaded p50
+35.332 ms against the 25.67 ladder's 36.796 ms, 4% apart: no drift.
+
+## 8. A rung cannot say what its own peak was
+
+`ru_maxrss` is a high-water mark the kernel never lowers. `benchReport`'s comment has
+said so since milestone 5 and the report has printed `(process)` next to the figure the
+whole time. Neither stopped this milestone's own pass line from being written as a
+per-rung threshold, and neither stopped this milestone from trying to judge it against a
+number belonging to a different rung.
+
+What a rung *can* say is **how much it raised the mark** — a difference between two
+readings, which is what every other field on that line already is. It now says it:
+
+```
+rusage  ... peakrss 116.1 MiB (process, raised 0.2 MiB by this rung)
+rusage  ... peakrss 345.2 MiB (process, unchanged by this rung — the mark is an
+            earlier one's, and this rung's own peak is only bounded by it)
+```
+
+The fix **postdates the run above** and no figure in this file moves because of it; what
+changes is what a future ladder is allowed to imply. What it does not do is invent a
+per-rung peak: `getrusage` has no during-this-rung reading, and giving each rung its own
+process would destroy the prefix §2 has just established as load-bearing.
+
+**So the pass line as written is not decidable on a ladder by this instrument**, and two
+readings of it are available:
+
+- **Per-rung, strict** — undecidable. The rung raised the mark by zero, so its own peak
+  is somewhere at or below 345.2 MiB and was not measured.
+- **Ladder-wide** — 345.2 MiB against 250 MiB is a **miss**, and milestone 10's trigger
+  condition fires.
+
+**Both are published and neither is chosen here.** Picking between them is a change to a
+registered pass line, which belongs to the PRD, and the reason to prefer one of them at
+this moment is which verdict it produces — the objection
+[D-012](DECISIONS.md) raised about repairing rule 3 from inside the campaign that broke
+it, in a different place.

@@ -165,6 +165,36 @@ support. There is no portable way to drop the page cache, so "cold" here means
 warm host cache is warmer than the first. The cold line is read for its `majflt`,
 not for its latency.
 
+### 2.7 The memory figure is the process's, and only its increase belongs to a rung
+
+`peakrss` is `ru_maxrss`: a high-water mark the kernel never lowers and offers no way to
+reset. There is no during-this-rung reading of it, so on a ladder the figure a rung
+prints is **the peak the process has reached by the end of that rung**, cold pass and
+every earlier rung included.
+
+The line has always said `(process)`, and that turned out not to be enough. Milestone 8's
+own pass line was written as *RSS ≤ 250 MiB at 27.28 q/s*, and the ladder that judged it
+printed 345.2 MiB there — the mark set two rungs earlier at half the rate
+([FINDINGS milestone 8 §7](FINDINGS.md)). So each rung now also prints **how much it
+raised the mark**, a difference between two readings and therefore the one per-rung
+memory statement `getrusage` can support:
+
+```
+peakrss 116.1 MiB (process, raised 0.2 MiB by this rung)
+peakrss 345.2 MiB (process, unchanged by this rung — the mark is an earlier one's, and
+                   this rung's own peak is only bounded by it)
+```
+
+What this **cannot** decide is a per-rung threshold for a rung that raised nothing: that
+rung's own peak is bounded above by the mark and unmeasured below it. A threshold of that
+form is decidable only against the **ladder's** peak, which is a stricter and different
+claim. Which of the two a pass line means is a property of the pass line, and
+[FINDINGS milestone 8 §8](FINDINGS.md) is where one of them ran out of instrument.
+
+Giving each rung its own process would give each a clean mark and destroy the ladder
+prefix that rule 3, repaired, has just established as the thing a repetition must hold.
+The prefix is worth more than the attribution.
+
 ## 3. Judgment rules — fixed before the numbers exist
 
 Rules 1 and 2 were registered in `.claude/plans/weft-m5.plan.md` before the
