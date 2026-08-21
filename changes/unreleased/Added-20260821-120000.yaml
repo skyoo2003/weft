@@ -1,0 +1,15 @@
+kind: Added
+body: '`weft-eval bench -rates 3.21,6.42,12.84,25.67` runs the rates you name, in order,
+  instead of the sweep `-rate 0` derives from that run''s sequential throughput. It exists
+  because a derived sweep cannot ask whether a rung''s result depends on the rungs before
+  it: two runs land on different rates, so the history is confounded with the load. A
+  named ladder gets no saturation point and no headline — it satisfies every shape check
+  the load-point rule makes, and an operator who chose the rungs has chosen the load
+  point at one remove, so provenance now travels with the rates rather than being
+  inferred from their shape. Every entry is held to the bounds a lone `-rate` gets, at
+  flag time rather than at dispatch, because a four-rung sweep whose third entry was a
+  typo is ninety minutes spent before anything says so. The experiment it was built for
+  is registered in `docs/PERF.md` section 5.2. No exported API under `pkg/` moved.'
+time: 2026-08-21T12:00:00.000000000+09:00
+custom:
+  Issue: 14

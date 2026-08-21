@@ -207,7 +207,19 @@ rung intended**. Two shapes fail it:
   never ran, and quoted a headline off the rung the interrupt truncated. They now
   pass the ladder they *intended*.
 
-In either case the summary says how far the run got, suppresses the claim, and
+**A ladder the operator named** is the third case, and the only one the shape check
+cannot see. `-rates 3.21,6.42,12.84,25.67` is four rungs with every one of them
+intended, so it satisfies `RuleApplies` completely — a hand-typed sweep would
+otherwise be quoted as though rule 1 had selected from it. What disqualifies it is
+not its shape but where it came from: choosing the rungs and then letting the rule
+pick among them is the same act as choosing the load point, at one remove. So
+provenance travels out of `benchRates` beside the rates rather than being re-derived
+at the bottom of the summary, where by then there is nothing left to read it off.
+Each entry in the list is held to the bounds a lone `-rate` gets, and held to them at
+flag time: a four-rung sweep whose third entry was a typo is ninety minutes spent
+before anything says so.
+
+In all three cases the summary says how far the run got, suppresses the claim, and
 still prints every rung's own figures. Suppressing a claim is not suppressing a
 measurement — rule 3's second and third repetitions are read off exactly that
 path. No published milestone 5 figure moves: that ladder completed.
@@ -371,6 +383,13 @@ reach a p99 taken over ten thousand.
 Rules 3 and 4 in commands. Roughly 14.6 hours, so it is written down rather than
 remembered.
 
+**Rule 3 was falsified by the campaign this sequence describes** — see the marking on
+[rule 3](#3-judgment-rules--fixed-before-the-numbers-exist) and
+[D-012](DECISIONS.md). The three commands below still run, and repetitions 2 and 3
+still produce figures; what they do not produce is three observations of one rung.
+Read this as the record of an attempt. What replaces it depends on
+[§5.2](#52-what-a-repetition-must-hold-constant--registered-before-it-is-measured).
+
 ```bash
 # ---- text arm: one ladder, then the same rung twice more (rule 3)
 make bench                                   # repetition 1. Read R off the HEADLINE line.
@@ -400,6 +419,78 @@ The reason any of this is a procedure rather than a habit: a single run on a
 shared machine is a number nobody can reproduce, which is the lesson
 [FINDINGS](FINDINGS.md) milestone 4 §4.2 paid for once already, and milestone 5
 §4.5 paid for again.
+
+### 5.2 What a repetition must hold constant — registered before it is measured
+
+Milestone 7 measured 25.67 q/s three times and got 37.9 ms, 1.539 s and 416 ms
+([FINDINGS milestone 7 §1](FINDINGS.md)). The one structural difference that survived
+every check: the flat observation was the **fourth rung of a ladder**, ninety-one
+minutes into the process; the two collapses were that rate **alone**, out of a
+200-request warm-up. Two readings remain and neither has been varied deliberately —
+a GC pacer that arrived at the load with a heap goal already grown to meet it, or
+`inflight` 40 admitting a burst at rung start that a process climbing from a lower
+rung never sees (§3 there).
+
+`-rate 0` cannot separate them. The sweep derives its five rates from whatever that
+run's sequential throughput happens to be, so a with-prefix run and a without-prefix
+run land on different rates and prefix is confounded with rate. `-rates` names them,
+and a named ladder gets no headline — which is correct here, because nothing in this
+experiment is a load point the rule selected.
+
+Four runs, two variables, all at `-rotations 200` so the rung under test carries the
+10,000 samples [§2.3](#23-quantiles-nearest-rank-and-absent-when-thin) requires:
+
+```bash
+# The prefix is reproduced, not shortened: 91 minutes of climbing is the variable.
+caffeinate -dimsu make bench BENCHFLAGS='-rates 3.21,6.42,12.84,25.67'
+caffeinate -dimsu make bench BENCHFLAGS='-rates 3.21,6.42,12.84,25.67 -inflight 10'
+
+# The same rate alone, which is what repetitions 2 and 3 were.
+caffeinate -dimsu make bench BENCHFLAGS='-rates 25.67'
+caffeinate -dimsu make bench BENCHFLAGS='-rates 25.67 -inflight 10'
+```
+
+Both arms go through `-rates` rather than one through `-rate`, so provenance is
+identical across all four and the only things that differ are the two variables.
+`inflight` 40 is this host's default — 4 per core at `GOMAXPROCS` 10 — and 10 is one
+per core, the other principled point on the same rule rather than a tuned value.
+
+**Compared, at the 25.67 q/s rung only:** p50, shed count, peak RSS, GC cycles. Those
+are the four figures whose milestone 7 values are already on the page. No headline is
+quoted from any of these runs.
+
+| | machine time |
+| --- | --- |
+| with prefix, `inflight` 40 | 1.6 h |
+| with prefix, `inflight` 10 | 1.6 h |
+| no prefix, `inflight` 40 | 7 min |
+| no prefix, `inflight` 10 | 7 min |
+
+Roughly 3.5 hours, and almost all of it is the prefix. That asymmetry is the finding's
+price: the cheap arm is the one already measured three times.
+
+**What each outcome licenses, fixed now:**
+
+1. **The collapse follows the prefix at both `inflight` values** — a repetition must
+   hold the ladder prefix constant. The cost is that a repetition becomes a ladder
+   again, which [D-011](DECISIONS.md) showed cannot be compared across sweeps whose
+   rates are derived — so the rungs must be *named*, which is what `-rates` is for.
+2. **The collapse follows `inflight` at both prefixes** — the burst reading. `inflight`
+   becomes a constant the procedure states rather than a default that happens to be
+   4 per core on this host.
+3. **Both move it** — both are pinned, and every published figure quotes both.
+4. **Neither reproduces the collapse** — the lone rung at 25.67 q/s runs flat this
+   time — then the variable is something not yet named, the published run count stays
+   at **one**, and no further arm is added looking for a shape that reproduces. Rule 5
+   clause 4's reason applies unchanged: measuring until the answer settles is the
+   failure this section exists to prevent.
+
+**This is an experiment, not a replacement for rule 3.** [D-012](DECISIONS.md) decided
+that the repair may not be chosen inside the milestone whose numbers falsified the
+rule, because three candidate repairs were already visible and the reason to prefer
+one was which run it would have made look reproducible. Registering the experiment and
+what each result licenses — before the result exists — is what makes the repair
+choosable later without that objection.
 
 ### Machine
 
