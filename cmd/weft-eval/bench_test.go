@@ -44,6 +44,118 @@ func benchMillis(n ...int) []time.Duration {
 	return out
 }
 
+// The question milestone 7 closed on is what a repetition has to hold constant: the
+// same rate gave 37.9 ms as a ladder's fourth rung and 1.539 s as a rung on its own
+// (FINDINGS milestone 7 §1). Deciding that needs the same arrival rate behind two
+// different prefixes, and `-rate 0` cannot express it — the sweep derives its five
+// rates from whatever that run's sequential throughput happens to be, so the "with
+// prefix" arm lands on a different rate than the "without" arm and prefix is
+// confounded with rate.
+//
+// `-rates` names them. What it must not do is let a hand-picked ladder wear a rule's
+// label: an operator who chose the rungs has chosen the load point at one remove, and
+// PERF.md §3 rule 1 exists against exactly that.
+
+// TestBenchFlagsParsesAnExplicitLadder is the flag doing its job, whitespace and all —
+// the rates get copied out of a report and a report has spaces in it.
+func TestBenchFlagsParsesAnExplicitLadder(t *testing.T) {
+	o, err := benchFlags([]string{"-data", t.TempDir(), "-rates", "3.21, 6.42,12.84 ,25.67"})
+	if err != nil {
+		t.Fatalf("benchFlags: %v", err)
+	}
+	want := []float64{3.21, 6.42, 12.84, 25.67}
+	if len(o.rates) != len(want) {
+		t.Fatalf("parsed %v, want %v", o.rates, want)
+	}
+	for i := range want {
+		if o.rates[i] != want[i] {
+			t.Errorf("rate %d = %v, want %v", i, o.rates[i], want[i])
+		}
+	}
+}
+
+// TestBenchFlagsRefusesAnExplicitLadderBesideAnExplicitRate: the two flags answer the
+// same question and one of them would win silently.
+func TestBenchFlagsRefusesAnExplicitLadderBesideAnExplicitRate(t *testing.T) {
+	_, err := benchFlags([]string{"-data", t.TempDir(), "-rate", "25.67", "-rates", "3.21,25.67"})
+	if err == nil {
+		t.Fatal("both -rate and -rates were accepted; one of them was about to be ignored")
+	}
+	if !strings.Contains(err.Error(), "-rate") || !strings.Contains(err.Error(), "-rates") {
+		t.Errorf("error = %v, want it to name both flags", err)
+	}
+}
+
+// TestBenchFlagsRefusesARateInsideALadderItWouldRejectAlone holds the list to the same
+// bounds a single -rate gets.
+//
+// The reason is in benchFlags' own comment about -rate: a non-positive or non-finite
+// rate makes an interval that dispatches the whole rung at once and prints the result
+// as a distribution. A list is not a place where that stops being true, and a
+// four-rung sweep whose third entry was a typo is ninety minutes spent before
+// anything says so.
+func TestBenchFlagsRefusesARateInsideALadderItWouldRejectAlone(t *testing.T) {
+	for _, bad := range []string{"abc", "-5", "0", "3.21,0", "3.21,,6.42", "NaN", "Inf", "3.21,2e9", "  "} {
+		t.Run(bad, func(t *testing.T) {
+			if _, err := benchFlags([]string{"-data", t.TempDir(), "-rates", bad}); err == nil {
+				t.Errorf("-rates=%q was accepted", bad)
+			}
+		})
+	}
+}
+
+// TestBenchRatesPrefersTheExplicitLadderAndDisownsTheRule pins both halves: which
+// rates run, and whether the run may say a rule chose among them.
+func TestBenchRatesPrefersTheExplicitLadderAndDisownsTheRule(t *testing.T) {
+	unloaded := 40 * time.Millisecond // 25 q/s sequential
+
+	got, ruleLadder := benchRates(0, []float64{3.21, 25.67}, unloaded)
+	if len(got) != 2 || got[0] != 3.21 || got[1] != 25.67 {
+		t.Errorf("explicit ladder = %v, want [3.21 25.67]", got)
+	}
+	if ruleLadder {
+		t.Error("an operator-chosen ladder claimed to be the rule's own")
+	}
+
+	got, ruleLadder = benchRates(25.67, nil, unloaded)
+	if len(got) != 1 || got[0] != 25.67 {
+		t.Errorf("single rate = %v, want [25.67]", got)
+	}
+	if ruleLadder {
+		t.Error("an operator-chosen rate claimed to be the rule's own")
+	}
+
+	got, ruleLadder = benchRates(0, nil, unloaded)
+	if len(got) != len(loadgen.Ladder) {
+		t.Errorf("sweep = %v, want %d rungs", got, len(loadgen.Ladder))
+	}
+	if !ruleLadder {
+		t.Error("the sweep disowned the rule; then nothing can ever publish a headline")
+	}
+}
+
+// TestBenchSummaryPublishesNoHeadlineForAnOperatorChosenLadder is the guard the flag
+// needs. A four-rung ladder someone typed satisfies every shape check — two or more
+// rungs, all of them measured — and would otherwise be quoted as though rule 1 had
+// selected it from a sweep.
+func TestBenchSummaryPublishesNoHeadlineForAnOperatorChosenLadder(t *testing.T) {
+	rates := []float64{3.21, 6.42, 12.84, 25.67}
+	p50s := benchMillis(40, 41, 43, 900)
+	var w bytes.Buffer
+
+	benchSummary(&w, benchArmText, false, rates, p50s, benchLadderReports(rates, p50s), 40*time.Millisecond)
+
+	got := w.String()
+	if strings.Contains(got, "HEADLINE") || strings.Contains(got, "saturation:") {
+		t.Errorf("a hand-picked ladder was published under the rule's label:\n%s", got)
+	}
+	// Suppressing the claim is not suppressing the measurement — the experiment this
+	// flag exists for reads the rungs.
+	if !strings.Contains(got, "25.67") {
+		t.Errorf("the rungs printed no figures:\n%s", got)
+	}
+}
+
 // TestBenchSummaryQuotesARuleSelectedHeadlineOnAFullLadder is the case the rule was
 // written for, here so that the suppression tests below cannot pass by suppressing
 // everything.
@@ -52,7 +164,7 @@ func TestBenchSummaryQuotesARuleSelectedHeadlineOnAFullLadder(t *testing.T) {
 	p50s := benchMillis(40, 41, 43, 50, 900)
 	var w bytes.Buffer
 
-	benchSummary(&w, benchArmText, rates, p50s, benchLadderReports(rates, p50s), 40*time.Millisecond)
+	benchSummary(&w, benchArmText, true, rates, p50s, benchLadderReports(rates, p50s), 40*time.Millisecond)
 
 	got := w.String()
 	if !strings.Contains(got, "saturation:") {
@@ -72,7 +184,7 @@ func TestBenchSummaryOnALadderThatNeverSaturatesQuotesItsTopRung(t *testing.T) {
 	p50s := benchMillis(40, 41, 43, 50, 60) // none past 2x the 40ms unloaded median
 	var w bytes.Buffer
 
-	benchSummary(&w, benchArmText, rates, p50s, benchLadderReports(rates, p50s), 40*time.Millisecond)
+	benchSummary(&w, benchArmText, true, rates, p50s, benchLadderReports(rates, p50s), 40*time.Millisecond)
 
 	got := w.String()
 	if !strings.Contains(got, "not reached") {
@@ -98,7 +210,7 @@ func TestBenchSummaryPublishesNoHeadlineForALadderCutShort(t *testing.T) {
 	p50s := benchMillis(40, 41, 43) // interrupted during rung 3 of 5
 	var w bytes.Buffer
 
-	benchSummary(&w, benchArmText, rates, p50s, benchLadderReports(rates, p50s), 40*time.Millisecond)
+	benchSummary(&w, benchArmText, true, rates, p50s, benchLadderReports(rates, p50s), 40*time.Millisecond)
 
 	got := w.String()
 	if strings.Contains(got, "HEADLINE") {
@@ -130,7 +242,7 @@ func TestBenchSummaryPublishesNoHeadlineWhenARungWasSuspended(t *testing.T) {
 	reports[0].unaccounted = 12*time.Hour + 20*time.Minute
 
 	var w bytes.Buffer
-	benchSummary(&w, benchArmText, rates, p50s, reports, 40*time.Millisecond)
+	benchSummary(&w, benchArmText, true, rates, p50s, reports, 40*time.Millisecond)
 
 	got := w.String()
 	if strings.Contains(got, "HEADLINE") || strings.Contains(got, "saturation:") {
@@ -150,7 +262,7 @@ func TestBenchSummaryIsUnmovedByAGapInsideTheTolerance(t *testing.T) {
 	reports[0].unaccounted = 2 * time.Second
 
 	var w bytes.Buffer
-	benchSummary(&w, benchArmText, rates, p50s, reports, 40*time.Millisecond)
+	benchSummary(&w, benchArmText, true, rates, p50s, reports, 40*time.Millisecond)
 
 	if got := w.String(); !strings.Contains(got, "HEADLINE") {
 		t.Errorf("a 2s clock adjustment suppressed the headline; every rung on a laptop "+
@@ -165,7 +277,7 @@ func TestBenchSummaryPublishesNoHeadlineForAnExplicitRate(t *testing.T) {
 	p50s := benchMillis(40)
 	var w bytes.Buffer
 
-	benchSummary(&w, benchArmText, rates, p50s, benchLadderReports(rates, p50s), 15*time.Millisecond)
+	benchSummary(&w, benchArmText, true, rates, p50s, benchLadderReports(rates, p50s), 15*time.Millisecond)
 
 	got := w.String()
 	if strings.Contains(got, "HEADLINE") || strings.Contains(got, "saturation:") {
@@ -182,7 +294,7 @@ func TestBenchSummaryPublishesNoHeadlineForAnExplicitRate(t *testing.T) {
 // before the first rung finishes.
 func TestBenchSummaryPrintsNothingWhenNothingWasMeasured(t *testing.T) {
 	var w bytes.Buffer
-	benchSummary(&w, benchArmText, []float64{1, 2, 4, 8, 16}, nil, nil, 40*time.Millisecond)
+	benchSummary(&w, benchArmText, true, []float64{1, 2, 4, 8, 16}, nil, nil, 40*time.Millisecond)
 	if w.Len() != 0 {
 		t.Errorf("a run with no completed rung printed %q", w.String())
 	}
