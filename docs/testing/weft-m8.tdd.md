@@ -9,9 +9,9 @@ milestone's engineering work. The journey below is taken from
 **Branch**: `m7-baseline`
 **Date**: 2026-08-21
 
-One cycle is recorded so far: the instrument the first question needs. The
-measurement it was built for is registered in [PERF.md](../PERF.md) §5.2 and has not
-been run — that ordering is deliberate and is the point of §5.2's last paragraph.
+Two things are recorded: one RED/GREEN cycle for the instrument the first question
+needs, and the campaign that instrument was built for, which has no such cycle and says
+what stands in for one instead.
 
 ## Why a milestone about throughput starts with a flag
 
@@ -128,6 +128,38 @@ shape check cannot catch: two rungs, both intended, so `RuleApplies` is **true**
 suppression comes entirely from provenance. Every quantile prints `--` because 100
 samples is below the floor [PERF.md](../PERF.md) §2.3 sets even for a p50 — that is the
 sample rule doing its job on a deliberately short smoke run, not the flag.
+
+### The campaign — no RED/GREEN, and what stands in for one
+
+**Summary.** Four runs at 25.67 q/s, 2026-08-21 22:10 to 2026-08-22 00:25 KST, about
+two hours of exclusive machine time. The prefix reading held: reached as the fourth rung
+of a ladder run to 10,000 samples per rung, the rate that gave 37.9 ms and 1.539 s in
+milestone 7 gave **37.827 ms with shed 0** — 0.07% from its first observation, with the
+collector's cycle count 0.12% apart. Verdict, all four runs and every caveat are
+[FINDINGS milestone 8](../FINDINGS.md); the repair it licensed is
+[D-013](../DECISIONS.md).
+
+**A measurement has no RED gate**, and inventing one would be theatre. What it has
+instead is a pass line of its own, and it is the same one milestone 7's task 2 was held
+to: **the procedure and the interpretation of every outcome are committed before the
+first run.** That commit is `86df620` — [PERF.md](../PERF.md) §5.2, with all four
+outcomes written down — and the first run started after it. `git log --oneline -- docs/PERF.md`
+is where that order is checkable, and it is checkable on purpose.
+
+The pass line held in the direction that costs something. Clause 4 said that if the lone
+rung ran flat this time, the variable was not named yet and the published run count
+stayed at one. It did not run flat, so clause 4 was not needed — but clause 1's registered
+wording was *"at both `inflight` values"* and only one was run, so the outcome is reported
+as **half-tested** rather than as fired clean ([FINDINGS milestone 8 §5.1](../FINDINGS.md),
+[PERF.md](../PERF.md) §5.2's outcome note). Two further deviations — a reorder and a cut
+probe — are recorded in the same two places.
+
+**What the instrument's own tests bought here.** Three of the five assertions from the
+cycle above ran for real in this campaign rather than in a test binary: every one of the
+four runs printed *"a ladder you named ... no saturation point and no headline"*, so the
+most reproducible figure this project has is published as a rung and not as a headline.
+That is test 5 holding under the conditions it was written for, and the tension it creates
+is [D-013](../DECISIONS.md)'s second half rather than a defect.
 
 ## Test specification
 

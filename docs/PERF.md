@@ -234,8 +234,10 @@ did to the graph scorer and what this repository does with a result it did not
 want.
 
 **Rule 3 — what a repetition is, and what the headline is the median of.**
-**FALSIFIED 2026-08-21 by the campaign it governed. Left standing and marked rather
-than rewritten — [D-012](DECISIONS.md).**
+**FALSIFIED 2026-08-21 by the campaign it governed, then REPAIRED 2026-08-22 by the
+experiment §5.2 registered against it. The falsified form is left standing below as the
+record of an attempt; the repaired form is at the end of this rule —
+[D-012](DECISIONS.md), [D-013](DECISIONS.md).**
 
 > The rule directs a median over three observations of one rung. Three observations
 > at 25.67 q/s gave 37.9 ms, 1.539 s and 416 ms, and two of them shed enough to fall
@@ -243,9 +245,10 @@ than rewritten — [D-012](DECISIONS.md).**
 > collapses were single rungs out of a warm-up. **A rung measured alone is not the
 > same rung.** So there is no median, and the arithmetic below — still correct about
 > why three sweeps cannot be compared — was answering the wrong question. What a
-> repetition must hold constant is an open question against milestone 8,
-> [FINDINGS milestone 7 §6](FINDINGS.md). Read the rest of this rule as the record of
-> an attempt rather than as a procedure to run.
+> repetition must hold constant was an open question against milestone 8, and
+> [FINDINGS milestone 8 §2](FINDINGS.md) answers it: the ladder prefix, at depth. Read
+> the rest of this paragraph and the table under it as the record of an attempt rather
+> than as a procedure to run. The procedure is *rule 3, repaired*, below.
 
 §5 has said "the median of three repetitions with the spread reported beside it"
 since milestone 5, and milestone 5 published one run
@@ -279,6 +282,30 @@ the spread is made of:
 - **That R is quoted to two decimals.** The summary prints `%.2f`, and repetitions
   2 and 3 are run at the rounded figure — about 0.04% off repetition 1's actual
   rung. Stated rather than discovered later.
+
+**Rule 3, repaired — a repetition is the ladder, with its rates named.**
+
+The arithmetic above is right that rates cannot be *derived* twice. What does not follow
+is that the ladder cannot be the unit: name the rates and the difficulty is gone. `-rates`
+is that instrument, and the reproduction that licensed this is
+[FINDINGS milestone 8 §2](FINDINGS.md) — the same ladder rung for rung, its headline rung
+0.07% from the observation milestone 7 could not repeat.
+
+| | command | what it produces |
+| --- | --- | --- |
+| repetition 1 | `-rate 0` | the full ladder. Rule 1 selects the headline rate **R** |
+| repetition 2 | `-rates <repetition 1's rungs, through R>` | the same ladder and the same prefix, rates named rather than derived |
+| repetition 3 | `-rates <repetition 1's rungs, through R>` | again |
+
+Everything above still holds unchanged: the median of the three at R with the spread
+beside it, each repetition's own unloaded p50 recorded, R quoted to two decimals, and no
+headline label on repetitions 2 and 3 — R was selected once, by the sweep, and is being
+reused.
+
+What it costs: a repetition is now the whole ladder up to R, roughly **97 minutes** for
+the `text` arm rather than 6.5, so three of them is 4.9 hours. `text+vector` gets one
+named ladder rather than three, which is rule 6's first cut applied to a budget that
+grew. [D-013](DECISIONS.md) carries the argument and what would show it wrong.
 
 **Rule 4 — how the `text+vector` arm gets a p99.**
 
@@ -387,8 +414,18 @@ remembered.
 [rule 3](#3-judgment-rules--fixed-before-the-numbers-exist) and
 [D-012](DECISIONS.md). The three commands below still run, and repetitions 2 and 3
 still produce figures; what they do not produce is three observations of one rung.
-Read this as the record of an attempt. What replaces it depends on
-[§5.2](#52-what-a-repetition-must-hold-constant--registered-before-it-is-measured).
+Read this as the record of an attempt. **What replaces it is the campaign below** —
+`-rate 0` once, then the same ladder named twice, from *rule 3, repaired*.
+
+```bash
+# ---- text arm, repaired: one sweep, then the same ladder named twice
+make bench                                                   # repetition 1. Read R and its rungs off the report.
+make bench BENCHFLAGS='-rates <rungs through R>'             # repetition 2
+make bench BENCHFLAGS='-rates <rungs through R>'             # repetition 3
+```
+
+Roughly 4.9 hours for the `text` arm alone. bleve gets the same treatment; `text+vector`
+gets one named ladder, under rule 6's first cut.
 
 ```bash
 # ---- text arm: one ladder, then the same rung twice more (rule 3)
@@ -492,6 +529,23 @@ one was which run it would have made look reproducible. Registering the experime
 what each result licenses — before the result exists — is what makes the repair
 choosable later without that objection.
 
+**Outcome, 2026-08-22: clause 1 fired.** The verdict and every figure are
+[FINDINGS milestone 8](FINDINGS.md); the repair it licensed is *rule 3, repaired*, above,
+and [D-013](DECISIONS.md). What ran differed from what is registered above in three
+ways, recorded here because a procedure that gets edited to match what happened is not a
+procedure:
+
+1. **Reordered** — the two no-prefix arms ran first. Outcome 4 would have made the
+   expensive arms pointless and they cost seven minutes each to rule out.
+2. **A cut probe inserted** — the with-prefix arm was first run at `-rotations 40`
+   (~20 min) on the argument that p50, shed, RSS and GC cycles all print at 2,000
+   samples. It did not reproduce, which left the depth confound the cut created, so the
+   deep arm ran anyway. The 20 minutes bought a finding rather than the answer they were
+   spent on ([FINDINGS milestone 8 §3](FINDINGS.md)).
+3. **One arm dropped** — deep prefix at `inflight` 10, 1.6 h. Runs A and B had already
+   shown `inflight` does not gate the collapse. So clause 1's registered wording, "at
+   both `inflight` values", is **half-tested**, and it is published that way.
+
 ### Machine
 
 <!-- Filled in with the published numbers. A latency table without the machine it
@@ -505,7 +559,7 @@ choosable later without that objection.
 | GOMAXPROCS | 10 |
 | GOGC | 100 (default) |
 | corpus | 171,332 documents, 50 judged TREC-COVID queries, k=10 |
-| repetitions | **1, and milestone 7 established that a second is not currently definable.** The campaign ran and found the headline load point irreproducible — 37.9 ms, 1.539 s and 416 ms at one rate, [FINDINGS milestone 7 §1](FINDINGS.md) — which falsified rule 3 rather than producing a spread. Every figure below remains a single observation, now also known to be **one draw from a rule that flips on a few milliseconds of rung-1 median** (§4.2 there), taken on a machine whose sleep state was not recorded (§4.1 there) |
+| repetitions | **1 for every figure below, and since 2026-08-22 a second is definable.** Milestone 7 found the headline load point irreproducible as a lone rung — 37.9 ms, 1.539 s and 416 ms at one rate, [FINDINGS milestone 7 §1](FINDINGS.md) — and milestone 8 found what a repetition has to hold: reached as the fourth rung of a ladder run to depth, the same rate came back **0.07% from its first observation** ([FINDINGS milestone 8 §2](FINDINGS.md)), which is *rule 3, repaired*, above. **No figure below has been re-measured under it.** Each remains a single observation, known to be one draw from a rule that flips on a few milliseconds of rung-1 median (milestone 7 §4.2) and taken on a machine whose sleep state was not recorded (§4.1 there) |
 | weft ladder | one process, five rungs, `-rotations 200` |
 
 The numbers measured on it are in [FINDINGS.md](FINDINGS.md) milestone 5 §1.

@@ -914,3 +914,94 @@ belongs to milestone 8: run the same rate behind two different prefixes and behi
 one nobody has to argue with. If milestone 8 publishes a performance figure without
 first answering what a repetition holds constant, this decision will have converted a
 wrong rule into no rule, which is the outcome it was trying to avoid.
+
+## D-013 — A repetition is the ladder, named rather than derived, and it is published without the label
+
+**Date:** 2026-08-22
+**Milestone:** 8 — the throughput wall
+**Status:** accepted
+**Context:** [FINDINGS milestone 8](FINDINGS.md), [PERF.md §5.2](PERF.md),
+[D-011](#d-011--a-repetition-is-a-rung-not-a-ladder-and-the-arm-nobody-can-afford-to-ladder-gets-a-staged-depth),
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+
+### Context
+
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+refused to repair rule 3 from inside the campaign that falsified it, and named the
+experiment that would license a repair: the same rate behind two prefixes and two
+`inflight` caps. [PERF.md](PERF.md) §5.2 registered that experiment, with what each of
+four outcomes would license, before any of it ran.
+
+Outcome 1 fired. 25.67 q/s reached as the fourth rung of a ladder whose earlier rungs
+ran 10,000 samples each gave p50 **37.827 ms** with **shed 0**, against milestone 7's
+37.852 ms and shed 0 — 0.07% apart, with the collector's cycle count 0.12% apart. The
+same rate with no prefix collapsed at both `inflight` values. A prefix of the same
+shape at a fifth of the depth collapsed hardest of all.
+
+### Question
+
+Rule 3 needs an operable form. Is a repetition a rung, a ladder, or something else —
+and if it is a ladder, what happens to rule 1's refusal to label one?
+
+### Decision
+
+**A repetition is the same ladder, with its rates named rather than derived.**
+
+1. Repetition 1 is `-rate 0`. The sweep derives the rates and rule 1 selects the
+   headline rate **R** from them.
+2. Repetitions 2 and 3 are `-rates <repetition 1's rungs, through R>` — the same
+   prefix, the same rates, named so that they are shared rather than re-derived.
+3. The published figure is the median of the three at R, with the spread reported as
+   minimum and maximum beside it. Each repetition's own unloaded p50 is recorded, as
+   rule 3 already required.
+4. **Rule 1 does not change.** Repetitions 2 and 3 print no headline label, because R
+   was selected once — by the sweep — and is being reused. This is what rule 3 already
+   said about its single-rung repetitions, and it survives the change of what a
+   repetition is.
+5. `text+vector` gets **one** named ladder rather than three. That is not a new
+   decision: it is [PERF.md](PERF.md) §3 rule 6's first cut, applied to a budget that
+   grew.
+
+[D-011](#d-011--a-repetition-is-a-rung-not-a-ladder-and-the-arm-nobody-can-afford-to-ladder-gets-a-staged-depth)
+is superseded on its central claim and kept on its arithmetic. D-012's marking of rule 3
+is discharged.
+
+### Why
+
+D-011's argument was never wrong about *derivation*: three sweeps take three fresh
+`benchUnloaded` readings, so their rungs are three different loads and nothing common
+survives to take a median of. What it did was conclude from that that the ladder cannot
+be the unit — when the actual consequence is only that the rates cannot be *derived*
+twice. Naming them removes the whole difficulty, and `-rates` is that instrument.
+
+The reason to accept the cost rather than look for a cheaper unit is that the cheaper
+unit is the one that failed. A single rung is 6.5 minutes and gives 37.9 ms or 1.539 s
+depending on nothing the report records. A named ladder is 97 minutes and has now given
+the same number twice, rung for rung.
+
+Choosing this repair now is legitimate for exactly the reason choosing it in milestone 7
+would not have been: the outcome that licenses it was written down before the run that
+produced it, and the three candidate repairs D-012 could see were not ranked by which
+run they would flatter.
+
+### What would show this decision was wrong
+
+**A third named ladder does not reproduce the first two.** One reproduction is one. The
+procedure this decision installs is exactly the thing that would find that out, and if
+it does, a repetition is not a ladder either and the honest position reverts to
+milestone 7's — that this workload has no reproducible load point on this host.
+
+**The deep prefix collapses at `inflight` 10.** §5.2's registered outcome 1 says "at
+both `inflight` values" and only one was run ([FINDINGS milestone 8 §5.1](FINDINGS.md)).
+If the other one collapses, prefix depth is necessary and not sufficient, and this
+decision is resting on half a condition.
+
+**The prefix requirement does not travel.** If it turns out to be a property of this
+corpus on this host, a procedure defined by it produces figures that are reproducible
+and local, which is a smaller claim than the one rule 3 exists to support.
+
+**Nobody pays the 4.9 hours.** Three named ladders per published headline is six times
+D-011's budget. If the project quietly reverts to single runs while this decision stands
+on the page, it will have converted a correct rule into no rule — which is the failure
+mode [D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+named for itself and did not escape by being right.

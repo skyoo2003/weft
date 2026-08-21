@@ -1,0 +1,19 @@
+kind: Documentation
+body: 'A published latency figure has been measured twice and come back. `docs/PERF.md`
+  had required "the median of three repetitions with the spread beside it" since the first
+  performance milestone and had never produced one: the same arrival rate gave 37.9 ms
+  once and 1.539 s twice, and the rule directing the median turned out to be comparing
+  two different things. What a repetition has to hold constant is the ladder in front of
+  it, and its depth — reached as the fourth rung of a ladder whose earlier rungs each ran
+  ten thousand samples, the rate that could not be repeated came back within 0.07% of its
+  first observation, shed 0 both times, with the collector''s cycle count within 0.12%. A
+  prefix of the same shape at a fifth of the depth is worse than no prefix at all, and
+  lowering the concurrency cap moves the shape of the collapse without moving the knee.
+  The repaired procedure is `docs/PERF.md` section 3 rule 3, the reasoning and what would
+  refute it are `docs/DECISIONS.md` D-013, and every figure and caveat is
+  `docs/FINDINGS.md` milestone 8. No figure already published has been re-measured under
+  the repaired rule; each remains a single observation and is labelled as one. No exported
+  API under `pkg/` moved.'
+time: 2026-08-22T00:00:00.000000000+09:00
+custom:
+  Issue: 14
