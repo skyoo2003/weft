@@ -299,3 +299,63 @@ func TestBenchSummaryPrintsNothingWhenNothingWasMeasured(t *testing.T) {
 		t.Errorf("a run with no completed rung printed %q", w.String())
 	}
 }
+
+// The two tests below are the defect milestone 8's pass line ran into.
+//
+// ru_maxrss is a high-water mark the kernel never lowers, which bench.go's own comment
+// on benchReport.rss has said since milestone 5. What follows from it had not been
+// written down anywhere a reader of the report would meet it: the figure a rung prints
+// is the peak the *process* has reached by the end of that rung, so a pass line of the
+// form "RSS ≤ 250 MiB at this rate" cannot be judged from it on a ladder.
+//
+// It is not hypothetical. The ladder that judged 27.28 q/s printed 345.2 MiB there and
+// 345.2 MiB two rungs earlier at half the rate — the same mark, set at 13.64 q/s, read
+// twice. The rung under test added nothing to it and its own peak is unmeasured.
+//
+// The writer is a parameter for the same reason benchSummary's is: printing to
+// os.Stdout is what the command wants and is also why none of this was ever asserted.
+
+// TestBenchReportSaysWhichRungRaisedThePeak: the rung that sets the mark is the one
+// whose memory it describes, and it is the only rung that can say so.
+func TestBenchReportSaysWhichRungRaisedThePeak(t *testing.T) {
+	var w bytes.Buffer
+	r := benchReport{
+		rate:      13.64,
+		all:       loadgen.Quantiles{N: 10000, P50: 41 * time.Millisecond, P50ok: true},
+		faults:    loadgen.FaultCounts{Minor: 52890},
+		peakRSS:   345 << 20,
+		rssRaised: 206 << 20,
+		elapsed:   12 * time.Minute,
+	}
+
+	r.print(&w)
+
+	got := w.String()
+	if !strings.Contains(got, "206") {
+		t.Errorf("a rung that raised the process peak by 206 MiB did not say so:\n%s", got)
+	}
+}
+
+// TestBenchReportRefusesToLetAnEarlierRungsPeakReadAsItsOwn is the same defect from the
+// side that misleads. A rung that adds nothing to the mark still prints the mark, and a
+// reader holding that against a per-rung threshold is judging a different rung. What
+// this rung's own peak was is not knowable from getrusage at all — so the line has to
+// say the figure is not its own rather than leave it to be assumed.
+func TestBenchReportRefusesToLetAnEarlierRungsPeakReadAsItsOwn(t *testing.T) {
+	var w bytes.Buffer
+	r := benchReport{
+		rate:      27.28,
+		all:       loadgen.Quantiles{N: 10000, P50: 37 * time.Millisecond, P50ok: true},
+		faults:    loadgen.FaultCounts{Minor: 10},
+		peakRSS:   345 << 20,
+		rssRaised: 0,
+		elapsed:   6 * time.Minute,
+	}
+
+	r.print(&w)
+
+	got := w.String()
+	if !strings.Contains(got, "unchanged") {
+		t.Errorf("a rung that did not raise the mark let the mark read as its own:\n%s", got)
+	}
+}
