@@ -70,12 +70,19 @@ lint:
 # that the gate a contributor runs and the gate CI runs judge the same rules
 # whenever the tool is there to judge with. `make lint` stays the one that fails
 # on a missing binary: asked for by name, a silent skip is the wrong answer.
+#
+# One shell, not two, for the reason `deps` and `recall` below are written the same
+# way: each recipe line gets its own, so an `exit 0` in the first skips nothing that
+# follows it. Written as two lines this printed SKIP and then ran the lint it had
+# just said it was skipping, failing a checkout with no golangci-lint on it — which
+# is the property this target exists to preserve. `if` reports the status of the
+# branch it took, so a real lint failure still fails the gate.
 lint-if-present:
-	@command -v golangci-lint >/dev/null || { \
+	@if command -v golangci-lint >/dev/null; then \
+		$(MAKE) --no-print-directory lint; \
+	else \
 		echo "SKIP: golangci-lint is not installed — CI will lint this. 'make lint' says how to install it."; \
-		exit 0; \
-	}
-	@$(MAKE) --no-print-directory lint
+	fi
 
 # Markdown is most of what a first-time reader of this repository actually
 # reads, so it gets the same treatment as the Go.
