@@ -1946,3 +1946,23 @@ registered pass line, which belongs to the PRD, and the reason to prefer one of 
 this moment is which verdict it produces — the objection
 [D-012](DECISIONS.md) raised about repairing rule 3 from inside the campaign that broke
 it, in a different place.
+
+**Resolved 2026-08-22, [D-014](DECISIONS.md): the ladder-wide reading, so the clause is a
+miss.** The basis is what the metric is for rather than what it yields. It exists because
+an adopter's first encounter with weft is a memory figure, and an adopter runs a process,
+not a rung — a container sized from a steady-state number dies during the ramp. It is also
+the reading milestone 5 already used when it published "RSS 126→853 MiB". So: **345.2 MiB
+against 250 MiB, recorded as a miss**, charged to a ladder rather than to the rate the pass
+line names, because on this platform nothing separates them without cgo or a second
+module.
+
+**Milestone 10 does not fire on it.** Its trigger is a miss after the milestone's
+engineering, and milestone 8 has attempted none — the miss is the first target that
+engineering has. D-014 carries that argument and what would show it wrong, including the
+case where it turns out to be a way of dodging the trigger rather than a reason against it.
+
+One comparability caveat, now that the number carries a verdict: **345.2 MiB is not
+milestone 5's 853 MiB measured again.** That ladder had a fifth rung at 200% which
+collapsed, and this one stops at the load point by construction, because the pass line is
+about the rate it names and not about behaviour past it. The two are marks over different
+ladders and the difference between them is not a measured improvement.

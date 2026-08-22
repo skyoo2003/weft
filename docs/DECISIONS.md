@@ -1005,3 +1005,102 @@ D-011's budget. If the project quietly reverts to single runs while this decisio
 on the page, it will have converted a correct rule into no rule — which is the failure
 mode [D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
 named for itself and did not escape by being right.
+
+## D-014 — The memory pass line reads the process's mark, milestone 8 misses it, and milestone 10 does not fire on that
+
+**Date:** 2026-08-22
+**Milestone:** 8 — the throughput wall
+**Status:** accepted
+**Context:** [FINDINGS milestone 8 §7–§8](FINDINGS.md), [PERF.md §2.7](PERF.md),
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+
+### Context
+
+Milestone 8's pass line is *shed 0, RSS ≤ 250 MiB, p50 ≤ 100 ms at 27.28 q/s*. Two of
+the three were met on the ladder that judged it. The third could not be read: `ru_maxrss`
+is a high-water mark with no reset and no during-this-rung value, so the 345.2 MiB printed
+at the 27.28 q/s rung is the mark **13.64 q/s** set two rungs earlier, and the rung under
+test added nothing to it.
+
+[FINDINGS §8](FINDINGS.md) published two readings and chose neither, because the reason to
+prefer one at that moment was which verdict it produced.
+
+### Question
+
+Which reading does the memory clause mean — the rung's own peak, or the process's? And
+does the answer fire milestone 10?
+
+### Decision
+
+**1. The clause reads the process's mark over the ladder up to and including the load
+point.** Not the rung's own peak.
+
+**2. Under that reading milestone 8 misses it: 345.2 MiB against 250 MiB.** Recorded as a
+miss, with what it is charged with — the mark was set at half the load point's rate, and
+on this platform nothing can separate them (below).
+
+**3. Milestone 10 does not fire.** Its trigger is a miss *after* the milestone's
+engineering, and milestone 8 has done none. The miss is the first target that engineering
+has, not the verdict on having tried.
+
+### Why
+
+**The metric exists for an adopter's memory budget, and an adopter runs a process, not a
+rung.** The PRD put it there because what an adopter meets first is not architectural
+openness, it is 853 MiB and 12.5 seconds. Anyone sizing a container from a steady-state
+figure and ignoring the ramp gets killed during the ramp. The operationally meaningful
+number is the high-water mark of everything the process did, which is what `ru_maxrss`
+reports and what reading it this way asks for.
+
+It is also the reading the project has always used. Milestone 5 published "RSS
+126→853 MiB" as a ladder progression of process marks. Choosing it now is continuity, not
+a new interpretation — and the reading that is *not* continuous is the one that would have
+made this ladder undecidable rather than a miss.
+
+The direction it errs is worth stating: a ladder touches more load points than a steady
+server at any one of them, so its peak is an **upper bound** on a server held at any rate
+in it. A pass line that errs toward demanding less memory than the measurement shows is
+the safe direction for the person the metric is for.
+
+**On milestone 10 not firing.** The PRD's falsification clause reads "if milestone 8
+cannot clear the absolute pass line". The reading that makes that a trigger rather than a
+starting gun is *cannot clear it having tried* — milestone 10 is a redesign justified by
+candidate-materialisation fixes having proved insufficient, and none have been attempted.
+What this campaign produced is the opposite of exhaustion: a specific, measured, localised
+target — 345.2 MiB set at 13.64 q/s, against a cause the PRD already names, 30,549
+candidates decoded per query. Firing a redesign against an untried target would spend the
+conditional milestone on the wrong evidence.
+
+**What is not being done, and why.** A per-rung RSS would make the other reading decidable
+and is declined here: on Darwin it needs `task_info` through cgo or `golang.org/x/sys`, and
+the first breaks the build's shape while the second breaks `go list -m all` being one line
+— a pass line of its own since milestone 1. Linux would take `/proc/self/statm` and
+nothing else, so the instrument would answer on one platform and not the one the figures
+are measured on. Giving each rung its own process is ruled out separately: it destroys the
+ladder prefix [D-013](#d-013--a-repetition-is-the-ladder-named-rather-than-derived-and-it-is-published-without-the-label)
+established as the thing a repetition must hold.
+
+### What would show this decision was wrong
+
+**The peak is not candidate materialisation.** The whole reason to keep milestone 8 alive
+is that its target is named and believed reachable. A profile showing the 345.2 MiB is
+mapped index pages the process cannot avoid touching would mean there is nothing for
+candidate-level work to cut, and milestone 10's trigger becomes live after all.
+
+**Reducing the peak costs nDCG past the registered tolerance** (−0.005, from milestone
+3b). Then the throughput target and the accuracy invariant are in conflict, which is a
+larger finding than either and is not what this decision assumes.
+
+**The ladder-wide reading turns out to hide the load point.** If a per-rung instrument
+ever exists and shows 27.28 q/s sitting comfortably under 250 MiB, the miss recorded here
+was a property of the ramp rather than of the load — still a real number an adopter pays,
+and no longer a statement about the rate the pass line names. The verdict would stand and
+its interpretation would narrow, which is a reason to keep the two apart on the page
+rather than to relabel the miss.
+
+**Nobody attempts the engineering.** A miss recorded as "the target for work not yet done"
+is worth exactly as much as the work. If milestone 8 closes without an attempt at the
+345.2 MiB, this decision will have functioned as a way to avoid firing milestone 10 rather
+than as a reason not to — which is the failure mode
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+named for itself.

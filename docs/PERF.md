@@ -191,6 +191,11 @@ form is decidable only against the **ladder's** peak, which is a stricter and di
 claim. Which of the two a pass line means is a property of the pass line, and
 [FINDINGS milestone 8 §8](FINDINGS.md) is where one of them ran out of instrument.
 
+Milestone 8's memory clause reads the **ladder's** peak, decided in
+[D-014](DECISIONS.md) on the grounds that the figure exists for an adopter's memory budget
+and an adopter runs a process rather than a rung. Any pass line quoting a memory figure
+says which of the two it means, or it is not a pass line.
+
 Giving each rung its own process would give each a clean mark and destroy the ladder
 prefix that rule 3, repaired, has just established as the thing a repetition must hold.
 The prefix is worth more than the attribution.
