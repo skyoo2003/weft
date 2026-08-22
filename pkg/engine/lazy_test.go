@@ -62,6 +62,19 @@ func assertReadAPIsAgree(t *testing.T, want, got *Index) {
 		if got.DocLen(id) != want.DocLen(id) {
 			t.Errorf("DocLen(%d) = %d, want %d", id, got.DocLen(id), want.DocLen(id))
 		}
+		// Vector is a second decoder over the same record, skipping the fields it
+		// does not return. Two decoders for one format is how a format drifts, so
+		// the guard is that it agrees with Doc — on both sides of a commit, and on
+		// documents carrying no vector, where both have to answer false.
+		wv, wvok := want.Vector(id)
+		gv, gvok := got.Vector(id)
+		if wvok != (len(w.Vector) > 0) || gvok != (len(g.Vector) > 0) {
+			t.Errorf("Vector(%d) present = %v/%v, want %v/%v (Doc's vector lengths %d/%d)",
+				id, wvok, gvok, len(w.Vector) > 0, len(g.Vector) > 0, len(w.Vector), len(g.Vector))
+		}
+		if !slices.Equal(gv, wv) || !slices.Equal(gv, g.Vector) {
+			t.Errorf("Vector(%d) = %v, want %v and Doc's %v", id, gv, wv, g.Vector)
+		}
 		gid, ok := got.Resolve(w.Key)
 		if !ok || gid != id {
 			t.Errorf("Resolve(%q) = %d, %v; want %d, true", w.Key, gid, ok, id)

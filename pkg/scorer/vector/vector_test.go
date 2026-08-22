@@ -252,19 +252,20 @@ func TestCancellationArrivingAfterTheLastDocumentIsObserved(t *testing.T) {
 
 var _ engine.Scorer = (*Scorer)(nil)
 
-// Milestone 8's target, as a property rather than a number.
+// A property, not a number: **a query's allocation must scale with the vectors it reads,
+// not with the corpus text it does not.** Two corpora with identical vectors and text
+// differing by four megabytes must cost about the same to score.
 //
-// FINDINGS milestone 8 §7 records a ladder rung that shed nothing and still raised the
-// process's peak resident set by 206.6 MiB, against a baseline of 118 MiB that every
-// other rung held. The growth cannot be mapped index pages: rungs at twice the rate
-// touch the same pages and add nothing. It is heap, and the churn behind it is this
-// scan — engine.Index.Doc decodes a whole record per candidate, and the only field this
-// scorer reads is the vector. Key, Text and Links are decoded and dropped, once per
-// candidate, thirty thousand times a query, forty queries in flight.
+// engine.Index.Doc decodes a whole record per candidate — key, text, links — and this
+// scorer reads one field of it. On the evaluation corpus the scan looks at about thirty
+// thousand candidates a query, so that copy is paid thirty thousand times for fields
+// nothing reads.
 //
-// So the property: **a query's allocation must scale with the vectors it reads, not with
-// the corpus text it does not.** Two corpora with identical vectors and text differing by
-// four megabytes must cost about the same to score.
+// This was written while chasing FINDINGS milestone 8 §7's 206.6 MiB and does **not**
+// explain it: that rung ran the `text` arm, where no scorer calls Doc at all. §9 there
+// records the correction. The cost below is real on its own evidence and is bounded here
+// rather than on the corpus, because the arm that would show it has no published memory
+// figure.
 //
 // It is written as a property because the two available fixes differ in mechanism — a
 // zero-copy decode, or an accessor that skips the fields — and both satisfy this. The

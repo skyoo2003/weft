@@ -89,22 +89,29 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		d, ok := s.ix.Doc(id)
-		if !ok || len(d.Vector) == 0 {
+		// Vector rather than Doc, and that difference is the whole of milestone 8's
+		// memory work: Doc decodes the key, the text and the links to hand back a
+		// document this loop reads one field of, once per candidate. See
+		// engine.Index.Vector.
+		dv, ok := s.ix.Vector(id)
+		if !ok {
 			continue // No vector on this document: this scorer has no opinion.
 		}
-		if len(d.Vector) != len(q.Vector) {
-			return nil, fmt.Errorf("doc %q has %d dims, query has %d: %w",
-				d.Key, len(d.Vector), len(q.Vector), ErrDimMismatch)
+		if len(dv) != len(q.Vector) {
+			// The id rather than the key: naming the document would cost the decode
+			// this loop exists to avoid, on a path that is failing anyway.
+			// engine.Doc turns the id back into a key for a caller that wants one.
+			return nil, fmt.Errorf("doc %d has %d dims, query has %d: %w",
+				id, len(dv), len(q.Vector), ErrDimMismatch)
 		}
-		dNorm, err := norm(ctx, d.Vector)
+		dNorm, err := norm(ctx, dv)
 		if err != nil {
 			return nil, err
 		}
 		if dNorm == 0 {
 			continue // Zero document vector: no direction, and no 0/0.
 		}
-		sum, err := dot(ctx, q.Vector, d.Vector)
+		sum, err := dot(ctx, q.Vector, dv)
 		if err != nil {
 			return nil, err
 		}

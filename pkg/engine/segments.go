@@ -327,6 +327,24 @@ func (s *segment) doc(id DocID) (Document, bool) {
 	return d, true
 }
 
+// vector is doc with only the vector materialised. Same record, same checksum,
+// same false on damage — see decodeDocVector for what it skips and why.
+func (s *segment) vector(id DocID) ([]float32, bool) {
+	local := id - s.base
+	r, ok := s.recordAt(local)
+	if !ok {
+		return nil, false
+	}
+	v, err := decodeDocVector(r, int(local))
+	if err != nil {
+		// False rather than an error, for the reason doc gives above.
+		return nil, false
+	}
+	// A document carrying no vector answers false, which is what Index.Vector
+	// documents and what spares every caller a length check of its own.
+	return v, len(v) > 0
+}
+
 // docLen is arithmetic on the mapped table, not a decode. BM25 asks once per
 // posting, which is why the token count is in the table at all.
 func (s *segment) docLen(id DocID) int {
