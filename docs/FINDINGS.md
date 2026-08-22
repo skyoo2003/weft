@@ -1966,3 +1966,56 @@ milestone 5's 853 MiB measured again.** That ladder had a fifth rung at 200% whi
 collapsed, and this one stops at the load point by construction, because the pass line is
 about the rate it names and not about behaviour past it. The two are marks over different
 ladders and the difference between them is not a measured improvement.
+
+## 9. A correction: §7's 206.6 MiB is not the candidate decode
+
+§7 localised the excursion to the 13.64 q/s rung and §8 recorded the memory clause as a
+miss against it. [D-014](DECISIONS.md) then kept milestone 10 shut on the grounds that the
+miss was a *target* — specifically the cause the PRD names, "30,549 candidates decoded per
+query".
+
+**That cause does not apply to the rung that was measured.** Every ladder in §1, §2 and §7
+ran the **`text` arm**, which is `make bench`'s default. No scorer on that arm calls
+`engine.Index.Doc`: `pkg/scorer/text` reads `Stats`, `Lookup` and `DocLen` and nothing
+else. The candidate decode is the **vector** arm's cost, and the vector arm has never been
+laddered — [milestone 7 §4.4](#milestone-7--a-baseline-nobody-has-to-qualify) and §6 item 5
+here both say so.
+
+So the attribution in D-014's *Why* was wrong: a `text`-arm measurement explained by a
+`text+vector`-arm mechanism. The decision's structure survives — milestone 10's trigger
+still requires a miss after engineering, and none has been attempted — but its confidence
+that the target was already named does not. **The 345.2 MiB remains unattributed**, and
+what the `text` arm allocates per query is now the open question: `Lookup` returns a fresh
+`[]Posting` per term per query, and fusion and `TopK` build slices over the union.
+
+### What was fixed anyway, and what it is worth
+
+The candidate decode is real, and chasing this produced a guard for it. `Index.Doc`
+decodes a whole record — key, text, links — and the vector scorer reads one field of it.
+Measured on a synthetic corpus, that is **one full copy of the document text per candidate
+scored**:
+
+```
+before   4,208,024 bytes to score 64 documents, against 13,312 for the same
+         vectors with 4 MiB less text
+after    allocation no longer tracks text the query never reads
+```
+
+`Index.Vector` is the accessor that lets a caller say which fields it wants. It reads the
+same record through the same decoder in a mode that skips the copying, keeps every check —
+non-empty key, finite components, the record's own seeded checksum — and answers false for
+damage, for a wrong id, and for a document carrying no vector.
+
+**What it is worth is not measured on the corpus.** The arm it helps has no published
+memory figure to improve, which is §6 item 5 and is now also the reason this saving is a
+bounded property rather than a number. It is not a milestone 8 pass-line movement and is
+not claimed as one.
+
+### The invariant this spent
+
+The PRD registered "golden API files byte-identical" for this round. The accessor adds one
+line to `pkg/engine/testdata/engine_api.txt`. `pkg/fusion` is untouched, `go list -m all`
+is still one line, `public_api.txt` does not move, and no existing signature changes. The
+alternative — a zero-copy decode aliasing the mapping — would have kept the file identical
+while silently changing what a `Document`'s lifetime means, which is a worse trade for the
+same saving. [D-015](DECISIONS.md) carries the argument.

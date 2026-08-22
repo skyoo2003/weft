@@ -215,6 +215,55 @@ published as it was measured ([FINDINGS milestone 8 §7](../FINDINGS.md)) and no
 that file moves. Changing the instrument first would have put a measurement and its
 instrument in the wrong order, which is what milestone 5 §4.1 discarded two ladders over.
 
+### A query may not allocate text it never reads
+
+**Summary.** `engine.Index.Doc` decodes a whole record per candidate — key, text, links —
+and the vector scorer reads one field of it. Asserted as a property rather than a number,
+because the three routes to fixing it differ in mechanism and all of them satisfy it: a
+query's allocation must scale with the vectors it reads, not with the corpus text it does
+not.
+
+**RED** — `go test -run TestScoringDoesNotAllocate ./pkg/scorer/vector/`, and exact:
+
+```
+--- FAIL: TestScoringDoesNotAllocateTheCorpusTextItNeverReads (0.14s)
+    scoring allocated 4208200 bytes on a corpus whose text is 4194304 bytes larger,
+    against 13312 on the small one: the scan is materialising text it never reads
+    (budget was small+419430)
+```
+
+Runtime RED. The scan materialises **one full copy of the text**, to within the slack the
+budget allows. The test commits a synthetic corpus and reopens it, because `engine.New()`
+holds documents as values and never decodes — the cost under test exists only on the mapped
+path. Checkpoint `67afd97`, and that commit deliberately contains **no** fix: all three
+routes move something registered, and picking one to unblock the work is what
+[D-012](../DECISIONS.md) refuses. The branch was left red until the route was chosen.
+
+**GREEN** — route 1, an additive read accessor, chosen by the operator and argued in
+[D-015](../DECISIONS.md):
+
+```
+ok  	github.com/skyoo2003/weft/pkg/scorer/vector	0.476s
+```
+
+`decodeDocFields` is the one place the record's layout is written down; the mode changes
+what is copied out of it and nothing about what is read or checked. Checkpoint `895bd83`.
+
+**The correction that matters more than the fix.** This was written while chasing §7's
+206.6 MiB and does not explain it: every ladder in this milestone ran the `text` arm, where
+no scorer calls `Doc` at all. [FINDINGS milestone 8 §9](../FINDINGS.md) carries it. The
+property above stands on its own evidence; the 345.2 MiB is still unattributed.
+
+**The invariant spent.** The golden API file gains one line. `pkg/fusion` diff is empty,
+`public_api.txt` does not move, `go list -m all` is one line, and no existing signature
+changes.
+
+**Toolchain.** The goenv shim broke mid-session — it points `GOROOT` at a Go that is not
+installed — so every command above ran under `env -u GOROOT /opt/homebrew/opt/go/bin/go`
+(go1.27.0). `make all` and `make deps` fail through the shim for that reason and were run
+by hand as `gofmt -l`, `go vet ./...`, `go test -race ./...` and the two `go list` checks
+the `deps` target makes.
+
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
@@ -227,7 +276,9 @@ instrument in the wrong order, which is what milestone 5 §4.1 discarded two lad
 | 6 | Milestone 7's `benchSummary` guarantees are unmoved by the new parameter — rule-selected headline, never-saturates, cut short, suspended, gap inside tolerance, explicit `-rate`, nothing measured | `…:TestBenchSummary*` (7 tests) | regression | PASS | same |
 | 7 | A rung that raised the process peak says by how much, so the figure can be attributed to it | `…:TestBenchReportSaysWhichRungRaisedThePeak` | unit | PASS | `go test -race -run TestBenchReport ./cmd/weft-eval/` |
 | 8 | A rung that raised the peak by nothing says the mark is not its own, so it cannot be read against a per-rung threshold | `…:TestBenchReportRefusesToLetAnEarlierRungsPeakReadAsItsOwn` | unit | PASS | same |
-| 9 | The engine is untouched | `git diff --stat pkg/` | gate | PASS (empty) | `make all`, `make deps`, `make bench-build` |
+| 9 | A query's allocation scales with the vectors it reads, not with corpus text it never touches | `pkg/scorer/vector/vector_test.go:TestScoringDoesNotAllocateTheCorpusTextItNeverReads` | unit (mapped corpus) | PASS | `go test -run TestScoringDoesNotAllocate ./pkg/scorer/vector/` |
+| 10 | `Index.Vector` answers exactly what `Doc`'s vector field does — on both sides of a commit, and false on documents carrying none | `pkg/engine/lazy_test.go:assertReadAPIsAgree` (every caller of it) | unit | PASS | `go test -race ./pkg/engine/` |
+| 11 | `pkg/fusion` and the module graph are untouched by the memory work | `git diff --stat pkg/fusion/`, `go list -m all`, `go list -deps ./pkg/fusion` | gate | PASS (empty / one line / no scorer) | run by hand; see **Toolchain** above |
 
 ## Coverage and known gaps
 

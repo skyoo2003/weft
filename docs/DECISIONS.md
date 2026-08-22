@@ -1104,3 +1104,82 @@ is worth exactly as much as the work. If milestone 8 closes without an attempt a
 than as a reason not to — which is the failure mode
 [D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
 named for itself.
+
+## D-015 — One line of exported surface, rather than a Document whose lifetime quietly changed
+
+**Date:** 2026-08-22
+**Milestone:** 8 — the throughput wall
+**Status:** accepted
+**Context:** [FINDINGS milestone 8 §9](FINDINGS.md), [D-014](#d-014--the-memory-pass-line-reads-the-processs-mark-milestone-8-misses-it-and-milestone-10-does-not-fire-on-that)
+
+### Context
+
+`Index.Doc` decodes a whole record — key, text, links, vector, time — and the vector
+scorer reads one field of it. Measured on a synthetic corpus, scoring 64 documents
+allocated 4,208,024 bytes against 13,312 for the same vectors with 4 MiB less text: one
+full copy of the document text per candidate scored, for a field nothing reads.
+
+The PRD registered **golden API files byte-identical** as an invariant for this round,
+against sacrificing the architecture for performance.
+
+### Question
+
+Three routes cut the copy and each one moves something registered. Which?
+
+1. **An additive read accessor** — clean and safe; the golden file gains a line.
+2. **A zero-copy decode** — `Document.Text` and `.Key` alias the mapping. Signature
+   byte-identical, so the invariant passes as written.
+3. **Fewer candidates** — narrow `Nearest`. No API change at all; costs recall, and the
+   trade is one of the PRD's own untested open questions.
+
+### Decision
+
+**Route 1.** `Index.Vector(DocID) ([]float32, bool)` is added, and the golden API file
+gains exactly one line. `pkg/fusion` stays at zero, `public_api.txt` does not move,
+`go list -m all` stays one line, the `Scorer` interface and every existing signature are
+untouched.
+
+### Why
+
+**The invariant's purpose is narrower than its wording.** It exists so that performance
+work cannot quietly cost the architecture — a fuser that learns signal types, a `Scorer`
+that grows a method, a dependency. An additive read accessor touches none of those, and
+the project has added exported methods in three prior milestones (`Scrub`, `Close`,
+`Merge`, `Nearest`) as ordinary changelog entries. Spending the invariant here is spending
+it on the thing it was not written to protect.
+
+**Route 2 is worse for looking better.** It keeps the file byte-identical while changing
+what a `Document` *means*: a value held past `Close()` would point into an unmapped range,
+so the same signature would carry a new lifetime rule and the failure mode is a segfault
+in a caller's process. Nothing in the engine hands out mapped memory today. An invariant
+that a change can satisfy by making the same API more dangerous is measuring the wrong
+thing, and passing it that way would be the more dishonest of the two.
+
+**Route 3 is not this decision's to take.** It trades recall — measured at 0.992 in
+milestone 3b — for memory, against an nDCG tolerance of −0.005, and sizing it needs a
+measurement campaign rather than a code change. It stays available and unspent.
+
+**The decision is the operator's, taken explicitly.** The three routes and their costs
+were put to them before any of the three was written, because picking the one that
+unblocks the work is precisely what
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+refuses.
+
+### What would show this decision was wrong
+
+**The saving never gets measured.** It is a bounded property, not a number: the arm it
+helps has no published memory figure ([FINDINGS milestone 8 §9](FINDINGS.md)), so the line
+of exported surface has been spent against a synthetic benchmark. If the `text+vector` arm
+is never laddered, this bought a guarantee and no measurement.
+
+**One accessor becomes four.** `recency` reads `Time`, `graph` reads `Links`, and both call
+`Doc` for it. If each gets its own accessor the exported surface grows by a field-shaped
+method per scorer, which is the closed-`Document` design turned inside out — and that
+design is why `Resolve` exists at all, as its own doc comment argues: a signal whose data
+is not one of `Document`'s fields keeps that data in a table of the caller's own. A second
+accessor should have to argue harder than this one did.
+
+**The format drifts between the two modes.** `decodeDocFields` is one function so that the
+layout is written down once, and `assertReadAPIsAgree` checks that `Vector` and `Doc`
+answer the same on both sides of a commit. If a future field is added to one path only,
+those are the two things that were supposed to catch it.
