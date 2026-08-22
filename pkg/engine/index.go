@@ -134,7 +134,14 @@ func (ix *Index) lookupAt(term string) []Posting {
 	if len(ix.segs) == 0 {
 		return pending
 	}
-	var out []Posting
+	// Collected rather than merged as they arrive, because the common shape is one
+	// segment claiming the term and nothing pending, and there the answer is what
+	// that segment already handed back. Appending it into a fresh slice
+	// materialised the list a second time — a term held by twenty thousand
+	// documents twice over, per term, per query — and `make eval-data` builds
+	// exactly one segment, so that shape is behind every figure in docs/PERF.md.
+	var first []Posting
+	var rest [][]Posting
 	for _, s := range ix.segs {
 		// Each segment that claims the term has to answer, and the terms index
 		// is what says which do. Appending whatever came back let a damaged
@@ -152,10 +159,29 @@ func (ix *Index) lookupAt(term string) []Posting {
 			// absence is what D-006 gives corruption on this path.
 			return nil
 		}
-		out = append(out, pl...)
+		if first == nil {
+			first = pl
+			continue
+		}
+		rest = append(rest, pl)
 	}
-	if out == nil {
+	if first == nil {
 		return pending
+	}
+	if len(rest) == 0 && len(pending) == 0 {
+		return first
+	}
+	// Sized exactly, and copied rather than appended onto `first`: that slice is
+	// the segment's own and appending into whatever spare capacity it happens to
+	// carry would write into the list a concurrent reader is holding.
+	n := len(first) + len(pending)
+	for _, r := range rest {
+		n += len(r)
+	}
+	out := make([]Posting, 0, n)
+	out = append(out, first...)
+	for _, r := range rest {
+		out = append(out, r...)
 	}
 	return append(out, pending...)
 }

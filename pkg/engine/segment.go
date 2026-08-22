@@ -1198,10 +1198,18 @@ type termSpan struct{ off, end int }
 // document. That budget needs every term, which this decoder does not read —
 // but the per-document ceiling does not, and without it a frequency the writer
 // could never have produced reaches BM25 and comes back as a plausible score.
-func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, yield func(Posting)) (int, error) {
+// size, when not nil, is called once with an upper bound on the postings about to
+// be yielded, before the first of them. A caller collecting them into a slice can
+// allocate it once instead of growing it: the block count is written before the
+// blocks and every block but the last holds exactly blockSize, so the bound is
+// tight to within one block. Merge streams and passes nil.
+func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, size func(int), yield func(Posting)) (int, error) {
 	nblocks, err := post.intn("block count", len(post.b))
 	if err != nil {
 		return 0, err
+	}
+	if size != nil {
+		size(nblocks * blockSize)
 	}
 	docCount := offs.n
 	if nblocks == 0 {

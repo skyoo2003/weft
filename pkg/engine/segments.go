@@ -440,7 +440,12 @@ func (s *segment) recordAt(local DocID) (*segReader, bool) {
 // gives.
 func (s *segment) lookup(term string) []Posting {
 	var pl []Posting
-	if s.scanPostings(term, func(p Posting) { pl = append(pl, p) }) == 0 {
+	// Allocated once from the block count rather than grown from nil. A term held
+	// by twenty thousand documents grew through fifteen reallocations to get
+	// there, and the abandoned ones are what a query pays for — see
+	// TestLookupDoesNotCopyPostingsItWasAlreadyHanded.
+	size := func(n int) { pl = make([]Posting, 0, n) }
+	if s.scanPostings(term, size, func(p Posting) { pl = append(pl, p) }) == 0 {
 		// Zero is both "this segment does not hold the term" and "its postings
 		// do not decode", and nil is the answer to either: a partial list
 		// yielded before a decoder gave up is not a shorter posting list, it is
@@ -456,7 +461,9 @@ func (s *segment) lookup(term string) []Posting {
 //
 // Streaming, because Merge writes a term's postings without ever holding them:
 // see segSource. Lookup is the caller that does want the slice, and builds it.
-func (s *segment) scanPostings(term string, yield func(Posting)) int {
+// size, when not nil, is passed through to decodeTermPostings, which calls it
+// once with an upper bound before yielding anything. Merge streams and passes nil.
+func (s *segment) scanPostings(term string, size func(int), yield func(Posting)) int {
 	sp, ok := s.terms[term]
 	if !ok || sp.off < segHeaderLen || sp.off-segHeaderLen > len(s.postings) {
 		return 0
@@ -468,7 +475,7 @@ func (s *segment) scanPostings(term string, yield func(Posting)) int {
 		return 0
 	}
 	r := &segReader{name: postingsFile, b: s.postings, off: sp.off - segHeaderLen}
-	n, err := decodeTermPostings(r, term, s.offs, sp.end-segHeaderLen, func(p Posting) {
+	n, err := decodeTermPostings(r, term, s.offs, sp.end-segHeaderLen, size, func(p Posting) {
 		p.Doc += s.base
 		yield(p)
 	})
