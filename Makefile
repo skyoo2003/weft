@@ -1,13 +1,20 @@
-.PHONY: all fmt build vet test lint lint-docs spdx fuzz arch deps run example clean \
+.PHONY: all fmt build vet test lint lint-if-present lint-docs spdx fuzz arch deps run example clean \
 	changelog changelog-new changelog-check docs-site release-check \
 	eval eval-full eval-data recall bench bench-compare bench-build
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
-# `lint`, `lint-docs` and `fuzz` each cost something `all` should not — a tool
-# to install, or a minute of wall clock — so they are named separately and CI
-# runs them as their own steps.
-all: fmt build vet test
+# `lint-docs` and `fuzz` each cost something `all` should not — a tool to
+# install, or a minute of wall clock — so they are named separately and CI runs
+# them as their own steps.
+#
+# lint reaches `all` through lint-if-present rather than directly, which keeps
+# the no-tool-required property above while closing the gap it opened: for five
+# commits `make all` passed a tree CI's lint step rejected, because the only
+# gate reading .golangci.yaml lived in CI. Skipped when the tool is absent, so a
+# first checkout still runs the gate; run for everyone who has it, so CI stops
+# being where a lint finding is first seen.
+all: fmt build vet test lint-if-present
 
 # go vet says nothing about formatting, so drift would otherwise surface in
 # review instead of before the commit. gofmt's exit status carries as much as
@@ -45,12 +52,30 @@ lint:
 		echo "  CI pins $(GOLANGCI_VERSION); a different local version can disagree."; \
 		exit 1; \
 	}
+	# Warned, not failed. A newer local binary is the normal state after a brew
+	# upgrade and mostly agrees; what it cannot do is promise that a clean local
+	# run means a clean CI run, and that promise is the only reason this target
+	# is in `all`. So the mismatch is said out loud rather than assumed away.
+	@v=$$(golangci-lint version --short 2>/dev/null); \
+	[ "v$$v" = "$(GOLANGCI_VERSION)" ] || \
+		echo "WARN: golangci-lint v$$v locally, CI pins $(GOLANGCI_VERSION) — the two can disagree"
 	golangci-lint run ./...
 	# bench/ too, for the reason bench-build exists: `./...` does not descend into a
 	# nested module, so without this line bench/main.go is the one committed .go file
 	# in the repository no lint gate ever reads. It picks up this same .golangci.yaml
 	# by walking up from bench/.
 	cd bench && golangci-lint run ./...
+
+# `lint`, minus the refusal to run without the tool. This is what `all` calls, so
+# that the gate a contributor runs and the gate CI runs judge the same rules
+# whenever the tool is there to judge with. `make lint` stays the one that fails
+# on a missing binary: asked for by name, a silent skip is the wrong answer.
+lint-if-present:
+	@command -v golangci-lint >/dev/null || { \
+		echo "SKIP: golangci-lint is not installed — CI will lint this. 'make lint' says how to install it."; \
+		exit 0; \
+	}
+	@$(MAKE) --no-print-directory lint
 
 # Markdown is most of what a first-time reader of this repository actually
 # reads, so it gets the same treatment as the Go.

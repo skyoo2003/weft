@@ -11,6 +11,15 @@ version: "2"
 run:
   tests: true
 
+# Both default to a cap — 3 identical findings per linter, 50 per linter overall
+# — which turns a report into a sample of itself. A CI log ending "4 issues" for
+# a tree holding 12 is worse than a long log: it is read as the list, fixed to
+# the letter, and the next run fails on the eight it never printed. Whoever
+# reads either log should see everything they have to fix before pushing again.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
 linters:
   default: none
   enable:
