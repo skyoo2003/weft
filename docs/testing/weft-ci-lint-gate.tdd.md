@@ -117,10 +117,55 @@ ok  github.com/skyoo2003/weft/cmd/weft-eval  1.574s
 ok  github.com/skyoo2003/weft/bench          0.807s
 ```
 
+## The same defect, one gate over
+
+Pushing the two commits above turned the Go lint step green, and the job then reached a
+step it had never reached before — `Lint documentation` — which failed with 76 findings in
+five documents this branch had added or extended:
+
+```text
+39 MD060/table-column-style      (5 table delimiter rows)
+20 MD040/fenced-code-language    (20 fences with no language)
+15 MD010/no-hard-tabs            (tabs inside quoted go test output)
+ 2 MD051/link-fragments          (#milestone-5--the-tail, a heading that no longer exists)
+```
+
+The same root cause, one gate over: `make lint-docs` refuses to run without
+`markdownlint-cli2`, this machine had neither it nor a global install, so nothing local
+had ever read `.markdownlint.yaml` — and CI's Go lint had been failing first, so the docs
+step never ran either. Five documents accumulated 76 findings with no gate in front of
+them.
+
+Fixed at the source in all five, not by loosening a rule. The MD010 findings were tabs
+inside pasted `go test` output; the first attempt was `no-hard-tabs: code_blocks: false`
+in `.markdownlint.yaml`, which the repository's config-protection hook refused —
+correctly, that is weakening the config to fit the content. Those transcripts now carry
+four spaces where the tool printed a tab, which costs a byte-for-byte quote and is the
+price of the rule.
+
+`lint-docs-if-present` now sits in `all` beside `lint-if-present`, and `lint-docs` accepts
+`npx` as well as a global install, so a machine with node has no way to be in the state
+this branch was in:
+
+```console
+$ make lint-docs-if-present
+Linting: 26 files
+Summary: 0 issues in 0 files
+exit=0
+
+$ env PATH="$tmp:/usr/bin:/bin" make lint-docs-if-present   # no markdownlint, no npx
+SKIP: no markdownlint-cli2 and no npx — CI will lint the docs.
+skip exit=0
+```
+
+The npx binary reports `markdownlint-cli2 v0.23.2 (markdownlint v0.41.1)` — the same
+markdownlint version the pinned CI action runs, which is why a clean local run here means
+something. That is a coincidence of the moment, not a pin.
+
 ## What the passing gate guarantees
 
 | # | What is guaranteed | Test or command | Type | Result |
-|---|--------------------|-----------------|------|--------|
+| --- | --- | --- | --- | --- |
 | 1 | A lint finding in either module fails `make all` locally, not only in CI | `make all` (RED above, GREEN after fix) | gate | PASS |
 | 2 | A lint run reports every finding, not three per linter | `make lint` printing 12 where CI printed 4 | gate | PASS |
 | 3 | A checkout without golangci-lint still exits 0 on `make all` | `make lint-if-present` on a `PATH` without the binary | gate | PASS |
@@ -128,11 +173,13 @@ ok  github.com/skyoo2003/weft/bench          0.807s
 | 5 | `make lint`, asked for by name, still refuses to pass without the tool | `make lint` with the binary hidden | gate | PASS |
 | 6 | Both summaries print what they printed before the refactor | `cmd/weft-eval/bench_test.go`, `bench/summary_test.go` | unit | PASS |
 | 7 | Every `.go` file still carries its SPDX header | `make spdx` | gate | PASS |
+| 8 | A markdown finding fails `make all` locally, on a machine with only npx | `make lint-docs-if-present`, 76 findings then 0 | gate | PASS |
+| 9 | A checkout with neither markdownlint nor npx still exits 0 on `make all` | `make lint-docs-if-present` on a stripped `PATH` | gate | PASS |
 
 ## Coverage and gaps
 
 | Package | Before (`a72e7e0`) | After |
-|---------|--------------------|-------|
+| --- | --- | --- |
 | `cmd/weft-eval` | 45.0% | 45.1% |
 | `bench` | 10.9% | 11.3% |
 
@@ -161,7 +208,9 @@ Three commits on `m7-baseline`, RED then GREEN then the defect the skip path had
   finds. Carries the RED output above.
 - `889fcee` — eleven report lines drop their error in one place, and the flag usage fits.
   Carries the GREEN output above.
-- the commit adding this file — the skip branch rewritten as one shell, plus the two
-  documents that described a gate that had changed under them.
+- `ee73706` — the skip branch rewritten as one shell, plus the two documents that
+  described a gate that had changed under them.
+- the commit adding this section — 76 markdown findings fixed at the source, and
+  `lint-docs-if-present` in `all` so the docs gate stops being CI's alone.
 
 If they are squashed, this file is the surviving record of which was which.

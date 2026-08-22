@@ -63,13 +63,13 @@ progress lines and no line lands inside the distribution table.
 
 **RED** — `go test -race ./internal/loadgen/`, before `progress.go` existed:
 
-```
+```text
 internal/loadgen/progress_test.go:62:8: undefined: Progress
 internal/loadgen/progress_test.go:79:8: undefined: Progress
 internal/loadgen/progress_test.go:97:8: undefined: Progress
 internal/loadgen/progress_test.go:132:8: undefined: Progress
 internal/loadgen/progress_test.go:155:8: undefined: Progress
-FAIL	github.com/skyoo2003/weft/internal/loadgen [build failed]
+FAIL    github.com/skyoo2003/weft/internal/loadgen [build failed]
 ```
 
 Compile-time RED. The tests newly reference a type with no implementation; the
@@ -77,13 +77,13 @@ failure is the missing production code, not a broken fixture. Checkpoint `140013
 
 **GREEN** — `go test -race -run TestProgress ./internal/loadgen/`:
 
-```
+```text
 --- PASS: TestProgressCountingDoesNotAllocateInTheRequestPath (0.00s)
 --- PASS: TestProgressCountingWritesNothingFromTheRequestPath (0.00s)
 --- PASS: TestProgressReportsCompletionsWhileTheRungRuns (0.01s)
 --- PASS: TestProgressStopWaitsSoNothingWritesAfterIt (0.07s)
 --- PASS: TestProgressCountsEveryConcurrentCompletion (0.00s)
-ok  	github.com/skyoo2003/weft/internal/loadgen	1.499s
+ok      github.com/skyoo2003/weft/internal/loadgen    1.499s
 ```
 
 Checkpoint `c0688fb`.
@@ -98,7 +98,7 @@ cycle; it is recorded here as such rather than counted as one. Checkpoint `b57f7
 
 **End to end, on the evaluation corpus** — `make bench BENCHFLAGS='-rate 5 -rotations 4'`:
 
-```
+```text
 cold  n=50  total=1.851s  worst=60.881ms  minflt=3193  majflt=713
 unloaded: p50 36.21ms over 200 requests, so 27.6 q/s sequentially
 
@@ -137,7 +137,7 @@ routine rather than exceptional. Both are load-bearing.
 
 **RED** — nine assertions across three targets, none of which compiled:
 
-```
+```text
 internal/loadgen/rule_test.go:88:14: undefined: RuleApplies
 cmd/weft-eval/bench_test.go:55:79:  too many arguments in call to benchSummary
   have (*bytes.Buffer, string, []float64, []time.Duration, []benchReport, time.Duration)
@@ -158,7 +158,7 @@ both sides say how far the run got and suppress the claim — while still printi
 rung's own figures, because suppressing a claim is not suppressing a measurement and
 repetitions two and three are read off exactly that path.
 
-```
+```text
 --- PASS: TestRuleAppliesOnlyToACompleteLadder (6 subtests)
 --- PASS: TestBenchSummaryQuotesARuleSelectedHeadlineOnAFullLadder
 --- PASS: TestBenchSummaryOnALadderThatNeverSaturatesQuotesItsTopRung
@@ -176,7 +176,7 @@ Checkpoint `5802032`.
 
 **Observed on the corpus**, `make bench BENCHFLAGS='-rate 5 -rotations 2'`:
 
-```
+```text
 1 of 1 rungs measured — an explicit -rate, or a ladder cut short — so the load-point
 rule has nothing to apply and there is no saturation point and no headline; sweep
 with -rate 0 and let it finish to give the rule a ladder
@@ -207,7 +207,7 @@ be piped either side of the command.
 
 **RED** — three targets, none compiled:
 
-```
+```text
 internal/loadgen/clock_test.go:57:14: undefined: unaccounted
 internal/loadgen/clock_test.go:72:41: undefined: SuspendTolerance
 cmd/weft-eval/bench_test.go:130:13:  benchReport has no field unaccounted
@@ -236,7 +236,7 @@ warm-up — nine seconds unaccounted, which is the report printing.
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 1 | Counting a completion allocates nothing, so progress reporting does not enlarge the heap the collector is measured against | `internal/loadgen/progress_test.go:TestProgressCountingDoesNotAllocateInTheRequestPath` | unit | PASS | `go test -race -run TestProgress ./internal/loadgen/` |
 | 2 | The request path never writes, so no byte of reporting is inside a measured latency | `…:TestProgressCountingWritesNothingFromTheRequestPath` | unit | PASS | same |
 | 3 | A line carrying completed count and total appears while the rung is still running | `…:TestProgressReportsCompletionsWhileTheRungRuns` | unit | PASS | same |
@@ -258,7 +258,7 @@ warm-up — nine seconds unaccounted, which is the report printing.
 
 ## Coverage and known gaps
 
-```
+```text
 go test -cover ./internal/loadgen/   →  86.8% of statements
 go tool cover -func …                →  Count 100.0%  Report 100.0%  RuleApplies 100.0%
                                         benchSummary 100.0%  summarize 100.0%

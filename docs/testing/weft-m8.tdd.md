@@ -63,15 +63,15 @@ and held to them at flag time rather than at dispatch.
 **RED** — re-verified rather than quoted from the checkpoint message. A worktree at
 `4fd7663`, the test-only commit, then `go test ./cmd/weft-eval/`:
 
-```
+```text
 # github.com/skyoo2003/weft/cmd/weft-eval [github.com/skyoo2003/weft/cmd/weft-eval.test]
 cmd/weft-eval/bench_test.go:67:11:  o.rates undefined (type benchOpts has no field or method rates)
 cmd/weft-eval/bench_test.go:112:21: assignment mismatch: 2 variables but benchRates returns 1 value
 cmd/weft-eval/bench_test.go:112:59: too many arguments in call to benchRates
-	have (number, []float64, "time".Duration)
-	want (float64, "time".Duration)
+    have (number, []float64, "time".Duration)
+    want (float64, "time".Duration)
 cmd/weft-eval/bench_test.go:128:20: too many errors
-FAIL	github.com/skyoo2003/weft/cmd/weft-eval [build failed]
+FAIL    github.com/skyoo2003/weft/cmd/weft-eval [build failed]
 ```
 
 Compile-time RED in three shapes: a field that does not exist, a return arity that does
@@ -81,7 +81,7 @@ production code, not a broken fixture. Checkpoint `4fd7663`.
 
 **GREEN** — `go test -race -run 'TestBenchFlags|TestBenchRates|TestBenchSummary' ./cmd/weft-eval/`:
 
-```
+```text
 --- PASS: TestBenchFlagsParsesAnExplicitLadder (0.00s)
 --- PASS: TestBenchFlagsRefusesAnExplicitLadderBesideAnExplicitRate (0.00s)
 --- PASS: TestBenchFlagsRefusesARateInsideALadderItWouldRejectAlone (0.00s)   [9 subtests]
@@ -94,7 +94,7 @@ production code, not a broken fixture. Checkpoint `4fd7663`.
 --- PASS: TestBenchSummaryIsUnmovedByAGapInsideTheTolerance (0.00s)
 --- PASS: TestBenchSummaryPublishesNoHeadlineForAnExplicitRate (0.00s)
 --- PASS: TestBenchSummaryPrintsNothingWhenNothingWasMeasured (0.00s)
-ok  	github.com/skyoo2003/weft/cmd/weft-eval	1.486s
+ok      github.com/skyoo2003/weft/cmd/weft-eval    1.486s
 ```
 
 Twelve, of which five are new: the seven `benchSummary` cases milestone 7 wrote are in
@@ -109,7 +109,7 @@ doc comment rather than here.
 
 **Field, on the evaluation corpus** — `make bench BENCHFLAGS='-rates 5,10 -rotations 2'`:
 
-```
+```text
 weft  text  warm  n=100/rung  inflight=40  GOMAXPROCS=10
 
 rate=5.00/s  n=100  shed=0  elapsed=19.862s
@@ -179,14 +179,14 @@ cannot decide, rather than inventing a per-rung peak.
 
 **RED** — `go test ./cmd/weft-eval/`:
 
-```
+```text
 cmd/weft-eval/bench_test.go:327:3: unknown field rssRaised in struct literal of type benchReport
 cmd/weft-eval/bench_test.go:331:10: too many arguments in call to r.print
-	have (*bytes.Buffer)
-	want ()
+    have (*bytes.Buffer)
+    want ()
 cmd/weft-eval/bench_test.go:351:3: unknown field rssRaised in struct literal of type benchReport
 cmd/weft-eval/bench_test.go:355:10: too many arguments in call to r.print
-FAIL	github.com/skyoo2003/weft/cmd/weft-eval [build failed]
+FAIL    github.com/skyoo2003/weft/cmd/weft-eval [build failed]
 ```
 
 Compile-time RED: a field that does not exist and a method arity that does not match. The
@@ -195,17 +195,17 @@ and the same move milestone 7 made on `benchSummary`. Checkpoint `5360ad1`.
 
 **GREEN** — `go test -race -run TestBenchReport ./cmd/weft-eval/`:
 
-```
+```text
 --- PASS: TestBenchReportSaysWhichRungRaisedThePeak (0.00s)
 --- PASS: TestBenchReportRefusesToLetAnEarlierRungsPeakReadAsItsOwn (0.00s)
-ok  	github.com/skyoo2003/weft/cmd/weft-eval	1.516s
+ok      github.com/skyoo2003/weft/cmd/weft-eval    1.516s
 ```
 
 Checkpoint `dd33365`.
 
 **Field** — `make bench BENCHFLAGS='-rates 5,10 -rotations 2'`:
 
-```
+```text
 rusage  ... peakrss 116.1 MiB (process, raised 0.2 MiB by this rung)
 rusage  ... peakrss 117.6 MiB (process, raised 1.5 MiB by this rung)
 ```
@@ -225,7 +225,7 @@ not.
 
 **RED** — `go test -run TestScoringDoesNotAllocate ./pkg/scorer/vector/`, and exact:
 
-```
+```text
 --- FAIL: TestScoringDoesNotAllocateTheCorpusTextItNeverReads (0.14s)
     scoring allocated 4208200 bytes on a corpus whose text is 4194304 bytes larger,
     against 13312 on the small one: the scan is materialising text it never reads
@@ -242,8 +242,8 @@ routes move something registered, and picking one to unblock the work is what
 **GREEN** — route 1, an additive read accessor, chosen by the operator and argued in
 [D-015](../DECISIONS.md):
 
-```
-ok  	github.com/skyoo2003/weft/pkg/scorer/vector	0.476s
+```text
+ok      github.com/skyoo2003/weft/pkg/scorer/vector    0.476s
 ```
 
 `decodeDocFields` is the one place the record's layout is written down; the mode changes
@@ -267,7 +267,7 @@ the `deps` target makes.
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 1 | A comma-separated list parses in the order given, whitespace and all — rates get copied out of a report and a report has spaces in it | `cmd/weft-eval/bench_test.go:TestBenchFlagsParsesAnExplicitLadder` | unit | PASS | `go test -race -run 'TestBenchFlags\|TestBenchRates\|TestBenchSummary' ./cmd/weft-eval/` |
 | 2 | `-rate` beside `-rates` is refused, rather than one of them winning silently | `…:TestBenchFlagsRefusesAnExplicitLadderBesideAnExplicitRate` | unit | PASS | same |
 | 3 | Every entry gets the bounds a lone `-rate` gets, at flag time: non-numeric, negative, zero, empty, `NaN`, `Inf` and past the 1e9 ceiling, alone or inside a list | `…:TestBenchFlagsRefusesARateInsideALadderItWouldRejectAlone` (9 cases) | unit | PASS | same |
@@ -282,7 +282,7 @@ the `deps` target makes.
 
 ## Coverage and known gaps
 
-```
+```text
 go test -coverprofile … ./cmd/weft-eval/   →  45.0% of statements (package)
 go tool cover -func …                      →  benchRates      100.0%
                                               benchSummary    100.0%

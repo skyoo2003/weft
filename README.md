@@ -194,7 +194,7 @@ make eval-full  # adds the graph tie analysis and the 28-configuration sweep
 make bench      # milestone 5's latency ladder (needs a prepared corpus, ~90 min)
 ```
 
-`make all` is fmt, build, vet, `test -race`, and `golangci-lint` when it is installed — skipped with a line saying so when it is not, which is what keeps the target runnable on a fresh checkout. CI runs it plus four targets kept out of it because each costs a tool to install or a minute of wall clock: `make spdx`, `make bench-build`, `make lint-docs`, and `make fuzz` — the last being 30 seconds each against the two segment-decoder fuzz targets, which is where a hostile file would land. [CONTRIBUTING](CONTRIBUTING.md#the-gate) has the detail.
+`make all` is fmt, build, vet, `test -race`, and the two linters when they are installed — each skipped with a line saying so when it is not, which is what keeps the target runnable on a fresh checkout. CI runs it plus three targets kept out of it because each costs a tool to install or a minute of wall clock: `make spdx`, `make bench-build`, and `make fuzz` — the last being 30 seconds each against the two segment-decoder fuzz targets, which is where a hostile file would land. [CONTRIBUTING](CONTRIBUTING.md#the-gate) has the detail.
 
 `make eval` needs data that is not in the repository. [EVAL.md §7](docs/EVAL.md) lists the downloads and the one-time `weft-eval prepare` step.
 

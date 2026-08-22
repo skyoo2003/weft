@@ -179,7 +179,7 @@ printed 345.2 MiB there — the mark set two rungs earlier at half the rate
 raised the mark**, a difference between two readings and therefore the one per-rung
 memory statement `getrusage` can support:
 
-```
+```text
 peakrss 116.1 MiB (process, raised 0.2 MiB by this rung)
 peakrss 345.2 MiB (process, unchanged by this rung — the mark is an earlier one's, and
                    this rung's own peak is only bounded by it)

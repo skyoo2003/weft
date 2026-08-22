@@ -1581,7 +1581,7 @@ The collector's figures say the same thing from the other side:
 | rep 2 | 5,575 | 1.6% | 1020.8 MiB |
 
 A quarter of the collections and nine times the memory. That is the shape of a pacer
-that is behind: [milestone 5 §2](#milestone-5--the-tail) measured a query allocating
+that is behind: [milestone 5 §2](#2-the-prediction-was-wrong-twice-and-the-conclusion-is-right-anyway) measured a query allocating
 43.6 MiB with a live heap that rises to tens of megabytes while 30,549 candidates are
 held, and a process that has spent ninety minutes climbing a ladder reaches that load
 with a heap goal already grown to meet it. One that starts there does not.
@@ -1787,7 +1787,7 @@ at both values), and prefix depth is what is left standing.
 
 Milestone 5 measured its own 100% rung at **27.28 q/s** and it collapsed — p50 1.27 s,
 1,438 of 10,000 shed — and that rung had a deep prefix, five rungs at `-rotations 200`
-([milestone 5 §3.2](#milestone-5--the-tail)). Run D says 25.67 q/s with a deep prefix
+([milestone 5 §3.2](#32-weft-cannot-sustain-its-own-sequential-throughput-and-bleve-can)). Run D says 25.67 q/s with a deep prefix
 is flat with room to spare: its p50 is 37.827 ms against an unloaded 36.796 ms, nowhere
 near rule 1's twice-unloaded bar.
 
@@ -1922,7 +1922,7 @@ number belonging to a different rung.
 What a rung *can* say is **how much it raised the mark** — a difference between two
 readings, which is what every other field on that line already is. It now says it:
 
-```
+```text
 rusage  ... peakrss 116.1 MiB (process, raised 0.2 MiB by this rung)
 rusage  ... peakrss 345.2 MiB (process, unchanged by this rung — the mark is an
             earlier one's, and this rung's own peak is only bounded by it)
@@ -1995,7 +1995,7 @@ decodes a whole record — key, text, links — and the vector scorer reads one 
 Measured on a synthetic corpus, that is **one full copy of the document text per candidate
 scored**:
 
-```
+```text
 before   4,208,024 bytes to score 64 documents, against 13,312 for the same
          vectors with 4 MiB less text
 after    allocation no longer tracks text the query never reads
