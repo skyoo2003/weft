@@ -86,7 +86,8 @@ func benchFlags(args []string) (benchOpts, error) {
 	var ratesRaw string
 	data, flagErr := dataFlags(cmdBench, args, func(fs *flag.FlagSet) {
 		fs.Float64Var(&o.rate, "rate", 0, "arrival rate in queries/sec; 0 sweeps the ladder")
-		fs.StringVar(&ratesRaw, "rates", "", "comma-separated arrival rates to run in order, instead of the sweep -rate 0 derives; the load-point rule is not applied to a ladder you chose")
+		fs.StringVar(&ratesRaw, "rates", "", "comma-separated arrival rates to run in order, instead of "+
+			"the sweep -rate 0 derives; the load-point rule is not applied to a ladder you chose")
 		fs.IntVar(&o.rotations, "rotations", 200, "passes over the query set per rung (50 queries x 200 = 10,000 samples)")
 		fs.IntVar(&o.inflight, "inflight", 0, "cap on concurrent requests; 0 is 4 per core")
 		fs.StringVar(&o.arm, "arm", benchArmText, "scorers to load: text or text+vector")
@@ -356,6 +357,22 @@ func startCPUProfile(path string) (func(), error) {
 	}, nil
 }
 
+// outf is every write below: a report line, to a writer that is os.Stdout in a
+// run and a buffer in a test.
+//
+// The dropped error is the point of the function. A failed write to stdout has
+// nowhere left to be reported — the report of it would go to the writer that
+// just failed, and the next line fails the same way — so the error is dropped
+// once, here, with the reason beside it, rather than at eleven call sites
+// carrying eleven copies of this paragraph. Same argument as the progress line
+// in internal/loadgen. Nothing that writes a file goes through here, which is
+// what keeps errcheck's question live where it is worth asking.
+//
+// vet reads it as a printf wrapper, so the format strings are still checked.
+func outf(w io.Writer, format string, a ...any) {
+	fmt.Fprintf(w, format, a...) //nolint:errcheck // see above
+}
+
 // benchSummary applies the load-point rule and prints the one line the milestone
 // quotes. Separate from bench so the rule is read in one place rather than at the
 // bottom of a function that also parses flags and opens an index.
@@ -367,7 +384,7 @@ func benchSummary(w io.Writer, arm string, ruleLadder bool, rates []float64, p50
 	reports []benchReport, unloaded time.Duration,
 ) {
 	rung := func(label string, rep *benchReport) {
-		fmt.Fprintf(w, "%s   %s  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
+		outf(w, "%s   %s  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
 			label, arm, rep.rate, fmtQ(rep.all.P99, rep.all.P99ok),
 			fmtQ(rep.exGC.P99, rep.exGC.P99ok), 100*rep.gcCPU)
 	}
@@ -381,7 +398,7 @@ func benchSummary(w io.Writer, arm string, ruleLadder bool, rates []float64, p50
 		if reports[i].unaccounted <= loadgen.SuspendTolerance {
 			continue
 		}
-		fmt.Fprintf(w, "\nDISCARD this run: the process did not run for %v of the rung at "+
+		outf(w, "\nDISCARD this run: the process did not run for %v of the rung at "+
 			"%.2f/s, so the ladder was measured across a suspension. There is no headline. "+
 			"Re-run it on a machine that stays awake — `caffeinate -dimsu make bench` — and "+
 			"publish the discard.\n",
@@ -395,7 +412,7 @@ func benchSummary(w io.Writer, arm string, ruleLadder bool, rates []float64, p50
 		if len(reports) == 0 {
 			return
 		}
-		fmt.Fprintf(w, "\n%d of %d rungs measured — a ladder you named, an explicit -rate, or a "+
+		outf(w, "\n%d of %d rungs measured — a ladder you named, an explicit -rate, or a "+
 			"ladder cut short — so the load-point rule has nothing to apply and there is no "+
 			"saturation point and no headline; sweep with -rate 0 and let it finish to give the "+
 			"rule a ladder\n",
@@ -408,9 +425,9 @@ func benchSummary(w io.Writer, arm string, ruleLadder bool, rates []float64, p50
 	sat := loadgen.SaturationRate(rates, p50s, unloaded)
 	head := loadgen.HeadlineRate(rates, sat)
 	if sat == 0 {
-		fmt.Fprintf(w, "\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
+		outf(w, "\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
 	} else {
-		fmt.Fprintf(w, "\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
+		outf(w, "\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
 			sat, unloaded.Round(time.Microsecond), head)
 	}
 	for i := range reports {
@@ -576,24 +593,24 @@ func fmtQ(d time.Duration, ok bool) string {
 }
 
 func (r benchReport) print(w io.Writer) {
-	fmt.Fprintf(w, "\nrate=%.2f/s  n=%d  shed=%d  elapsed=%v\n",
+	outf(w, "\nrate=%.2f/s  n=%d  shed=%d  elapsed=%v\n",
 		r.rate, r.all.N, r.shed, r.elapsed.Round(time.Millisecond))
 	// First, not last, and in words rather than a field. Everything printed below it
 	// is arithmetic over samples taken while the process was stopped for part of this
 	// span, and a reader who takes the distribution before reaching the caveat has
 	// taken the wrong thing.
 	if r.unaccounted > loadgen.SuspendTolerance {
-		fmt.Fprintf(w, "  SUSPENDED the process did not run for %v of this rung — the machine slept. "+
+		outf(w, "  SUSPENDED the process did not run for %v of this rung — the machine slept. "+
 			"Nothing below is a measurement.\n", r.unaccounted.Round(time.Second))
 	}
-	fmt.Fprintf(w, "  latency   p50 %s  p95 %s  p99 %s  p99.9 %s  max %v\n",
+	outf(w, "  latency   p50 %s  p95 %s  p99 %s  p99.9 %s  max %v\n",
 		fmtQ(r.all.P50, r.all.P50ok), fmtQ(r.all.P95, r.all.P95ok),
 		fmtQ(r.all.P99, r.all.P99ok), fmtQ(r.all.P999, r.all.P999ok),
 		r.all.Max.Round(time.Microsecond))
-	fmt.Fprintf(w, "  minus STW p50 %s  p95 %s  p99 %s  p99.9 %s\n",
+	outf(w, "  minus STW p50 %s  p95 %s  p99 %s  p99.9 %s\n",
 		fmtQ(r.exGC.P50, r.exGC.P50ok), fmtQ(r.exGC.P95, r.exGC.P95ok),
 		fmtQ(r.exGC.P99, r.exGC.P99ok), fmtQ(r.exGC.P999, r.exGC.P999ok))
-	fmt.Fprintf(w, "  gc        cycles %d  STW %v (%.3f%% of elapsed)  GC CPU share %.1f%%\n",
+	outf(w, "  gc        cycles %d  STW %v (%.3f%% of elapsed)  GC CPU share %.1f%%\n",
 		r.gcCycles, r.pause.Round(time.Microsecond),
 		100*float64(r.pause)/float64(max(r.elapsed, 1)), 100*r.gcCPU)
 	// Omitted rather than printed as zeros where getrusage does not exist. Four
@@ -603,7 +620,7 @@ func (r benchReport) print(w io.Writer) {
 	if r.faults == (loadgen.FaultCounts{}) && r.peakRSS == 0 {
 		return
 	}
-	fmt.Fprintf(w, "  rusage    minflt %d  majflt %d  nvcsw %d  nivcsw %d  peakrss %.1f MiB (process, %s)\n",
+	outf(w, "  rusage    minflt %d  majflt %d  nvcsw %d  nivcsw %d  peakrss %.1f MiB (process, %s)\n",
 		r.faults.Minor, r.faults.Major, r.faults.Nvcsw, r.faults.Nivcsw,
 		float64(r.peakRSS)/(1<<20), rssAttribution(r.rssRaised))
 }

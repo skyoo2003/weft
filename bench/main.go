@@ -452,11 +452,19 @@ func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) 
 // published number.
 //
 // `rates` is the intended ladder, not the rungs reached. See loadgen.RuleApplies.
+// outf is the same one-place error drop as cmd/weft-eval/bench.go's, for the same
+// reason: these are report lines, and a failed write to stdout has nowhere left to
+// be reported. Duplicated rather than shared because this is a separate module and
+// importing the root one is what the quarantine exists to prevent.
+func outf(w io.Writer, format string, a ...any) {
+	fmt.Fprintf(w, format, a...) //nolint:errcheck // see above
+}
+
 func summarize(w io.Writer, rungs []rung, rates []float64, p50s []time.Duration, unloaded time.Duration) {
 	// By index, not by value: a rung is 192 bytes and copying one per iteration to
 	// compare a float is what gocritic's rangeValCopy names.
 	line := func(label string, g *rung) {
-		fmt.Fprintf(w, "%s   bleve text  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
+		outf(w, "%s   bleve text  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
 			label, g.rate, fmtQ(g.all.P99, g.all.P99ok), fmtQ(g.exGC.P99, g.exGC.P99ok), 100*g.gcCPU)
 	}
 
@@ -467,7 +475,7 @@ func summarize(w io.Writer, rungs []rung, rates []float64, p50s []time.Duration,
 		if rungs[i].unaccounted <= loadgen.SuspendTolerance {
 			continue
 		}
-		fmt.Fprintf(w, "\nDISCARD this run: the process did not run for %v of the rung at "+
+		outf(w, "\nDISCARD this run: the process did not run for %v of the rung at "+
 			"%.2f/s, so the ladder was measured across a suspension. There is no headline. "+
 			"Re-run it on a machine that stays awake — `caffeinate -dimsu make bench-compare`.\n",
 			rungs[i].unaccounted.Round(time.Second), rungs[i].rate)
@@ -478,7 +486,7 @@ func summarize(w io.Writer, rungs []rung, rates []float64, p50s []time.Duration,
 		if len(rungs) == 0 {
 			return
 		}
-		fmt.Fprintf(w, "\n%d of %d rungs measured — an explicit -rate, or a ladder cut short — so the "+
+		outf(w, "\n%d of %d rungs measured — an explicit -rate, or a ladder cut short — so the "+
 			"load-point rule has nothing to apply and there is no saturation point and no "+
 			"headline; sweep with -rate 0 and let it finish to give the rule a ladder\n",
 			len(rungs), len(rates))
@@ -490,9 +498,9 @@ func summarize(w io.Writer, rungs []rung, rates []float64, p50s []time.Duration,
 	sat := loadgen.SaturationRate(rates, p50s, unloaded)
 	head := loadgen.HeadlineRate(rates, sat)
 	if sat == 0 {
-		fmt.Fprintf(w, "\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
+		outf(w, "\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
 	} else {
-		fmt.Fprintf(w, "\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
+		outf(w, "\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
 			sat, unloaded.Round(time.Microsecond), head)
 	}
 	for i := range rungs {
