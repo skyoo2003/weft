@@ -35,12 +35,15 @@ Milestones 1 through 6 are done. **Not usable in production:** documents cannot 
 | 4 | Quality — graph contribution to nDCG | ✅ measured, and the answer is **no** — see below |
 | 5 | Performance — p99 including GC pauses | ✅ p99 **108.193 ms**, of which the collector is 411 µs (0.38%); 1.88× bleve v2.6.0 against a 10× bar |
 | 6 | External contribution readiness | ✅ measured — two subjects with no prior sight of the tree added a signal from the documentation alone, which found three documentation defects. Both subjects were **agents, not people**, so this is a lower bound and not a user study: [ADOPTION.md](docs/ADOPTION.md) |
+| 7 | A baseline nobody has to qualify | ⚠️ **there is no baseline.** Three runs at one arrival rate gave 37.9 ms, 1.539 s and 416 ms; the load point is not reproducible and what decides the outcome is not the load: [FINDINGS milestone 7](docs/FINDINGS.md) |
 
 No tag yet; the first will be `v0.1.0`. Until then `go get` resolves to a pseudo-version naming a commit, which is the honest state — a tag would give you a shorter name without changing anything the warning above says. [CHANGELOG](CHANGELOG.md) is where a version tells you whether you have work to do, and it records three things only: the exported API of every package under `pkg/`, the on-disk format version, and the minimum Go version. The milestone numbers in this table are not among them.
 
 Milestone 4 ran ahead of 3 because the dataset fits in memory and the project's second falsification condition was waiting on it.
 
 Two things milestone 5 owes and has not paid, stated here rather than left in a findings document: its headline is **one run, not the three repetitions [PERF.md](docs/PERF.md) requires**, and the arm you would actually deploy — `text + vector` — **has no published tail**, because at four times the cost per query 10,000 samples take over five hours. The published p99 is comparable to bleve's; it is not the number a `text + vector` user will see.
+
+Milestone 7 went to pay the first of those and could not. Three runs at the same arrival rate produced medians 40× apart — one rung shed nothing at 37.9 ms, two collapsed to 1.539 s and 416 ms and shed 14% and 11% of the load — with no suspension, no thermal story and no relative-load story that fits. The difference that survives is that the flat observation was the fourth rung of a ladder and the two collapses were single rungs. **So `108.193 ms` still stands, and now stands with two further caveats**: it is one draw from a load-point rule that flips between the ladder's slowest and fastest rung on a few milliseconds of first-rung median, and it was measured before the instrument could tell you whether the machine slept through it. Neither is a reason to withdraw it; both are reasons not to compare against it silently. [FINDINGS milestone 7](docs/FINDINGS.md), [D-012](docs/DECISIONS.md).
 
 ### Published numbers
 
@@ -191,7 +194,7 @@ make eval-full  # adds the graph tie analysis and the 28-configuration sweep
 make bench      # milestone 5's latency ladder (needs a prepared corpus, ~90 min)
 ```
 
-CI runs `make all` plus five targets kept out of it because each costs a tool to install or a minute of wall clock: `make spdx`, `make bench-build`, `make lint`, `make lint-docs`, and `make fuzz` — the last being 30 seconds each against the two segment-decoder fuzz targets, which is where a hostile file would land. [CONTRIBUTING](CONTRIBUTING.md#the-gate) has the detail.
+`make all` is fmt, build, vet, `test -race`, and the two linters when they are installed — each skipped with a line saying so when it is not, which is what keeps the target runnable on a fresh checkout. CI runs it plus three targets kept out of it because each costs a tool to install or a minute of wall clock: `make spdx`, `make bench-build`, and `make fuzz` — the last being 30 seconds each against the two segment-decoder fuzz targets, which is where a hostile file would land. [CONTRIBUTING](CONTRIBUTING.md#the-gate) has the detail.
 
 `make eval` needs data that is not in the repository. [EVAL.md §7](docs/EVAL.md) lists the downloads and the one-time `weft-eval prepare` step.
 

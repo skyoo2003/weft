@@ -710,6 +710,31 @@ func (r *segReader) intn(what string, limit int) (int, error) {
 	return int(v), nil
 }
 
+// skipStr advances past a string without materialising it, and is the whole
+// reason decodeDocRecord has a mode. `str` costs a copy of the field; on the
+// evaluation corpus that field is the document text, and a vector scan that
+// decodes thirty thousand candidates a query pays for it thirty thousand times
+// without reading it — [FINDINGS](../../docs/FINDINGS.md) milestone 8 §7.
+//
+// The length is still read and still bounds-checked. A damaged length is how a
+// reader walks off the end of one record and into the next, and skipping a field
+// is not a reason to stop looking for that.
+//
+// (§7 there is a `text`-arm rung and no scorer on that arm calls Doc; §9
+// corrects that attribution. The copy this removes is the vector arm's, measured
+// by the property test in pkg/scorer/vector rather than on the corpus.)
+func (r *segReader) skipStr(what string) (int, error) {
+	n, err := r.uvarint(what + " length")
+	if err != nil {
+		return 0, err
+	}
+	if n > uint64(len(r.b)-r.off) {
+		return 0, fmt.Errorf("%s: %s of %d bytes overruns the buffer: %w", r.name, what, n, ErrCorrupt)
+	}
+	r.off += int(n)
+	return int(n), nil
+}
+
 func (r *segReader) str(what string) (string, error) {
 	n, err := r.uvarint(what + " length")
 	if err != nil {
@@ -947,16 +972,53 @@ func decodeMeta(r *segReader) (docCount, totalLen, vecDim int, err error) {
 // taken, a vector of a different width — is the walker's, which is the only
 // reason this returns rather than stores.
 func decodeDocRecord(r *segReader, i int) (Document, int, error) {
+	return decodeDocFields(r, i, false)
+}
+
+// decodeDocVector reads the same record and materialises only the vector.
+//
+// It walks the whole record and verifies its checksum exactly as decodeDocRecord
+// does, because a record that cannot prove it is intact and is the one asked for
+// must not hand out a vector either. What it skips is the copying: key, text and
+// links are stepped over rather than allocated, which on the evaluation corpus is
+// one copy of the document text per candidate scored — about thirty thousand
+// candidates a query on the vector arm. Index.Vector carries the measurement and
+// says what it is not.
+func decodeDocVector(r *segReader, i int) ([]float32, error) {
+	d, _, err := decodeDocFields(r, i, true)
+	return d.Vector, err
+}
+
+// decodeDocFields is the one place the record's layout is written down. The mode
+// changes what is copied out of it and nothing about what is read or checked —
+// two decoders for one format is how a format drifts.
+func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error) {
 	start := r.off
 	var d Document
 	var err error
-	if d.Key, err = r.str("document key"); err != nil {
-		return Document{}, 0, err
+	if vectorOnly {
+		// The empty-key check survives the skip: its length is what says so, and
+		// the length is read either way.
+		n, kerr := r.skipStr("document key")
+		if kerr != nil {
+			return Document{}, 0, kerr
+		}
+		if n == 0 {
+			return Document{}, 0, fmt.Errorf("%s: document %d has an empty key, which Add refuses: %w", r.name, i, ErrCorrupt)
+		}
+	} else {
+		if d.Key, err = r.str("document key"); err != nil {
+			return Document{}, 0, err
+		}
+		if d.Key == "" {
+			return Document{}, 0, fmt.Errorf("%s: document %d has an empty key, which Add refuses: %w", r.name, i, ErrCorrupt)
+		}
 	}
-	if d.Key == "" {
-		return Document{}, 0, fmt.Errorf("%s: document %d has an empty key, which Add refuses: %w", r.name, i, ErrCorrupt)
-	}
-	if d.Text, err = r.str("document text"); err != nil {
+	if vectorOnly {
+		if _, err = r.skipStr("document text"); err != nil {
+			return Document{}, 0, err
+		}
+	} else if d.Text, err = r.str("document text"); err != nil {
 		return Document{}, 0, err
 	}
 	dl, err := r.intn("document length", maxInt)
@@ -987,7 +1049,13 @@ func decodeDocRecord(r *segReader, i int) (Document, int, error) {
 	if err != nil {
 		return Document{}, 0, err
 	}
-	if ln > 0 {
+	if ln > 0 && vectorOnly {
+		for range ln {
+			if _, err := r.skipStr("link key"); err != nil {
+				return Document{}, 0, err
+			}
+		}
+	} else if ln > 0 {
 		// Same ceiling as the document hint, for the same reason: a link is
 		// one byte on disk and sixteen in a slice header.
 		d.Links = make([]string, 0, min(ln, 1<<12))
@@ -1130,10 +1198,18 @@ type termSpan struct{ off, end int }
 // document. That budget needs every term, which this decoder does not read —
 // but the per-document ceiling does not, and without it a frequency the writer
 // could never have produced reaches BM25 and comes back as a plausible score.
-func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, yield func(Posting)) (int, error) {
+// size, when not nil, is called once with an upper bound on the postings about to
+// be yielded, before the first of them. A caller collecting them into a slice can
+// allocate it once instead of growing it: the block count is written before the
+// blocks and every block but the last holds exactly blockSize, so the bound is
+// tight to within one block. Merge streams and passes nil.
+func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, size func(int), yield func(Posting)) (int, error) {
 	nblocks, err := post.intn("block count", len(post.b))
 	if err != nil {
 		return 0, err
+	}
+	if size != nil {
+		size(nblocks * blockSize)
 	}
 	docCount := offs.n
 	if nblocks == 0 {

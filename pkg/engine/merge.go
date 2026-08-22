@@ -219,7 +219,9 @@ func (m *mergedSource) postings(t string, yield func(Posting)) int {
 		if _, claimed := s.terms[t]; !claimed {
 			continue
 		}
-		n := s.scanPostings(t, func(e Posting) {
+		// nil size: this streams a term into the writer and never holds the
+		// postings, which is the whole reason scanPostings exists beside lookup.
+		n := s.scanPostings(t, nil, func(e Posting) {
 			yield(Posting{Doc: e.Doc - m.base, Freq: e.Freq})
 		})
 		if n == 0 {

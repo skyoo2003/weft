@@ -1,13 +1,19 @@
-.PHONY: all fmt build vet test lint lint-docs spdx fuzz arch deps run example clean \
+.PHONY: all fmt build vet test lint lint-if-present lint-docs lint-docs-if-present spdx fuzz arch deps run example clean \
 	changelog changelog-new changelog-check docs-site release-check \
 	eval eval-full eval-data recall bench bench-compare bench-build
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
-# `lint`, `lint-docs` and `fuzz` each cost something `all` should not — a tool
-# to install, or a minute of wall clock — so they are named separately and CI
-# runs them as their own steps.
-all: fmt build vet test
+# `fuzz` costs something `all` should not — a minute of wall clock — so it is
+# named separately and CI runs it as its own step.
+#
+# The two linters reach `all` through -if-present targets rather than directly,
+# which keeps the no-tool-required property above while closing the gap it
+# opened: for five commits `make all` passed a tree CI rejected, because the only
+# gates reading .golangci.yaml and .markdownlint.yaml lived in CI. Both skip when
+# their tool is absent, so a first checkout still runs the gate; both run for
+# everyone who has the tool, so CI stops being where a finding is first seen.
+all: fmt build vet test lint-if-present lint-docs-if-present
 
 # go vet says nothing about formatting, so drift would otherwise surface in
 # review instead of before the commit. gofmt's exit status carries as much as
@@ -45,6 +51,13 @@ lint:
 		echo "  CI pins $(GOLANGCI_VERSION); a different local version can disagree."; \
 		exit 1; \
 	}
+	# Warned, not failed. A newer local binary is the normal state after a brew
+	# upgrade and mostly agrees; what it cannot do is promise that a clean local
+	# run means a clean CI run, and that promise is the only reason this target
+	# is in `all`. So the mismatch is said out loud rather than assumed away.
+	@v=$$(golangci-lint version --short 2>/dev/null); \
+	[ "v$$v" = "$(GOLANGCI_VERSION)" ] || \
+		echo "WARN: golangci-lint v$$v locally, CI pins $(GOLANGCI_VERSION) — the two can disagree"
 	golangci-lint run ./...
 	# bench/ too, for the reason bench-build exists: `./...` does not descend into a
 	# nested module, so without this line bench/main.go is the one committed .go file
@@ -52,15 +65,53 @@ lint:
 	# by walking up from bench/.
 	cd bench && golangci-lint run ./...
 
+# `lint`, minus the refusal to run without the tool. This is what `all` calls, so
+# that the gate a contributor runs and the gate CI runs judge the same rules
+# whenever the tool is there to judge with. `make lint` stays the one that fails
+# on a missing binary: asked for by name, a silent skip is the wrong answer.
+#
+# One shell, not two, for the reason `deps` and `recall` below are written the same
+# way: each recipe line gets its own, so an `exit 0` in the first skips nothing that
+# follows it. Written as two lines this printed SKIP and then ran the lint it had
+# just said it was skipping, failing a checkout with no golangci-lint on it — which
+# is the property this target exists to preserve. `if` reports the status of the
+# branch it took, so a real lint failure still fails the gate.
+lint-if-present:
+	@if command -v golangci-lint >/dev/null; then \
+		$(MAKE) --no-print-directory lint; \
+	else \
+		echo "SKIP: golangci-lint is not installed — CI will lint this. 'make lint' says how to install it."; \
+	fi
+
 # Markdown is most of what a first-time reader of this repository actually
 # reads, so it gets the same treatment as the Go.
+#
+# npx is accepted as well as a global install, because the alternative was what
+# happened on this branch: neither was on the machine, `make lint-docs` refused,
+# and 76 findings in five documents went unread until CI's Go lint stopped
+# failing first and let the docs step run. Anyone with node can now run the docs
+# gate without installing anything permanently.
 lint-docs:
-	@command -v markdownlint-cli2 >/dev/null || { \
-		echo "FAIL: markdownlint-cli2 is not installed."; \
+	@if command -v markdownlint-cli2 >/dev/null; then \
+		markdownlint-cli2 "**/*.md"; \
+	elif command -v npx >/dev/null; then \
+		echo "using npx; 'npm install -g markdownlint-cli2' is faster if you do this often"; \
+		npx --yes markdownlint-cli2 "**/*.md"; \
+	else \
+		echo "FAIL: markdownlint-cli2 is not installed and there is no npx."; \
 		echo "  npm install -g markdownlint-cli2"; \
 		exit 1; \
-	}
-	markdownlint-cli2 "**/*.md"
+	fi
+
+# The docs half of lint-if-present, and there for the same reason: the gate that
+# only CI runs is the gate nobody runs. Skips when there is nothing to run it
+# with, so `all` still works on a checkout with no node on it.
+lint-docs-if-present:
+	@if command -v markdownlint-cli2 >/dev/null || command -v npx >/dev/null; then \
+		$(MAKE) --no-print-directory lint-docs; \
+	else \
+		echo "SKIP: no markdownlint-cli2 and no npx — CI will lint the docs."; \
+	fi
 
 # `go test` replays the seed corpus and stops; it never starts the fuzzing
 # engine. SECURITY.md names the segment decoder as the first place a hostile

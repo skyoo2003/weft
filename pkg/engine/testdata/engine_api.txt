@@ -16,6 +16,7 @@ method Index.Merge() error
 method Index.Nearest([]float32, int) []DocID
 method Index.Resolve(string) (DocID, bool)
 method Index.Stats() (int, float64)
+method Index.Vector(DocID) ([]float32, bool)
 package engine
 type Candidate struct
 field Candidate.Doc DocID

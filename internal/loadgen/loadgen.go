@@ -377,6 +377,32 @@ func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) 
 	return samples, shed
 }
 
+// RuleApplies reports whether SaturationRate and HeadlineRate have a ladder to apply
+// to, rather than some rungs.
+//
+// Both of them answer for any slice they are handed, and two shapes of caller arrive
+// without a ladder:
+//
+// An explicit -rate is one rung the operator chose. SaturationRate returns it
+// whenever its p50 passed twice the unloaded median — there is nothing for it to be
+// *first* past — and HeadlineRate returns it on both branches, so the summary used to
+// print a hand-picked load point under the label of a measured one.
+//
+// A ladder cut short is the one nothing above notices. A run interrupted during rung
+// three of five has three medians for five intended rates, and a caller that trims its
+// rates to match makes the two indistinguishable from a complete three-rung sweep. The
+// summary then says "saturation: not reached on this ladder" about a ladder whose top
+// rungs — the ones that would have saturated — never ran, and quotes a headline off
+// the rung the interrupt truncated. Comparing the lengths is what separates them,
+// which is why callers pass the rates they *intended* rather than the ones they got.
+//
+// One predicate rather than a length check spelled at each call site: what
+// docs/PERF.md §3 rule 2 produces is a ratio, and a claim admitted on one side alone
+// moves it.
+func RuleApplies(rates []float64, p50s []time.Duration) bool {
+	return len(p50s) >= 2 && len(p50s) == len(rates)
+}
+
 // SaturationRate is the lowest rate on the ladder whose median passed twice the
 // unloaded median, or 0 if none did.
 //

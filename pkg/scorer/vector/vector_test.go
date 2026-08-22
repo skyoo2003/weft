@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -250,3 +251,85 @@ func TestCancellationArrivingAfterTheLastDocumentIsObserved(t *testing.T) {
 }
 
 var _ engine.Scorer = (*Scorer)(nil)
+
+// A property, not a number: **a query's allocation must scale with the vectors it reads,
+// not with the corpus text it does not.** Two corpora with identical vectors and text
+// differing by four megabytes must cost about the same to score.
+//
+// engine.Index.Doc decodes a whole record per candidate — key, text, links — and this
+// scorer reads one field of it. On the evaluation corpus the scan looks at about thirty
+// thousand candidates a query, so that copy is paid thirty thousand times for fields
+// nothing reads.
+//
+// This was written while chasing FINDINGS milestone 8 §7's 206.6 MiB and does **not**
+// explain it: that rung ran the `text` arm, where no scorer calls Doc at all. §9 there
+// records the correction. The cost below is real on its own evidence and is bounded here
+// rather than on the corpus, because the arm that would show it has no published memory
+// figure.
+//
+// It is written as a property because the two available fixes differ in mechanism — a
+// zero-copy decode, or an accessor that skips the fields — and both satisfy this. The
+// number in the budget is deliberately loose: this is not a benchmark, it is a guard
+// against allocation proportional to something the query never looks at.
+
+// allocBytesForCandidates commits a synthetic corpus, reopens it so the mapped decode
+// path is the one under test, and reports bytes allocated by one full scan.
+func allocBytesForCandidates(t *testing.T, docs, textLen int) uint64 {
+	t.Helper()
+	ix := engine.New()
+	text := make([]byte, textLen)
+	for i := range text {
+		text[i] = 'a' + byte(i%26)
+	}
+	for i := range docs {
+		d := engine.Document{
+			Key:    "d" + string(rune('A'+i%26)) + string(rune('A'+i/26)),
+			Text:   string(text),
+			Vector: []float32{float32(i + 1), 1, 0},
+		}
+		if _, err := ix.Add(d); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+	dir := t.TempDir()
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	open, err := engine.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer open.Close() //nolint:errcheck // nothing left to do about it in a test
+
+	s := New(open)
+	q := engine.Query{Vector: []float32{1, 1, 0}}
+	// One scan first: whatever the mapping and the scorer set up once is not what this
+	// measures.
+	if _, err := s.Candidates(t.Context(), q, docs); err != nil {
+		t.Fatalf("Candidates warm-up: %v", err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if _, err := s.Candidates(t.Context(), q, docs); err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+func TestScoringDoesNotAllocateTheCorpusTextItNeverReads(t *testing.T) {
+	const docs = 64
+	small := allocBytesForCandidates(t, docs, 16)
+	large := allocBytesForCandidates(t, docs, 64<<10)
+
+	// The two corpora differ by 64 documents x 64 KiB of text the scorer never touches.
+	// A tenth of that is the budget: enough slack for the map's own bookkeeping, far
+	// less than one copy of the text.
+	textBytes := uint64(docs) * (64 << 10)
+	if budget := textBytes / 10; large > small+budget {
+		t.Errorf("scoring allocated %d bytes on a corpus whose text is %d bytes larger, "+
+			"against %d on the small one: the scan is materialising text it never reads "+
+			"(budget was small+%d)", large, textBytes, small, budget)
+	}
+}

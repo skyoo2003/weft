@@ -1,0 +1,17 @@
+kind: Exported API
+body: 'One addition, no changes: `engine.Index.Vector(DocID) ([]float32, bool)` returns a
+  document''s vector without decoding the rest of it. `Doc` cannot know which fields its
+  caller will read, so it materialises all of them — key, text, links — and a scorer that
+  scans candidates for their vectors was paying for a copy of each document''s text at every
+  candidate it looked at. Measured on a synthetic corpus: scoring 64 documents allocated
+  4,208,024 bytes against 13,312 for the same vectors with 4 MiB less text. Everything `Doc`
+  guarantees holds — a committed record is still checked against its own seeded checksum, so
+  damage and a wrong id answer false rather than returning a plausible vector, and the
+  returned slice must not be modified for the same reason `Document` gives. A document
+  carrying no vector answers false, which is also the answer for an id that was never
+  assigned. The six read methods a scorer already called are untouched, `pkg/fusion` is
+  unchanged, and `go list -m all` is still one line. The reasoning, including the two routes
+  not taken, is `docs/DECISIONS.md` D-015.'
+time: 2026-08-22T07:00:00.000000000+09:00
+custom:
+  Issue: 14

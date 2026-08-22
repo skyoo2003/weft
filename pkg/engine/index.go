@@ -106,6 +106,19 @@ func (ix *Index) docAt(id DocID) (Document, bool) {
 	return ix.docs[uint64(id)-uint64(ix.base)], true
 }
 
+func (ix *Index) vectorAt(id DocID) ([]float32, bool) {
+	if s := ix.segFor(id); s != nil {
+		return s.vector(id)
+	}
+	if uint64(id) < uint64(ix.base) || uint64(id) >= uint64(ix.base)+uint64(len(ix.docs)) {
+		return nil, false
+	}
+	// A pending document is held as the caller passed it, so this aliases rather
+	// than copies — the same contract docAt has, and Vector repeats the rule.
+	v := ix.docs[uint64(id)-uint64(ix.base)].Vector
+	return v, len(v) > 0
+}
+
 func (ix *Index) docLenAt(id DocID) int {
 	if s := ix.segFor(id); s != nil {
 		return s.docLen(id)
@@ -121,7 +134,14 @@ func (ix *Index) lookupAt(term string) []Posting {
 	if len(ix.segs) == 0 {
 		return pending
 	}
-	var out []Posting
+	// Collected rather than merged as they arrive, because the common shape is one
+	// segment claiming the term and nothing pending, and there the answer is what
+	// that segment already handed back. Appending it into a fresh slice
+	// materialised the list a second time — a term held by twenty thousand
+	// documents twice over, per term, per query — and `make eval-data` builds
+	// exactly one segment, so that shape is behind every figure in docs/PERF.md.
+	var first []Posting
+	var rest [][]Posting
 	for _, s := range ix.segs {
 		// Each segment that claims the term has to answer, and the terms index
 		// is what says which do. Appending whatever came back let a damaged
@@ -139,10 +159,29 @@ func (ix *Index) lookupAt(term string) []Posting {
 			// absence is what D-006 gives corruption on this path.
 			return nil
 		}
-		out = append(out, pl...)
+		if first == nil {
+			first = pl
+			continue
+		}
+		rest = append(rest, pl)
 	}
-	if out == nil {
+	if first == nil {
 		return pending
+	}
+	if len(rest) == 0 && len(pending) == 0 {
+		return first
+	}
+	// Sized exactly, and copied rather than appended onto `first`: that slice is
+	// the segment's own and appending into whatever spare capacity it happens to
+	// carry would write into the list a concurrent reader is holding.
+	n := len(first) + len(pending)
+	for _, r := range rest {
+		n += len(r)
+	}
+	out := make([]Posting, 0, n)
+	out = append(out, first...)
+	for _, r := range rest {
+		out = append(out, r...)
 	}
 	return append(out, pending...)
 }
@@ -383,6 +422,38 @@ func (ix *Index) Doc(id DocID) (Document, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return ix.docAt(id)
+}
+
+// Vector is Doc for a caller that wants only the vector, and it exists for one
+// measured reason: a scorer that scans candidates and reads nothing else was
+// paying for a copy of each document's text at each candidate it looked at.
+//
+// On the evaluation corpus the vector scorer looks at about thirty thousand
+// candidates a query, and the copy is measured at one per candidate: scoring 64
+// documents allocated 4,208,024 bytes against 13,312 for the same vectors with
+// 4 MiB less text — one full copy of text nothing read. Doc cannot know which
+// fields its caller will read, so the choice belongs to the caller and this is
+// how one says so.
+//
+// What this is *not* is the 206.6 MiB of
+// [docs/FINDINGS.md](../../docs/FINDINGS.md) milestone 8 §7. That rung ran the
+// `text` arm, where no scorer calls Doc at all — §9 there corrects the
+// attribution. The saving here is real and is not yet measured on the corpus,
+// because the arm that would show it has never had a published memory figure.
+//
+// Everything Doc guarantees holds here. A committed record is still checked
+// against its own seeded checksum, so damage and a wrong id both answer false
+// rather than handing back a plausible vector. The slice **must not be
+// modified**, for the reason Document gives: a committed document's vector is a
+// fresh decode and a pending one is the slice the caller passed to Add. Callers
+// cannot tell the two apart, so the stricter rule is the one that holds.
+//
+// A document with no vector answers false, which is also the answer for an id
+// that was never assigned. A scorer skips both.
+func (ix *Index) Vector(id DocID) ([]float32, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return ix.vectorAt(id)
 }
 
 // Resolve maps a caller-supplied Key to its DocID. The bool is false for a Key

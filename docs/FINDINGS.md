@@ -1490,3 +1490,532 @@ Half the falsifying signal was live, in the most-read place in the project. Now
 3. **`v0.1.0`, and with it the adoption metric's start date** (§4.4).
 4. **No human subject** (§4.1). Every number here is a lower bound until there is
    one.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 7 — A baseline nobody has to qualify
+
+**Verdict: there is no baseline. The headline load point is not reproducible, and
+what decides the outcome is not the load.** Three observations at the same arrival
+rate, on the same corpus, same machine, same binary, same day: one rung shed nothing
+and held a 37.9 ms median, two collapsed to 1.539 s and 416 ms and shed 14% and 11%
+of the load. The milestone set out to replace a single observation of unknown spread
+with a median of three. What it found is that the quantity being repeated is not
+well defined, and [D-011](DECISIONS.md)'s premise — that a repetition is the same
+rung measured again — is false.
+
+That is a more useful answer than three numbers would have been, and it lands on
+[milestone 8](../.claude/prds/weft-hardening.prd.md) before its pass line was
+written into code rather than after.
+
+| Pass line | Result |
+| --- | --- |
+| The headline is the median of three repetitions with the spread published | **not met, and the reason is the finding.** Two of three observations cannot support a p99 at all: shed put them under the 10,000 samples [PERF.md](PERF.md) §2.3 requires. There is no median to take |
+| `text+vector` has a published p99 | **not started.** The campaign stopped at this finding; §6 |
+| Each repetition's unloaded p50 is recorded | **holds**, and it is the measurement that rules out the obvious explanation. §3 |
+| `pkg/` untouched, `go list -m all` one line | **holds.** `git diff --stat pkg/` empty across every commit in this milestone |
+| The procedure is committed before the first measurement | **holds.** `docs/PERF.md` rules 3 to 6 and D-011 landed in `f0dde61` and `fce4088`; the first published figure here comes from a run started afterwards |
+
+## 1. The three observations
+
+All at **25.67 q/s**, the rate [PERF.md](PERF.md) §3 rule 1 selected from
+repetition 1's ladder. Apple M4, Go 1.26.1, 171,332 documents, 50 judged queries,
+k=10, `text` arm, `inflight` 40.
+
+| | context | n / shed | p50 | p99 | peak RSS | unloaded p50 |
+| --- | --- | --- | --- | --- | --- | --- |
+| rep 1 | 4th rung of a full ladder | 10,000 / **0** | **37.852 ms** | 69.136 ms | **114.2 MiB** | 38.955 ms (25.7/s) |
+| rep 2 | single rung, `-rate 25.67` | 8,544 / **1,456** | **1.539 s** | — | **1020.8 MiB** | 40.357 ms (24.8/s) |
+| rep 3 | single rung, `-rate 25.67` | 8,918 / **1,082** | **415.624 ms** | — | **764.7 MiB** | 36.449 ms (27.4/s) |
+
+The medians span **40×**. Two of the three shed enough to fall under the sample
+floor, so `Printable` refused their p99 — correctly, and that refusal is why the
+milestone's own pass line cannot be met.
+
+Repetition 1's full ladder:
+
+| rung | rate | p50 | p99 | shed | peak RSS |
+| --- | --- | --- | --- | --- | --- |
+| 12.5% | 3.21/s | 68.963 ms | 100.136 ms | 0 | 114.2 MiB |
+| 25% | 6.42/s | 52.719 ms | 82.835 ms | 0 | 114.2 MiB |
+| 50% | 12.84/s | 40.438 ms | 63.654 ms | 0 | 114.2 MiB |
+| **100%** | **25.67/s** | **37.852 ms** | **69.136 ms** | **0** | **114.2 MiB** |
+| 200% | 51.34/s | 1.810 s | — | 5,894 | 744.3 MiB |
+
+`saturation: 51.34/s (first rung past 2x the unloaded p50 of 38.955ms); headline is
+25.67/s`.
+
+## 2. What is not the explanation
+
+**Not the instrument.** No rung in any of the three runs printed `SUSPENDED`. The
+ladder's wall clock ran 100 m 48 s against 100 m 39 s of rungs plus a 10 s warm-up —
+nine seconds unaccounted, which is the report printing. §4 is why that sentence can
+be written at all.
+
+**Not relative load.** Repetition 3's sequential throughput was **27.4 q/s**, so
+25.67/s was 94% of it — and it collapsed. Repetition 1's was 25.7 q/s, so the same
+rate was 100% of it — and it did not. The observation at the *lower* fraction of its
+own capacity is the one that fell over.
+
+**Not a cold machine.** Repetition 3 ran forty seconds after repetition 2 finished
+and had the fastest cold pass of the three (1.82 s against 2.017 s and 3.407 s, and
+`majflt` 0 against 713 and 722). It still collapsed.
+
+**Not machine drift between sessions**, at least not on its own. The unloaded p50
+moved 36.4 / 39.0 / 40.4 ms across the three — an 11% spread, worth recording and
+[D-011](DECISIONS.md) is why it was — but it does not order the outcomes: the fastest
+machine of the three produced a collapse and the middle one produced the flat rung.
+
+## 3. What is left, and what points at it
+
+The one structural difference: **repetition 1's rung was the fourth of a ladder, 91
+minutes into the process, after rungs at 3.21, 6.42 and 12.84 q/s. Repetitions 2 and
+3 ran that rate alone, straight out of a 200-request warm-up.**
+
+The collector's figures say the same thing from the other side:
+
+| | GC cycles | GC CPU share | peak RSS |
+| --- | --- | --- | --- |
+| rep 1, rung 4 | 23,138 | 5.5% | 114.2 MiB |
+| rep 2 | 5,575 | 1.6% | 1020.8 MiB |
+
+A quarter of the collections and nine times the memory. That is the shape of a pacer
+that is behind: [milestone 5 §2](#2-the-prediction-was-wrong-twice-and-the-conclusion-is-right-anyway) measured a query allocating
+43.6 MiB with a live heap that rises to tens of megabytes while 30,549 candidates are
+held, and a process that has spent ninety minutes climbing a ladder reaches that load
+with a heap goal already grown to meet it. One that starts there does not.
+
+**This is a hypothesis, not a result.** Nothing here varied the ladder prefix
+deliberately, and GC pacing is one of at least two readings — the other being that
+`inflight` 40 admits a burst at rung start which a process arriving from a lower rung
+never sees. Separating them is [milestone 8](../.claude/prds/weft-hardening.prd.md)'s
+work, and §6 carries it.
+
+## 4. Known costs
+
+### 4.1 The first repetition was measured on a sleeping machine, and nothing said so
+
+The campaign's first attempt ran 08:11 to 22:03 by the wall clock and reported 92
+minutes of rungs. The lid had closed at 08:34:13 — twenty-three minutes into the
+first rung — and the machine slept and dark-woke for thirteen hours.
+
+**Every figure in that report was plausible.** Each rung's elapsed matched its own
+schedule to within a second, shed was zero below the knee, `majflt` was 0, and the
+headline p99 came out **107.332 ms against milestone 5's 108.193 ms** — a 0.8%
+agreement that would have read as reproduction.
+
+`time.Since` reads the monotonic clock, and on Darwin that clock does not advance
+while the system is asleep. Measuring the time the process experienced is the right
+quantity for a latency, and is exactly why it cannot see time the process did not
+experience. The run was caught only because a `date` happened to be piped either side
+of the command.
+
+The repair is `loadgen.Elapsed`, which reads both clocks and publishes the gap: past
+`SuspendTolerance` a rung prints `SUSPENDED` as its **first** line and both summaries
+refuse the run outright. The check runs before the ladder-shape check, because a
+complete five-rung sweep across a sleeping machine satisfies every other condition.
+Evidence is [weft-m7.tdd.md](testing/weft-m7.tdd.md).
+
+**Milestone 5's ladder had no such accident.** There were seven clamshell sleeps on
+the two days it was measured, and whether any overlapped it is **unanswerable from
+its published record**. That is not a claim that milestone 5 slept; it is the
+statement that nothing published can rule it out, and that this was true of every
+number in this repository until `84b0467`.
+
+### 4.2 The load-point rule is bistable on this workload, and that was visible before the campaign
+
+Saturation is the first rung whose p50 passes twice the unloaded median. On this
+corpus rung 1 sits within a few milliseconds of that threshold, so which side it
+lands on decides whether the headline is the ladder's slowest rung or its fastest:
+
+| run | unloaded | threshold | rung 1 p50 | saturation at | headline |
+| --- | --- | --- | --- | --- | --- |
+| milestone 5 | 36.66 ms | 73.3 ms | above it | rung 1 | 3.41/s, p99 108.193 ms |
+| discarded (slept) | 35.608 ms | 71.2 ms | 77.373 ms | rung 1 | 3.51/s, p99 107.332 ms |
+| **rep 1** | 38.955 ms | 77.9 ms | **68.963 ms** | **rung 5** | **25.67/s, p99 69.136 ms** |
+
+So `108.193 ms` and `69.136 ms` are not two measurements of one quantity. They are
+p99s at load points seven times apart, selected by a rule that flipped on a few
+milliseconds of rung-1 median. Rule 1 is not wrong — a headline has to be quoted
+somewhere and choosing after the fact is worse — but its output on this workload is
+not stable, and milestone 5 published one draw from it.
+
+### 4.3 Rule 3 was registered a day before it was falsified
+
+[PERF.md](PERF.md) §3 rule 3 and [D-011](DECISIONS.md) were committed before any
+figure they govern, which is the discipline working. They were also wrong, and the
+campaign they governed is what showed it. The rule directs a median to be taken over
+three observations of a rung; §1 shows the rung is not the same rung when it is
+measured alone.
+
+The rule is **left standing and marked**, not rewritten. What replaces it is a
+question this milestone opened and did not answer, and answering it after seeing
+these numbers is exactly the move the section exists to prevent — see
+[D-012](DECISIONS.md).
+
+### 4.4 One arm, and the campaign stopped early
+
+`text+vector` was never reached. Rules 4 and 6 costed it at 9.8 of the campaign's
+14.6 hours, and spending that on an arm whose repetition rule is now in question
+would have bought three more numbers of the same kind.
+
+### 4.5 The collapse is not characterised
+
+Three observations put it somewhere between "does not happen at 25.67/s" and "sheds
+14% at 25.67/s". Neither the rate at which it begins nor what tips a given run into
+it is measured here. Milestone 5 §3.2 placed a knee at 27.28 q/s; §1 shows a flat
+rung at 25.67 and a collapsed one at the same rate, so **the knee is not a rate** —
+and milestone 8's pass line is currently written as one.
+
+## 5. What this milestone did produce
+
+Two things, neither of them the number it went looking for:
+
+1. **An instrument that can no longer publish a measurement it did not make.** A
+   suspended rung is refused, a ladder cut short is refused, an operator-chosen rate
+   no longer wears a rule's label. All three are asserted rather than commented —
+   seventeen tests across `internal/loadgen`, `cmd/weft-eval` and `bench/`, the last
+   of which had none before this milestone.
+2. **A rung that says how far it has got**, every thirty seconds, from a goroutine
+   that serves no request. Milestone 5 §4.3 named this and deferred it; a
+   forty-nine-minute silence is what made the sleeping ladder cheap to miss.
+
+## 6. Carried forward
+
+1. **What must a repetition hold constant?** §3 says the ladder prefix is a
+   variable and neither of its two readings is tested. Until it is answered there is
+   no procedure that produces a spread, and [D-011](DECISIONS.md) is marked rather
+   than replaced.
+2. **The knee is not a rate** (§4.5). Milestone 8's pass line — shed 0 at 27.28 q/s —
+   is not a predicate on the current evidence, since the same rate both passes and
+   fails. It needs re-specification before it can be judged, and that is a change to
+   a registered pass line, so it belongs to the PRD rather than to a plan.
+3. **`text+vector` still has no published tail** (§4.4), unchanged from milestone 5.
+4. **Milestone 5's headline is a single draw from a bistable rule** (§4.2), measured
+   on a machine whose sleep state is unrecorded (§4.1). Neither is a reason to
+   withdraw it; both are reasons not to compare against it without saying so.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 8 — What a repetition has to hold
+
+**Verdict: the variable is the prefix, and holding it makes the measurement
+reproducible.** The same arrival rate that gave 37.9 ms and 1.539 s in milestone 7
+gives 37.827 ms again — shed 0, ten thousand samples — when it is reached as the
+fourth rung of a ladder whose earlier rungs ran ten thousand samples each. Milestone
+7's repetition 1 reproduces rung for rung, ninety-seven minutes of it, and the figure
+the whole exercise was about lands **0.07% from its first observation**.
+
+A repetition is therefore a ladder after all, which is what
+[D-011](DECISIONS.md) denied — and the reason it denied it (three sweeps derive three
+different sets of rates) is answered by naming the rates rather than deriving them.
+[D-013](DECISIONS.md) is the repair, licensed in advance by
+[PERF.md](PERF.md) §5.2 outcome 1.
+
+The prefix is not a switch, though. A prefix of the same *shape* at a fifth of the
+*depth* — three rungs of 2,000 samples instead of 10,000 — does not merely fail to
+help; it produces the worst observation of the four.
+
+## 1. The four runs
+
+All at **25.67 q/s**, `text` arm, Apple M4, Go 1.26.1, `GOMAXPROCS` 10, 171,332
+documents, 50 judged queries, k=10. Every run under `caffeinate -dimsu`, none printed
+`SUSPENDED`, and each one's wall clock accounts for its rungs to within seconds.
+
+| | prefix | prefix depth | `inflight` | n / shed | p50 | p99 | peak RSS | GC cycles | unloaded p50 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | none | — | 40 | 8,894 / **1,106** | 47.126 ms | — | 706.6 MiB | 12,922 | 36.833 ms |
+| B | none | — | 10 | 7,617 / **2,383** | 369.567 ms | — | 271.2 MiB | 10,686 | 36.128 ms |
+| C | 3 rungs | 2,000/rung | 40 | 1,342 / **658** | 2.088 s | — | 987.5 MiB | 611 | 35.767 ms |
+| **D** | **3 rungs** | **10,000/rung** | **40** | **10,000 / 0** | **37.827 ms** | **68.179 ms** | **122.4 MiB** | **23,166** | **36.796 ms** |
+
+The four unloaded medians span 3% — 35.767 ms to 36.833 ms — so the machine did not
+drift across the two hours, and none of what follows is drift.
+
+## 2. The reproduction
+
+Run D is milestone 7's repetition 1, re-run with its rates named instead of derived:
+
+| rung | milestone 7 rep 1 p50 | run D p50 | rep 1 p99 | run D p99 | shed |
+| --- | --- | --- | --- | --- | --- |
+| 3.21/s | 68.963 ms | 72.370 ms | 100.136 ms | 104.656 ms | 0 / 0 |
+| 6.42/s | 52.719 ms | 54.277 ms | 82.835 ms | 79.082 ms | 0 / 0 |
+| 12.84/s | 40.438 ms | 40.351 ms | 63.654 ms | 62.999 ms | 0 / 0 |
+| **25.67/s** | **37.852 ms** | **37.827 ms** | 69.136 ms | 68.179 ms | **0 / 0** |
+
+Whole ladder, not just the rung under test. The collector agrees to the same
+precision: 23,138 cycles then, 23,166 now, a difference of 0.12% over 390 seconds.
+
+This is the first figure in the project's history that has been measured twice and
+come back. It is also, by [PERF.md](PERF.md) §3 rule 1, a figure that **may not wear
+the headline label** — run D is a ladder someone named, and the rule refuses that at
+one remove. That refusal is correct and it is inconvenient in a specific way §5.3
+prices.
+
+## 3. What separates the four, and what does not
+
+**Not memory.** Run B holds 271.2 MiB — within milestone 8's own 250 MiB
+neighbourhood — and sheds 2,383 requests, more than twice run A at 706.6 MiB. A run
+can be small and still be drowning.
+
+**The collector keeping up.** Normalised per second of rung, the four order
+themselves exactly inversely:
+
+| | GC cycles/s | shed/s |
+| --- | --- | --- |
+| D (deep prefix) | **59.5** | **0** |
+| A (no prefix) | 33.1 | 2.83 |
+| B (no prefix, `inflight` 10) | 27.4 | 6.11 |
+| C (shallow prefix) | **7.7** | **8.28** |
+
+Milestone 7 §3 read the same shape off two observations and called it a hypothesis
+about a pacer arriving with its heap goal already grown. Four points now order
+themselves by it without exception. It remains a **correlation across four runs**, not
+a mechanism: nothing here instruments the pacer, and a heap-goal trace would be the
+next thing that could promote it.
+
+What run C adds is that the pacer's state is not established by *having climbed*; it
+is established by having climbed **far enough**. Eighteen minutes of prefix left the
+collector running at 7.7 cycles per second — an eighth of run D's rate — and produced
+987.5 MiB and a third of the load shed. The two readings milestone 7 §3 left open are
+therefore not symmetric: `inflight` is ruled out as the discriminator (A and B collapse
+at both values), and prefix depth is what is left standing.
+
+## 4. Where the knee is
+
+Milestone 5 measured its own 100% rung at **27.28 q/s** and it collapsed — p50 1.27 s,
+1,438 of 10,000 shed — and that rung had a deep prefix, five rungs at `-rotations 200`
+([milestone 5 §3.2](#32-weft-cannot-sustain-its-own-sequential-throughput-and-bleve-can)). Run D says 25.67 q/s with a deep prefix
+is flat with room to spare: its p50 is 37.827 ms against an unloaded 36.796 ms, nowhere
+near rule 1's twice-unloaded bar.
+
+So the knee sits in a **6.3% band between 25.67 and 27.28 q/s**, and a deep prefix does
+not carry a rung across it. The prefix decides whether 25.67 q/s is survivable; it does
+not decide 27.28 q/s.
+
+Two cautions on the upper bound. Milestone 5's figure is a single observation, taken
+before the instrument could see a suspended machine ([milestone 7 §4.1](#milestone-7--a-baseline-nobody-has-to-qualify)),
+and rule 1 is bistable on this workload (§4.2 there). Nothing between the two rates has
+been measured at all.
+
+**This is milestone 8's pass line, in evidence rather than in prose.** The registered
+targets are shed 0, RSS ≤ 250 MiB and p50 ≤ 100 ms at 27.28 q/s. Run D meets all three
+— 0, 122.4 MiB, 37.827 ms — at 25.67 q/s, 6% below the stated rate, with no engineering
+work done. Whether the milestone has any engineering left in it is one 97-minute run
+away: `-rates 3.41,6.82,13.64,27.28`, the same ladder scaled to milestone 5's baseline.
+
+## 5. Known costs
+
+### 5.1 The registered experiment was cut in three places, and reordered
+
+[PERF.md](PERF.md) §5.2 registered four runs at `-rotations 200`, with-prefix first.
+What ran was:
+
+1. **Reordered** — the two no-prefix arms first, because §5.2's outcome 4 would have
+   made the expensive arms pointless and they cost seven minutes to rule out.
+2. **A cut probe inserted** — run C, `-rotations 40`, ~20 minutes, on the argument that
+   p50, shed, RSS and GC cycles all print at 2,000 samples. It did not reproduce, which
+   left the depth confound the cut created, so the deep arm ran anyway. **The cut bought
+   nothing but the finding in §3's last paragraph** — which is worth more than the 20
+   minutes, but was not what it was spent on.
+3. **One arm dropped** — deep prefix at `inflight` 10, 1.6 h. Runs A and B had already
+   shown `inflight` does not gate the collapse.
+
+So §5.2's outcome 1 is reported as fired on the strength of **one** deep prefix arm, and
+its registered wording says "at both `inflight` values". Half of that condition is
+untested and is carried forward.
+
+### 5.2 A repetition now costs 97 minutes, and one arm cannot afford three
+
+If a repetition is a named ladder, three repetitions of the `text` arm's headline is
+**4.9 hours**, not the 1.6 hours [D-011](DECISIONS.md) budgeted. `text+vector` is four
+times slower per query, which puts its named ladder near 6.5 hours and three of them
+near 19.5 — past any reading of [PERF.md](PERF.md) §3 rule 6. Rule 4's staged depth was
+built for a cheaper problem than the one that now exists, and [D-013](DECISIONS.md)
+states the consequence rather than resolving it.
+
+### 5.3 The reproducible figure is one the rule will not label
+
+Rule 1 refuses the headline label to a ladder an operator named, and a repetition must
+now be exactly that. The resolution is already in rule 3's own text — R is selected once,
+by repetition 1's `-rate 0` sweep, and reused thereafter — so no rule changes. What it
+costs is that the *most* trustworthy observation in this file, run D, is published as a
+rung rather than a headline. Preferring that to relaxing rule 1 is
+[D-013](DECISIONS.md)'s second half.
+
+## 6. Carried forward
+
+1. ~~**`-rates 3.41,6.82,13.64,27.28`** — the one run that decides whether milestone 8
+   has engineering work in it. 97 minutes (§4).~~ **Run — §7.** shed 0 and p50 37.631 ms
+   met; RSS not decidable (§8). What is left is not "the wall": it is a middle-rung
+   excursion — p99 849.853 ms at 13.64 q/s under a clean top rung — and a pass line whose
+   memory clause needs the PRD to choose a reading.
+2. **A deep prefix at `inflight` 10** is untested, so §5.2's outcome-1 condition is
+   half-satisfied (§5.1).
+3. **The pacer explanation is a correlation over four runs** (§3). A heap-goal trace
+   would promote or kill it, and nothing in this milestone instrumented one.
+4. **Nothing between 25.67 and 27.28 q/s has been measured** (§4), and milestone 5's
+   upper bound is a single caveated observation.
+5. **`text+vector` still has no published tail**, and under [D-013](DECISIONS.md) it
+   can no longer afford three repetitions of one either (§5.2).
+6. **The middle-rung excursion is uncharacterised** (§7). Two ladders, and in one of them
+   the 50% rung produced a p99 thirteen times the other's and raised the process peak by
+   206.6 MiB while shedding nothing. It is invisible in p50 and it sits *below* a clean
+   top rung, so nothing in the current pass line would catch it.
+7. **The memory clause needs a reading chosen** (§8). Per-rung strict is undecidable with
+   `getrusage`; ladder-wide is a miss at 345.2 MiB and fires milestone 10. That choice is
+   a registered pass-line change and belongs to the PRD.
+
+## 7. The pass line, judged — 27.28 q/s with the prefix held
+
+Milestone 8's registered targets are shed 0, RSS ≤ 250 MiB and p50 ≤ 100 ms at
+27.28 q/s. §4 said one run decides it. That run is
+`-rates 3.41,6.82,13.64,27.28`, the same ladder scaled to milestone 5's baseline,
+`-rotations 200`, `inflight` 40:
+
+| rung | rate | p50 | p95 | p99 | shed | peak RSS | raised here | GC cycles |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 12.5% | 3.41/s | 75.480 ms | 96.165 ms | 107.807 ms | 0 | 116.6 MiB | +116.6 | 24,198 |
+| 25% | 6.82/s | 48.788 ms | 77.115 ms | 139.897 ms | 0 | 138.6 MiB | +22.0 | 23,466 |
+| 50% | 13.64/s | 40.974 ms | **214.244 ms** | **849.853 ms** | 0 | **345.2 MiB** | **+206.6** | 22,466 |
+| **100%** | **27.28/s** | **37.631 ms** | 52.663 ms | **68.485 ms** | **0** | 345.2 MiB | **+0** | 22,902 |
+
+**Two of three met, and the third is not decidable by the instrument that ran.**
+
+- **shed 0 at 27.28 q/s — met.** Zero of ten thousand.
+- **p50 ≤ 100 ms — met.** 37.631 ms, against an unloaded 35.332 ms.
+- **RSS ≤ 250 MiB — not decidable.** The 345.2 MiB printed at that rung is the mark
+  set two rungs earlier at half the rate; this rung added nothing to it. §8.
+
+**Milestone 5's collapse at 27.28 q/s does not reproduce.** That run reported p50
+1.27 s and 1,438 of 10,000 shed at this rate; this one reports 37.631 ms and shed 0.
+Taken with §4, the 6.3% band closes from above as well: with the prefix held, both
+25.67 and 27.28 q/s are flat, and the two figures are 0.5% apart (37.827 ms and
+37.631 ms). **What milestone 5 measured at 27.28 q/s was not a property of the rate.**
+
+**The excursion is at the middle rung, not the top.** 13.64 q/s shed nothing and still
+produced a p99 of 849.853 ms and raised the process peak by 206.6 MiB. The same rung
+position in the 25.67 ladder — 12.84 q/s, 6% less load — gave p99 62.999 ms and raised
+the mark by 0.1 MiB. Thirteen times the tail and two thousand times the memory, and
+**the p50 sees none of it**: 40.974 ms against 40.351 ms. Two ladders now place an
+excursion below a clean top rung, which is not the shape "the throughput wall" names.
+
+**Run hygiene.** 05:14:02 to 06:45:52, 91 m 50 s of wall clock against 91 m 38 s of
+rungs plus a 10 s warm-up and a 1.7 s cold pass. No `SUSPENDED`. The machine did sleep
+for 4.7 hours — the command was launched at 00:33 and the shell's own `date` printed
+05:14:02 — but the sleep is entirely *before* the process started, so it contains no
+measurement and there is nothing for the suspension check to see. A `date` either side
+is what makes that statement checkable rather than assumed, and it is the habit that
+caught [milestone 7 §4.1](#milestone-7--a-baseline-nobody-has-to-qualify). Unloaded p50
+35.332 ms against the 25.67 ladder's 36.796 ms, 4% apart: no drift.
+
+## 8. A rung cannot say what its own peak was
+
+`ru_maxrss` is a high-water mark the kernel never lowers. `benchReport`'s comment has
+said so since milestone 5 and the report has printed `(process)` next to the figure the
+whole time. Neither stopped this milestone's own pass line from being written as a
+per-rung threshold, and neither stopped this milestone from trying to judge it against a
+number belonging to a different rung.
+
+What a rung *can* say is **how much it raised the mark** — a difference between two
+readings, which is what every other field on that line already is. It now says it:
+
+```text
+rusage  ... peakrss 116.1 MiB (process, raised 0.2 MiB by this rung)
+rusage  ... peakrss 345.2 MiB (process, unchanged by this rung — the mark is an
+            earlier one's, and this rung's own peak is only bounded by it)
+```
+
+The fix **postdates the run above** and no figure in this file moves because of it; what
+changes is what a future ladder is allowed to imply. What it does not do is invent a
+per-rung peak: `getrusage` has no during-this-rung reading, and giving each rung its own
+process would destroy the prefix §2 has just established as load-bearing.
+
+**So the pass line as written is not decidable on a ladder by this instrument**, and two
+readings of it are available:
+
+- **Per-rung, strict** — undecidable. The rung raised the mark by zero, so its own peak
+  is somewhere at or below 345.2 MiB and was not measured.
+- **Ladder-wide** — 345.2 MiB against 250 MiB is a **miss**, and milestone 10's trigger
+  condition fires.
+
+**Both are published and neither is chosen here.** Picking between them is a change to a
+registered pass line, which belongs to the PRD, and the reason to prefer one of them at
+this moment is which verdict it produces — the objection
+[D-012](DECISIONS.md) raised about repairing rule 3 from inside the campaign that broke
+it, in a different place.
+
+**Resolved 2026-08-22, [D-014](DECISIONS.md): the ladder-wide reading, so the clause is a
+miss.** The basis is what the metric is for rather than what it yields. It exists because
+an adopter's first encounter with weft is a memory figure, and an adopter runs a process,
+not a rung — a container sized from a steady-state number dies during the ramp. It is also
+the reading milestone 5 already used when it published "RSS 126→853 MiB". So: **345.2 MiB
+against 250 MiB, recorded as a miss**, charged to a ladder rather than to the rate the pass
+line names, because on this platform nothing separates them without cgo or a second
+module.
+
+**Milestone 10 does not fire on it.** Its trigger is a miss after the milestone's
+engineering, and milestone 8 has attempted none — the miss is the first target that
+engineering has. D-014 carries that argument and what would show it wrong, including the
+case where it turns out to be a way of dodging the trigger rather than a reason against it.
+
+One comparability caveat, now that the number carries a verdict: **345.2 MiB is not
+milestone 5's 853 MiB measured again.** That ladder had a fifth rung at 200% which
+collapsed, and this one stops at the load point by construction, because the pass line is
+about the rate it names and not about behaviour past it. The two are marks over different
+ladders and the difference between them is not a measured improvement.
+
+## 9. A correction: §7's 206.6 MiB is not the candidate decode
+
+§7 localised the excursion to the 13.64 q/s rung and §8 recorded the memory clause as a
+miss against it. [D-014](DECISIONS.md) then kept milestone 10 shut on the grounds that the
+miss was a *target* — specifically the cause the PRD names, "30,549 candidates decoded per
+query".
+
+**That cause does not apply to the rung that was measured.** Every ladder in §1, §2 and §7
+ran the **`text` arm**, which is `make bench`'s default. No scorer on that arm calls
+`engine.Index.Doc`: `pkg/scorer/text` reads `Stats`, `Lookup` and `DocLen` and nothing
+else. The candidate decode is the **vector** arm's cost, and the vector arm has never been
+laddered — [milestone 7 §4.4](#milestone-7--a-baseline-nobody-has-to-qualify) and §6 item 5
+here both say so.
+
+So the attribution in D-014's *Why* was wrong: a `text`-arm measurement explained by a
+`text+vector`-arm mechanism. The decision's structure survives — milestone 10's trigger
+still requires a miss after engineering, and none has been attempted — but its confidence
+that the target was already named does not. **The 345.2 MiB remains unattributed**, and
+what the `text` arm allocates per query is now the open question: `Lookup` returns a fresh
+`[]Posting` per term per query, and fusion and `TopK` build slices over the union.
+
+### What was fixed anyway, and what it is worth
+
+The candidate decode is real, and chasing this produced a guard for it. `Index.Doc`
+decodes a whole record — key, text, links — and the vector scorer reads one field of it.
+Measured on a synthetic corpus, that is **one full copy of the document text per candidate
+scored**:
+
+```text
+before   4,208,024 bytes to score 64 documents, against 13,312 for the same
+         vectors with 4 MiB less text
+after    allocation no longer tracks text the query never reads
+```
+
+`Index.Vector` is the accessor that lets a caller say which fields it wants. It reads the
+same record through the same decoder in a mode that skips the copying, keeps every check —
+non-empty key, finite components, the record's own seeded checksum — and answers false for
+damage, for a wrong id, and for a document carrying no vector.
+
+**What it is worth is not measured on the corpus.** The arm it helps has no published
+memory figure to improve, which is §6 item 5 and is now also the reason this saving is a
+bounded property rather than a number. It is not a milestone 8 pass-line movement and is
+not claimed as one.
+
+### The invariant this spent
+
+The PRD registered "golden API files byte-identical" for this round. The accessor adds one
+line to `pkg/engine/testdata/engine_api.txt`. `pkg/fusion` is untouched, `go list -m all`
+is still one line, `public_api.txt` does not move, and no existing signature changes. The
+alternative — a zero-copy decode aliasing the mapping — would have kept the file identical
+while silently changing what a `Document`'s lifetime means, which is a worse trade for the
+same saving. [D-015](DECISIONS.md) carries the argument.

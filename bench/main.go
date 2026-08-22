@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"math"
@@ -313,7 +314,9 @@ func measure(ctx context.Context, data, indexPath string, rate float64, rotation
 		}
 	}
 
-	summarize(rungs, rates[:len(p50s)], p50s, unloaded)
+	// The full `rates`, not rates[:len(p50s)]: trimming them is what made an interrupted
+	// ladder look like a complete shorter one to the rule.
+	summarize(os.Stdout, rungs, rates, p50s, unloaded)
 	if f := failed.Load(); f > 0 {
 		fmt.Printf("\nWARNING: %d searches returned an error and are counted in the distributions above\n", f)
 	}
@@ -403,13 +406,23 @@ func warmup(ctx context.Context, qs []eval.EvalQuery, do func(int), failed *atom
 
 // measureRung applies one arrival rate and collects everything measured around it.
 func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) rung {
+	var progress loadgen.Progress
+	do = progress.Count(do)
+
 	fb, cb, pb := loadgen.ProcFaults(), loadgen.GCCycles(), loadgen.GCPauseTotal()
 	// Both CPU totals rather than their ratio, for the reason cmd/weft-eval
 	// states: a ratio of running totals does not subtract, so the raw figure
 	// stops moving after the first rung whatever the collector then does.
 	gcCPU0, totalCPU0 := loadgen.GCCPUSeconds()
 	start := time.Now()
+	stopProgress := progress.Report(os.Stdout, n, loadgen.ProgressEvery)
 	samples, shed := loadgen.Drive(ctx, r, n, inflight, do)
+
+	// Stopped before the counters are read, not deferred: a reporter still ticking
+	// would charge this rung with its own progress lines, and its next line would land
+	// inside the distribution table below. Stop is synchronous, so past here nothing
+	// else writes. Same position cmd/weft-eval's benchRung puts it in.
+	stopProgress()
 
 	// Every after-snapshot taken before any of them is reduced. Read inside the
 	// composite literal they were evaluated in lexical order, which put both Summarize
@@ -418,7 +431,7 @@ func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) 
 	// own page faults while gcCPU1, captured first, excluded them. Same correction
 	// cmd/weft-eval's benchRung carries; an asymmetry here is a factor in the published
 	// ratio.
-	elapsed := time.Since(start)
+	elapsed, unaccounted := loadgen.Elapsed(start)
 	gcCPU1, totalCPU1 := loadgen.GCCPUSeconds()
 	fa, ca, pa, rss := loadgen.ProcFaults(), loadgen.GCCycles(), loadgen.GCPauseTotal(), loadgen.MaxRSS()
 
@@ -428,45 +441,71 @@ func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) 
 		shed:    shed,
 		gcCPU:   loadgen.GCCPUShareBetween(gcCPU0, totalCPU0, gcCPU1, totalCPU1),
 		pause:   pa - pb,
-		elapsed: elapsed, faults: fa.Sub(fb), cycles: ca - cb, peakRSS: rss,
+		elapsed: elapsed, unaccounted: unaccounted,
+		faults: fa.Sub(fb), cycles: ca - cb, peakRSS: rss,
 	}
 }
 
 // summarize applies the load-point rule, in the same shape cmd/weft-eval's
-// benchSummary does.
-func summarize(rungs []rung, rates []float64, p50s []time.Duration, unloaded time.Duration) {
-	// A one-rung ladder has no load point to find. SaturationRate over a single rate
-	// returns that rate whenever its p50 exceeds twice the unloaded median — there is
-	// nothing for it to be *first* past — and HeadlineRate returns it either way, so an
-	// explicit -rate used to print a hand-chosen load point under the label of a
-	// measured one.
-	if len(rungs) < 2 {
+// benchSummary does — and through the same predicate, which is the part that matters.
+// Rule 2 is a ratio, so a claim this side admits and the other suppresses moves the
+// published number.
+//
+// `rates` is the intended ladder, not the rungs reached. See loadgen.RuleApplies.
+// outf is the same one-place error drop as cmd/weft-eval/bench.go's, for the same
+// reason: these are report lines, and a failed write to stdout has nowhere left to
+// be reported. Duplicated rather than shared because this is a separate module and
+// importing the root one is what the quarantine exists to prevent.
+func outf(w io.Writer, format string, a ...any) {
+	fmt.Fprintf(w, format, a...) //nolint:errcheck // see above
+}
+
+func summarize(w io.Writer, rungs []rung, rates []float64, p50s []time.Duration, unloaded time.Duration) {
+	// By index, not by value: a rung is 192 bytes and copying one per iteration to
+	// compare a float is what gocritic's rangeValCopy names.
+	line := func(label string, g *rung) {
+		outf(w, "%s   bleve text  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
+			label, g.rate, fmtQ(g.all.P99, g.all.P99ok), fmtQ(g.exGC.P99, g.exGC.P99ok), 100*g.gcCPU)
+	}
+
+	// Checked before the ladder's shape, for the reason weft's benchSummary gives: a
+	// complete sweep across a sleeping machine satisfies RuleApplies and would
+	// otherwise be quoted.
+	for i := range rungs {
+		if rungs[i].unaccounted <= loadgen.SuspendTolerance {
+			continue
+		}
+		outf(w, "\nDISCARD this run: the process did not run for %v of the rung at "+
+			"%.2f/s, so the ladder was measured across a suspension. There is no headline. "+
+			"Re-run it on a machine that stays awake — `caffeinate -dimsu make bench-compare`.\n",
+			rungs[i].unaccounted.Round(time.Second), rungs[i].rate)
+		return
+	}
+
+	if !loadgen.RuleApplies(rates, p50s) {
 		if len(rungs) == 0 {
 			return
 		}
-		g := &rungs[0]
-		fmt.Printf("\none rung measured — an explicit -rate, or a ladder cut short — so there is no "+
-			"saturation point and no headline; sweep with -rate 0 to give the rule something to apply\n"+
-			"rung       bleve text  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
-			g.rate, fmtQ(g.all.P99, g.all.P99ok), fmtQ(g.exGC.P99, g.exGC.P99ok), 100*g.gcCPU)
+		outf(w, "\n%d of %d rungs measured — an explicit -rate, or a ladder cut short — so the "+
+			"load-point rule has nothing to apply and there is no saturation point and no "+
+			"headline; sweep with -rate 0 and let it finish to give the rule a ladder\n",
+			len(rungs), len(rates))
+		for i := range rungs {
+			line("rung    ", &rungs[i])
+		}
 		return
 	}
 	sat := loadgen.SaturationRate(rates, p50s, unloaded)
 	head := loadgen.HeadlineRate(rates, sat)
 	if sat == 0 {
-		fmt.Printf("\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
+		outf(w, "\nsaturation: not reached on this ladder; headline is the top rung %.2f/s\n", head)
 	} else {
-		fmt.Printf("\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
+		outf(w, "\nsaturation: %.2f/s (first rung past 2x the unloaded p50 of %v); headline is %.2f/s\n",
 			sat, unloaded.Round(time.Microsecond), head)
 	}
-	// By index, not by value: a rung is 192 bytes and copying one per iteration to
-	// compare a float is what gocritic's rangeValCopy names. cmd/weft-eval's
-	// benchSummary already reads its reports this way.
 	for i := range rungs {
-		g := &rungs[i]
-		if g.rate == head {
-			fmt.Printf("HEADLINE   bleve text  rate=%.2f/s  p99=%s  p99 minus STW=%s  GC CPU %.1f%%\n",
-				g.rate, fmtQ(g.all.P99, g.all.P99ok), fmtQ(g.exGC.P99, g.exGC.P99ok), 100*g.gcCPU)
+		if rungs[i].rate == head {
+			line("HEADLINE", &rungs[i])
 		}
 	}
 }
@@ -479,8 +518,13 @@ type rung struct {
 	gcCPU     float64
 	pause     time.Duration
 	elapsed   time.Duration
-	faults    loadgen.FaultCounts
-	cycles    uint64
+	// unaccounted is wall time this rung cannot account for — the process was not
+	// running for it. See loadgen.Elapsed. The field exists on weft's side too, which
+	// is what keeps the two comparable: a ratio whose denominator slept carries no
+	// sign of it.
+	unaccounted time.Duration
+	faults      loadgen.FaultCounts
+	cycles      uint64
 	// peakRSS is captured when the rung ends rather than read at print time, which is
 	// what this did before. ru_maxrss is a high-water mark, so reading it after
 	// Summarize allocated and sorted two 10,000-element slices reported a peak that
@@ -495,6 +539,12 @@ type rung struct {
 func (g rung) print() {
 	fmt.Printf("\nrate=%.2f/s  n=%d  shed=%d  elapsed=%v\n",
 		g.rate, g.all.N, g.shed, g.elapsed.Round(time.Millisecond))
+	// First rather than last, as on weft's side: a reader who takes the distribution
+	// before reaching a trailing caveat has taken the wrong thing.
+	if g.unaccounted > loadgen.SuspendTolerance {
+		fmt.Printf("  SUSPENDED the process did not run for %v of this rung — the machine slept. "+
+			"Nothing below is a measurement.\n", g.unaccounted.Round(time.Second))
+	}
 	fmt.Printf("  latency   p50 %s  p95 %s  p99 %s  p99.9 %s  max %v\n",
 		fmtQ(g.all.P50, g.all.P50ok), fmtQ(g.all.P95, g.all.P95ok), fmtQ(g.all.P99, g.all.P99ok),
 		fmtQ(g.all.P999, g.all.P999ok), g.all.Max.Round(time.Microsecond))

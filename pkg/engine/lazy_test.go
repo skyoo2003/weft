@@ -14,7 +14,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 )
+
+// postingSize is what one decoded Posting costs, taken from the type rather than
+// written down: a hand-written 16 is wrong the moment the struct gains a field,
+// and the budget below is a multiple of it.
+const postingSize = uint64(unsafe.Sizeof(Posting{}))
 
 // assertReadAPIsAgree compares two indexes through the read methods a scorer
 // uses, rather than field by field.
@@ -61,6 +67,19 @@ func assertReadAPIsAgree(t *testing.T, want, got *Index) {
 		}
 		if got.DocLen(id) != want.DocLen(id) {
 			t.Errorf("DocLen(%d) = %d, want %d", id, got.DocLen(id), want.DocLen(id))
+		}
+		// Vector is a second decoder over the same record, skipping the fields it
+		// does not return. Two decoders for one format is how a format drifts, so
+		// the guard is that it agrees with Doc — on both sides of a commit, and on
+		// documents carrying no vector, where both have to answer false.
+		wv, wvok := want.Vector(id)
+		gv, gvok := got.Vector(id)
+		if wvok != (len(w.Vector) > 0) || gvok != (len(g.Vector) > 0) {
+			t.Errorf("Vector(%d) present = %v/%v, want %v/%v (Doc's vector lengths %d/%d)",
+				id, wvok, gvok, len(w.Vector) > 0, len(g.Vector) > 0, len(w.Vector), len(g.Vector))
+		}
+		if !slices.Equal(gv, wv) || !slices.Equal(gv, g.Vector) {
+			t.Errorf("Vector(%d) = %v, want %v and Doc's %v", id, gv, wv, g.Vector)
 		}
 		gid, ok := got.Resolve(w.Key)
 		if !ok || gid != id {
@@ -1406,5 +1425,61 @@ func TestALyingBlockMinimumIsRefused(t *testing.T) {
 	}
 	if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Scrub with a lying block minimum: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestLookupDoesNotCopyPostingsItWasAlreadyHanded prices the merge on the shape every
+// published figure was measured on.
+//
+// lookupAt asks each claiming segment for its postings and merges what comes back, and
+// the merge is a copy: `out = append(out, pl...)`. With one segment claiming the term and
+// nothing pending, that copy has nothing to merge — the caller gets a second
+// materialisation of a list it had already been handed, plus whatever append's growth
+// left behind.
+//
+// One segment is not an edge case here. `make eval-data` builds exactly one, so it is the
+// shape behind every number in docs/PERF.md, and a common term on that corpus is tens of
+// thousands of postings — per term, per query, forty queries in flight.
+//
+// The floor is the decoded list itself, which the caller has to get. The budget is that
+// plus a quarter: enough for the map's own bookkeeping, not enough for a second copy.
+func TestLookupDoesNotCopyPostingsItWasAlreadyHanded(t *testing.T) {
+	const docs = 20000
+	ix := New()
+	for i := range docs {
+		// Two terms a document: one every document shares, one nothing else has. The
+		// shared one is what a query asks for; the unique one keeps the vocabulary
+		// honest so the postings block is not the whole segment.
+		if _, err := ix.Add(Document{Key: fmt.Sprintf("doc-%05d", i), Text: fmt.Sprintf("common u%d", i)}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+	dir := t.TempDir()
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	open, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer open.Close() //nolint:errcheck // nothing left to do about it in a test
+
+	// One lookup first: whatever the mapping and the terms index set up once is not what
+	// this measures.
+	if got := open.Lookup("common"); len(got) != docs {
+		t.Fatalf("Lookup returned %d postings, want %d", len(got), docs)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got := open.Lookup("common")
+	runtime.ReadMemStats(&after)
+	used := after.TotalAlloc - before.TotalAlloc
+
+	floor := uint64(len(got)) * postingSize
+	if budget := floor + floor/4; used > budget {
+		t.Errorf("Lookup allocated %d bytes for %d postings whose decoded form is %d: "+
+			"the list is materialised more than once (budget was %d)",
+			used, len(got), floor, budget)
 	}
 }

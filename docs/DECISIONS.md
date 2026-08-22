@@ -731,3 +731,455 @@ A weaker signal, and mechanical: `ExampleScorer` and the three paragraphs added 
 `doc.go` and `search.go` never change again while the same three questions keep
 being asked. That would mean the repair was aimed at the trial rather than at
 readers.
+
+---
+
+## D-011 — A repetition is a rung, not a ladder, and the arm nobody can afford to ladder gets a staged depth
+
+**Date:** 2026-08-20
+**Milestone:** 7 — a baseline nobody has to qualify
+**Status:** accepted, **registered before the campaign measured anything**
+
+### Context
+
+[PERF.md](PERF.md) §5 has said "the headline is the median of three repetitions with
+the spread reported beside it" since milestone 5 was planned. Milestone 5 published
+one run ([FINDINGS](FINDINGS.md) milestone 5 §4.5). It also published no tail at all
+for `text+vector` — the arm a user would actually deploy — because at four times the
+per-query cost, ten thousand samples is over five hours (§4.4).
+
+Neither is a rule that was wrong. Both are rules that were never made operable, and a
+rule with no procedure is a rule right up until the first time it is inconvenient.
+
+Milestone 8's pass line is an absolute figure at a named load. It is measured against
+this baseline. If the baseline is one observation of unknown spread, every claim built
+on it inherits that.
+
+### Question
+
+What, exactly, is a repetition — and how does an arm that cannot be laddered three
+times get a publishable tail without lowering the bar that makes a tail worth reading?
+
+### Decision
+
+**A repetition is the same rung measured again, not the ladder swept again.**
+
+Repetition 1 sweeps with `-rate 0` and rule 1 selects the headline rate R.
+Repetitions 2 and 3 run `-rate R`. The published figure is their median, with the
+minimum and maximum beside it.
+
+**And sample depth is staged for `text+vector` rather than the quantile rule
+relaxed.** A thin ladder (`-rotations 40`, 2,000 samples per rung) selects the load
+point, because a p50 needs 200 samples and rule 1 reads p50s. A deep rung
+(`-rotations 200`) at that rate produces the p99.
+
+Both are written as rules 3 and 4 in [PERF.md](PERF.md) §3, with the commands in
+§5.1, and this file is committed alongside them — before any figure they govern
+exists.
+
+### Why
+
+**Three sweeps have no common rung.** Every rate on the ladder is `benchUnloaded`
+scaled by `loadgen.Ladder`, and `benchUnloaded` is 200 sequential requests taken
+fresh at the start of each run. Three sweeps produce three different sets of five
+rates. "The 100% rung" in two of them is two different loads, and a median over them
+is a median over a quantity that changed between observations. This is not a
+refinement of the median-of-three rule; it is the only reading of it that computes.
+
+The cost is named: repetitions 2 and 3 do not re-derive R, so they cannot detect that
+the machine's sequential throughput moved. That is why each run's unloaded p50 is
+recorded beside its p99 — the drift is then visible as data rather than absorbed into
+the spread. R is also quoted to two decimals, so repetitions 2 and 3 run about 0.04%
+off repetition 1's actual rung.
+
+**Relaxing `Printable` was the alternative, and it was refused.** Printing a p99 off
+two thousand samples would have given `text+vector` a tail immediately. It would also
+have made every published quantile in this repository mean something different from
+what [PERF.md](PERF.md) §2.3 says it means, to buy one number. Staging the depth costs
+an extra run and changes no rule. The honest cost of staging is that selection and
+measurement happen at different depths, so a thin ladder could in principle select a
+different rung than a deep one would — registered as a finding to publish if it
+happens, not as an error to hide.
+
+**Registered before, not written after.** [D-004](#d-004--the-graph-verdict-needs-two-conditions-and-they-are-fixed-before-the-numbers-exist)
+fixed milestone 4's verdict conditions before its numbers existed and
+[D-010](#d-010--adoption-is-decided-by-a-trial-and-the-extension-point-is-not-designed-before-it)
+committed `ADOPTION.md` before the trial ran. A decision record written after the
+campaign would be a description of what was done, and the thing that makes these
+rules worth anything is that they were not available to be chosen once the numbers
+were on screen. Rule 5 in particular — *the median becomes the published figure, and
+if the worst observation reaches the 10× bar the verdict says so* — decides in
+advance how to report a result nobody wants.
+
+### What would show this decision was wrong
+
+Two signals, both mechanical:
+
+**The three observations agree to within noise, run after run, across milestones.**
+Then the repetition campaign is 3.1 hours of `text` arm time buying a spread that was
+never in doubt, and rule 3 should collapse back to one run with the spread quoted from
+history. Milestone 7's own §4 is where that first becomes checkable — if nothing the
+three runs say changes any verdict, that is the finding, and it gets published as one
+rather than quietly justifying the next campaign.
+
+**The thin ladder selects a different rung than the deep one.** Then rule 4's
+staging is not a cost-saving on one arm, it is a claim that sample depth does not move
+rule 1 — and that claim would be false. The repair is not to widen the thin ladder but
+to say so in `text+vector`'s published figure, because the same doubt then applies to
+every headline rule 1 has ever selected.
+
+---
+
+## D-012 — D-011's premise is false; mark the rule, do not replace it from inside the campaign that broke it
+
+**Date:** 2026-08-21
+**Milestone:** 7 — a baseline nobody has to qualify
+**Status:** accepted
+**Context:** [FINDINGS milestone 7](FINDINGS.md), [D-011](#d-011--a-repetition-is-a-rung-not-a-ladder-and-the-arm-nobody-can-afford-to-ladder-gets-a-staged-depth)
+
+### Context
+
+[D-011](#d-011--a-repetition-is-a-rung-not-a-ladder-and-the-arm-nobody-can-afford-to-ladder-gets-a-staged-depth)
+decided, one day before the campaign ran, that a repetition is the same rung measured
+again rather than the ladder swept again. The argument was arithmetic and still holds:
+every rung's rate derives from a fresh `benchUnloaded`, so three sweeps give three
+different sets of rates and there is nothing common to take a median of.
+
+The campaign then measured 25.67 q/s three times. One observation shed nothing and
+held a 37.9 ms median at 114 MiB. Two collapsed — 1.539 s and 416 ms, 14% and 11% of
+the load shed, 1021 MiB and 765 MiB resident. Same corpus, same binary, same machine,
+same day, no suspension in any of them.
+
+The difference that survives every check in [FINDINGS §2](FINDINGS.md) is that the
+flat observation was the fourth rung of a ladder and the two collapses were single
+rungs out of a warm-up. **A rung measured alone is not the rung D-011 thought it was
+repeating.**
+
+### Question
+
+Rule 3 is falsified. Do we replace it now — three full sweeps, a pinned-rate ladder
+flag, a fixed prefix — or mark it and stop?
+
+### Decision
+
+**Mark it. Publish the falsification. Do not choose a replacement inside the
+milestone whose numbers produced it.**
+
+1. [PERF.md](PERF.md) §3 rule 3 stays on the page, with what falsified it named
+   beside it. It is not edited into something that would have worked.
+2. "What must a repetition hold constant" becomes an open question against
+   milestone 8, carried in [FINDINGS §6](FINDINGS.md).
+3. No fourth run. [PERF.md](PERF.md) §3 rule 5 clause 4 already fixed that answer
+   for a spread this rule could not survive, and a 40× spread is past any reading of
+   it.
+
+### Why
+
+The discipline this repository runs on is that a rule is worth something only if it
+was not available to be chosen once the numbers were on screen. That constraint does
+not lift when the rule turns out to be wrong — it binds hardest exactly then, because
+the replacement would be picked by someone who has just seen which shapes produce
+which answers. Three candidate repairs are already visible from here, and the reason
+to prefer one of them over another is currently *which run it would have made look
+reproducible*.
+
+Marking costs a milestone's headline. [Milestone 7](FINDINGS.md) closes with no
+median and no spread, which is a worse artifact than the one it set out to produce
+and a better one than a median assembled from a rule known to be measuring two
+different things.
+
+There is also a positive result to protect. The campaign produced an instrument that
+refuses to publish what it did not measure — a suspended ladder, a ladder cut short,
+an operator-chosen rate wearing a rule's label. Those are assertions now, not
+comments. Rewriting rule 3 in the same breath would put the milestone's one solid
+output next to a rule chosen against its own evidence.
+
+The cost is named: milestone 8 inherits an unanswered procedural question on top of
+its engineering one, and its own pass line — *shed 0 at 27.28 q/s* — is not a
+predicate until it is answered, since [FINDINGS §4.5](FINDINGS.md) shows one rate
+both passing and failing. That is worse for milestone 8's schedule and better for
+whatever it eventually claims.
+
+### What would show this decision was wrong
+
+**The ladder prefix turns out not to be the variable.** §3's reading is a hypothesis
+with a named alternative — that `inflight` 40 admits a start-of-rung burst a process
+arriving from a lower rung never sees. If the prefix is ruled out, then rule 3 was
+falsified by something it could have been written to control, and marking it rather
+than fixing it will have cost a milestone for nothing. The experiment is cheap and it
+belongs to milestone 8: run the same rate behind two different prefixes and behind two
+`inflight` caps.
+
+**Nobody returns to the question.** A rule marked as falsified and left standing is
+one nobody has to argue with. If milestone 8 publishes a performance figure without
+first answering what a repetition holds constant, this decision will have converted a
+wrong rule into no rule, which is the outcome it was trying to avoid.
+
+## D-013 — A repetition is the ladder, named rather than derived, and it is published without the label
+
+**Date:** 2026-08-22
+**Milestone:** 8 — the throughput wall
+**Status:** accepted
+**Context:** [FINDINGS milestone 8](FINDINGS.md), [PERF.md §5.2](PERF.md),
+[D-011](#d-011--a-repetition-is-a-rung-not-a-ladder-and-the-arm-nobody-can-afford-to-ladder-gets-a-staged-depth),
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+
+### Context
+
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+refused to repair rule 3 from inside the campaign that falsified it, and named the
+experiment that would license a repair: the same rate behind two prefixes and two
+`inflight` caps. [PERF.md](PERF.md) §5.2 registered that experiment, with what each of
+four outcomes would license, before any of it ran.
+
+Outcome 1 fired. 25.67 q/s reached as the fourth rung of a ladder whose earlier rungs
+ran 10,000 samples each gave p50 **37.827 ms** with **shed 0**, against milestone 7's
+37.852 ms and shed 0 — 0.07% apart, with the collector's cycle count 0.12% apart. The
+same rate with no prefix collapsed at both `inflight` values. A prefix of the same
+shape at a fifth of the depth collapsed hardest of all.
+
+### Question
+
+Rule 3 needs an operable form. Is a repetition a rung, a ladder, or something else —
+and if it is a ladder, what happens to rule 1's refusal to label one?
+
+### Decision
+
+**A repetition is the same ladder, with its rates named rather than derived.**
+
+1. Repetition 1 is `-rate 0`. The sweep derives the rates and rule 1 selects the
+   headline rate **R** from them.
+2. Repetitions 2 and 3 are `-rates <repetition 1's rungs, through R>` — the same
+   prefix, the same rates, named so that they are shared rather than re-derived.
+3. The published figure is the median of the three at R, with the spread reported as
+   minimum and maximum beside it. Each repetition's own unloaded p50 is recorded, as
+   rule 3 already required.
+4. **Rule 1 does not change.** Repetitions 2 and 3 print no headline label, because R
+   was selected once — by the sweep — and is being reused. This is what rule 3 already
+   said about its single-rung repetitions, and it survives the change of what a
+   repetition is.
+5. `text+vector` gets **one** named ladder rather than three. That is not a new
+   decision: it is [PERF.md](PERF.md) §3 rule 6's first cut, applied to a budget that
+   grew.
+
+[D-011](#d-011--a-repetition-is-a-rung-not-a-ladder-and-the-arm-nobody-can-afford-to-ladder-gets-a-staged-depth)
+is superseded on its central claim and kept on its arithmetic. D-012's marking of rule 3
+is discharged.
+
+### Why
+
+D-011's argument was never wrong about *derivation*: three sweeps take three fresh
+`benchUnloaded` readings, so their rungs are three different loads and nothing common
+survives to take a median of. What it did was conclude from that that the ladder cannot
+be the unit — when the actual consequence is only that the rates cannot be *derived*
+twice. Naming them removes the whole difficulty, and `-rates` is that instrument.
+
+The reason to accept the cost rather than look for a cheaper unit is that the cheaper
+unit is the one that failed. A single rung is 6.5 minutes and gives 37.9 ms or 1.539 s
+depending on nothing the report records. A named ladder is 97 minutes and has now given
+the same number twice, rung for rung.
+
+Choosing this repair now is legitimate for exactly the reason choosing it in milestone 7
+would not have been: the outcome that licenses it was written down before the run that
+produced it, and the three candidate repairs D-012 could see were not ranked by which
+run they would flatter.
+
+### What would show this decision was wrong
+
+**A third named ladder does not reproduce the first two.** One reproduction is one. The
+procedure this decision installs is exactly the thing that would find that out, and if
+it does, a repetition is not a ladder either and the honest position reverts to
+milestone 7's — that this workload has no reproducible load point on this host.
+
+**The deep prefix collapses at `inflight` 10.** §5.2's registered outcome 1 says "at
+both `inflight` values" and only one was run ([FINDINGS milestone 8 §5.1](FINDINGS.md)).
+If the other one collapses, prefix depth is necessary and not sufficient, and this
+decision is resting on half a condition.
+
+**The prefix requirement does not travel.** If it turns out to be a property of this
+corpus on this host, a procedure defined by it produces figures that are reproducible
+and local, which is a smaller claim than the one rule 3 exists to support.
+
+**Nobody pays the 4.9 hours.** Three named ladders per published headline is six times
+D-011's budget. If the project quietly reverts to single runs while this decision stands
+on the page, it will have converted a correct rule into no rule — which is the failure
+mode [D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+named for itself and did not escape by being right.
+
+## D-014 — The memory pass line reads the process's mark, milestone 8 misses it, and milestone 10 does not fire on that
+
+**Date:** 2026-08-22
+**Milestone:** 8 — the throughput wall
+**Status:** accepted
+**Context:** [FINDINGS milestone 8 §7–§8](FINDINGS.md), [PERF.md §2.7](PERF.md),
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+
+### Context
+
+Milestone 8's pass line is *shed 0, RSS ≤ 250 MiB, p50 ≤ 100 ms at 27.28 q/s*. Two of
+the three were met on the ladder that judged it. The third could not be read: `ru_maxrss`
+is a high-water mark with no reset and no during-this-rung value, so the 345.2 MiB printed
+at the 27.28 q/s rung is the mark **13.64 q/s** set two rungs earlier, and the rung under
+test added nothing to it.
+
+[FINDINGS §8](FINDINGS.md) published two readings and chose neither, because the reason to
+prefer one at that moment was which verdict it produced.
+
+### Question
+
+Which reading does the memory clause mean — the rung's own peak, or the process's? And
+does the answer fire milestone 10?
+
+### Decision
+
+**1. The clause reads the process's mark over the ladder up to and including the load
+point.** Not the rung's own peak.
+
+**2. Under that reading milestone 8 misses it: 345.2 MiB against 250 MiB.** Recorded as a
+miss, with what it is charged with — the mark was set at half the load point's rate, and
+on this platform nothing can separate them (below).
+
+**3. Milestone 10 does not fire.** Its trigger is a miss *after* the milestone's
+engineering, and milestone 8 has done none. The miss is the first target that engineering
+has, not the verdict on having tried.
+
+### Why
+
+**The metric exists for an adopter's memory budget, and an adopter runs a process, not a
+rung.** The PRD put it there because what an adopter meets first is not architectural
+openness, it is 853 MiB and 12.5 seconds. Anyone sizing a container from a steady-state
+figure and ignoring the ramp gets killed during the ramp. The operationally meaningful
+number is the high-water mark of everything the process did, which is what `ru_maxrss`
+reports and what reading it this way asks for.
+
+It is also the reading the project has always used. Milestone 5 published "RSS
+126→853 MiB" as a ladder progression of process marks. Choosing it now is continuity, not
+a new interpretation — and the reading that is *not* continuous is the one that would have
+made this ladder undecidable rather than a miss.
+
+The direction it errs is worth stating: a ladder touches more load points than a steady
+server at any one of them, so its peak is an **upper bound** on a server held at any rate
+in it. A pass line that errs toward demanding less memory than the measurement shows is
+the safe direction for the person the metric is for.
+
+**On milestone 10 not firing.** The PRD's falsification clause reads "if milestone 8
+cannot clear the absolute pass line". The reading that makes that a trigger rather than a
+starting gun is *cannot clear it having tried* — milestone 10 is a redesign justified by
+candidate-materialisation fixes having proved insufficient, and none have been attempted.
+What this campaign produced is the opposite of exhaustion: a specific, measured, localised
+target — 345.2 MiB set at 13.64 q/s, against a cause the PRD already names, 30,549
+candidates decoded per query. Firing a redesign against an untried target would spend the
+conditional milestone on the wrong evidence.
+
+**What is not being done, and why.** A per-rung RSS would make the other reading decidable
+and is declined here: on Darwin it needs `task_info` through cgo or `golang.org/x/sys`, and
+the first breaks the build's shape while the second breaks `go list -m all` being one line
+— a pass line of its own since milestone 1. Linux would take `/proc/self/statm` and
+nothing else, so the instrument would answer on one platform and not the one the figures
+are measured on. Giving each rung its own process is ruled out separately: it destroys the
+ladder prefix [D-013](#d-013--a-repetition-is-the-ladder-named-rather-than-derived-and-it-is-published-without-the-label)
+established as the thing a repetition must hold.
+
+### What would show this decision was wrong
+
+**The peak is not candidate materialisation.** The whole reason to keep milestone 8 alive
+is that its target is named and believed reachable. A profile showing the 345.2 MiB is
+mapped index pages the process cannot avoid touching would mean there is nothing for
+candidate-level work to cut, and milestone 10's trigger becomes live after all.
+
+**Reducing the peak costs nDCG past the registered tolerance** (−0.005, from milestone
+3b). Then the throughput target and the accuracy invariant are in conflict, which is a
+larger finding than either and is not what this decision assumes.
+
+**The ladder-wide reading turns out to hide the load point.** If a per-rung instrument
+ever exists and shows 27.28 q/s sitting comfortably under 250 MiB, the miss recorded here
+was a property of the ramp rather than of the load — still a real number an adopter pays,
+and no longer a statement about the rate the pass line names. The verdict would stand and
+its interpretation would narrow, which is a reason to keep the two apart on the page
+rather than to relabel the miss.
+
+**Nobody attempts the engineering.** A miss recorded as "the target for work not yet done"
+is worth exactly as much as the work. If milestone 8 closes without an attempt at the
+345.2 MiB, this decision will have functioned as a way to avoid firing milestone 10 rather
+than as a reason not to — which is the failure mode
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+named for itself.
+
+## D-015 — One line of exported surface, rather than a Document whose lifetime quietly changed
+
+**Date:** 2026-08-22
+**Milestone:** 8 — the throughput wall
+**Status:** accepted
+**Context:** [FINDINGS milestone 8 §9](FINDINGS.md), [D-014](#d-014--the-memory-pass-line-reads-the-processs-mark-milestone-8-misses-it-and-milestone-10-does-not-fire-on-that)
+
+### Context
+
+`Index.Doc` decodes a whole record — key, text, links, vector, time — and the vector
+scorer reads one field of it. Measured on a synthetic corpus, scoring 64 documents
+allocated 4,208,024 bytes against 13,312 for the same vectors with 4 MiB less text: one
+full copy of the document text per candidate scored, for a field nothing reads.
+
+The PRD registered **golden API files byte-identical** as an invariant for this round,
+against sacrificing the architecture for performance.
+
+### Question
+
+Three routes cut the copy and each one moves something registered. Which?
+
+1. **An additive read accessor** — clean and safe; the golden file gains a line.
+2. **A zero-copy decode** — `Document.Text` and `.Key` alias the mapping. Signature
+   byte-identical, so the invariant passes as written.
+3. **Fewer candidates** — narrow `Nearest`. No API change at all; costs recall, and the
+   trade is one of the PRD's own untested open questions.
+
+### Decision
+
+**Route 1.** `Index.Vector(DocID) ([]float32, bool)` is added, and the golden API file
+gains exactly one line. `pkg/fusion` stays at zero, `public_api.txt` does not move,
+`go list -m all` stays one line, the `Scorer` interface and every existing signature are
+untouched.
+
+### Why
+
+**The invariant's purpose is narrower than its wording.** It exists so that performance
+work cannot quietly cost the architecture — a fuser that learns signal types, a `Scorer`
+that grows a method, a dependency. An additive read accessor touches none of those, and
+the project has added exported methods in three prior milestones (`Scrub`, `Close`,
+`Merge`, `Nearest`) as ordinary changelog entries. Spending the invariant here is spending
+it on the thing it was not written to protect.
+
+**Route 2 is worse for looking better.** It keeps the file byte-identical while changing
+what a `Document` *means*: a value held past `Close()` would point into an unmapped range,
+so the same signature would carry a new lifetime rule and the failure mode is a segfault
+in a caller's process. Nothing in the engine hands out mapped memory today. An invariant
+that a change can satisfy by making the same API more dangerous is measuring the wrong
+thing, and passing it that way would be the more dishonest of the two.
+
+**Route 3 is not this decision's to take.** It trades recall — measured at 0.992 in
+milestone 3b — for memory, against an nDCG tolerance of −0.005, and sizing it needs a
+measurement campaign rather than a code change. It stays available and unspent.
+
+**The decision is the operator's, taken explicitly.** The three routes and their costs
+were put to them before any of the three was written, because picking the one that
+unblocks the work is precisely what
+[D-012](#d-012--d-011s-premise-is-false-mark-the-rule-do-not-replace-it-from-inside-the-campaign-that-broke-it)
+refuses.
+
+### What would show this decision was wrong
+
+**The saving never gets measured.** It is a bounded property, not a number: the arm it
+helps has no published memory figure ([FINDINGS milestone 8 §9](FINDINGS.md)), so the line
+of exported surface has been spent against a synthetic benchmark. If the `text+vector` arm
+is never laddered, this bought a guarantee and no measurement.
+
+**One accessor becomes four.** `recency` reads `Time`, `graph` reads `Links`, and both call
+`Doc` for it. If each gets its own accessor the exported surface grows by a field-shaped
+method per scorer, which is the closed-`Document` design turned inside out — and that
+design is why `Resolve` exists at all, as its own doc comment argues: a signal whose data
+is not one of `Document`'s fields keeps that data in a table of the caller's own. A second
+accessor should have to argue harder than this one did.
+
+**The format drifts between the two modes.** `decodeDocFields` is one function so that the
+layout is written down once, and `assertReadAPIsAgree` checks that `Vector` and `Doc`
+answer the same on both sides of a commit. If a future field is added to one path only,
+those are the two things that were supposed to catch it.

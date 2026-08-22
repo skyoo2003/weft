@@ -1,0 +1,15 @@
+kind: Changed
+body: 'Every rung of `weft-eval bench` now says how much *it* raised the process''s peak
+  resident set, or that it raised nothing and the figure beside it therefore belongs to an
+  earlier rung. `ru_maxrss` is a high-water mark the kernel never lowers and offers no way
+  to reset, so a rung on a ladder has always printed the peak the whole process had reached
+  by the end of it — labelled `(process)`, and read anyway as that rung''s. A pass line of
+  the form "RSS under N at this rate" was judged against 345.2 MiB that had been reached
+  two rungs earlier at half the rate before anything said so. The increase is the one
+  per-rung memory statement the syscall supports; what it still cannot give is a rung''s own
+  peak once an earlier rung has set a higher mark, and `docs/PERF.md` section 2.7 says so
+  rather than leaving it to be assumed. No published figure moves. No exported API under
+  `pkg/` moved.'
+time: 2026-08-22T06:00:00.000000000+09:00
+custom:
+  Issue: 14
