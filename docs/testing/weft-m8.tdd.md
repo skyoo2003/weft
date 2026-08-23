@@ -524,6 +524,59 @@ and the verdict — are all downstream of a fix, and there is no longer a fix to
 Spending 4.9 hours of machine time to measure a reverted change is the failure
 [PERF.md](../PERF.md) §3 rule 5 clause 4 exists to prevent, one step earlier than usual.
 
+### The escalation, run — and the 15.7 MiB is now attributed
+
+**Summary.** `-memprofile` writes the `allocs` profile, which is cumulative since process
+start and therefore answers by call site what the rung line answers only in total. That
+cumulativeness is also why it costs nothing to ask: a **20-second** run attributes an
+allocation that happens once per query, and no ladder is needed.
+
+**RED** — `go test ./cmd/weft-eval/`:
+
+```text
+cmd/weft-eval/bench_test.go:437:13: undefined: writeAllocProfile
+cmd/weft-eval/bench_test.go:473:7:  o.memprofile undefined (type benchOpts has no field or method memprofile)
+FAIL    github.com/skyoo2003/weft/cmd/weft-eval [build failed]
+```
+
+Two missing production symbols and nothing else — the first attempt also failed on
+`undefined: filepath` and `undefined: os`, which is a broken fixture rather than a RED, so
+the imports were added and the gate re-run before any production code was written.
+Checkpoint `992cfe0`.
+
+**GREEN** — `go test -race -run 'TestWriteAllocProfile|TestBenchFlagsParsesAMemProfilePath' ./cmd/weft-eval/` — ok.
+
+**Field** — `make bench BENCHFLAGS='-rates 10 -rotations 4 -memprofile /tmp/allocs.pb.gz'`,
+200 samples, `alloc 15691.3 KiB/query  15488 allocs/query`, then
+`go tool pprof -sample_index=alloc_space -top`:
+
+| call site | alloc_space | alloc_objects |
+| --- | --- | --- |
+| `engine.(*segment).lookup.func1` — the `make([]Posting, 0, n)` a `Lookup` builds | **53.2%** | — |
+| `text.(*Scorer).Candidates` (flat) — the accumulator map and the candidate slice | **44.3%** | 4.7% |
+| `engine.decodeTermPostings` + `(*segReader).unit` | 1.4% | **59.4%** |
+| everything else, index mapping included | ~1% | ~36% |
+
+**Both halves of the byte total are whole-set materialisation, and neither is the map hint
+alone.** `Lookup` decodes a term's entire posting list into a fresh slice per term per
+query — 8.3 MiB of the 15.7 — and `Candidates` then holds an entry per matching document
+in a map and again in a slice. `scanPostings` beside it **already streams**, because Merge
+needs it to; `lookup` is the only caller that builds the slice, and the text scorer is the
+only caller of `lookup` that could iterate instead.
+
+The allocation *count* is a different function than the byte total: 59% of it is two small
+objects per posting decoded inside `decodeTermPostings` and `segReader.unit`, the latter
+being a `what + " checksum"` string built on every call and read only on an error path.
+That is 0.9% of the bytes, so it is a GC-pacing cost rather than a peak-RSS one, and this
+milestone's clause is a peak.
+
+**What this changes about the target.** [D-014](../DECISIONS.md) called the miss
+"localised" and named the cause as 30,549 candidates decoded per query. The cause is now
+measured, it is on the text arm, and it is **whole-posting-list materialisation** rather
+than the candidate decode — the same *shape* of cause the PRD names, in a different place.
+Removing it is a streaming read of postings, which is what milestone 10's "sorted
+traversal, no full materialisation" describes.
+
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
@@ -534,6 +587,9 @@ Spending 4.9 hours of machine time to measure a reverted change is the failure
 | 15 | Per-query allocation is deterministic on a replayed query set, so it is quotable at a sample size no quantile is | two rungs of `make bench BENCHFLAGS='-rates 5,10 -rotations 2'` | field | identical to the decimal | quoted above |
 | 16 | `pkg/` is byte-identical to `main` after the revert, so no correctness invariant can have moved | `git diff main --stat -- pkg/` | gate | PASS (empty) | run by hand |
 | 17 | The module graph and fusion's blindness are untouched | `make deps` | gate | PASS (one line / no scorer) | `make deps` |
+| 18 | `-memprofile` writes a profile a reader can open, refuses a path it cannot write rather than discovering it after the run, and treats an empty path as "not asked for" | `…:TestWriteAllocProfile` (3 subtests) | unit | PASS | `go test -race -run TestWriteAllocProfile ./cmd/weft-eval/` |
+| 19 | The flag reaches `benchOpts` | `…:TestBenchFlagsParsesAMemProfilePath` | unit | PASS | same |
+| 20 | The profile is written on the `-writes` arm too, so the flag is not silently inert on one of two arms | `bench` returns `writeAllocProfile`'s error on both paths | inspection | — | no test; the arm needs the 626 MiB corpus |
 
 Test 16 is why `make eval` was **not** run. The nDCG tolerance of −0.005 is a guard on
 scorer changes, and after the revert there is no scorer change: an empty `pkg/` diff is a
@@ -558,9 +614,10 @@ on both sides.
    are two subtractions between `ReadMemStats` reads, and asserting them needs the 626 MiB
    corpus — the same gap the `rssRaised` cycle recorded as its gap 6. The field run above
    is what covers it, quoted rather than summarised.
-2. **The `text` arm's ~11 MiB per query is not attributed.** A heap profile is the next
-   instrument and `bench` has no `-memprofile`. Registered as the escalation in the plan's
-   D2 rather than added on the way past.
+2. ~~**The `text` arm's ~11 MiB per query is not attributed.**~~ **Attributed** — the
+   escalation ran, and the table above is the answer. What is still not attributed is the
+   345.2 MiB itself: per-query bytes explain the shape of the growth, and no run has yet
+   tied them to the ladder's peak at 13.64 q/s.
 3. **`bench/` does not get the allocation line.** Same reason as the `-rates` gap: the
    bleve module is rule 2's comparison arm, and changing the comparison instrument between
    two measurements is what milestone 5 §4.1 threw two ladders away over.
@@ -600,6 +657,14 @@ If these checkpoints are squashed, the summary that must survive:
   15,691.2 for the code it replaced, so it was withdrawn before any campaign ran. The
   corpus-sized hint stays, the trade is published, and the 345.2 MiB is still
   unattributed.
+- **RED** `992cfe0` — three assertions against a function and a field that did not exist,
+  with the fixture's own missing imports fixed first so the RED was only the production
+  code.
+- **GREEN + field** — `-memprofile` writes the `allocs` profile on both arms and reports a
+  path it cannot write instead of discovering it after ninety-seven minutes. The profile
+  attributes the whole 15.7 MiB per query: 53.2% is `Lookup` materialising a term's entire
+  posting list, 44.3% is the accumulator map and candidate slice. Both are whole-set
+  materialisation; neither is the hint the reverted commit went after.
 - **`pkg/` diff against `main` is empty.** No exported API moved, `pkg/fusion` is
   untouched, `go list -m all` is one line, and `make all` is green including both lint
   gates.

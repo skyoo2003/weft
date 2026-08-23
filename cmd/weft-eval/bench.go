@@ -75,6 +75,7 @@ type benchOpts struct {
 	arm         string
 	anySnapshot bool
 	cpuprofile  string
+	memprofile  string
 	writes      bool
 	writedocs   int
 }
@@ -92,6 +93,8 @@ func benchFlags(args []string) (benchOpts, error) {
 		fs.IntVar(&o.inflight, "inflight", 0, "cap on concurrent requests; 0 is 4 per core")
 		fs.StringVar(&o.arm, "arm", benchArmText, "scorers to load: text or text+vector")
 		fs.StringVar(&o.cpuprofile, "cpuprofile", "", "write a CPU profile of the whole run here")
+		fs.StringVar(&o.memprofile, "memprofile", "", "write an allocation profile of the whole run here; "+
+			"it says what the rung's KiB/query line cannot, which call sites the bytes came from")
 		fs.BoolVar(&o.writes, "writes", false, "instead of the ladder, drop one Commit into a read load and price the write lock (copies the index first)")
 		fs.IntVar(&o.writedocs, "writedocs", 1, "documents the -writes commit adds; past ivfMinDocs the commit trains a partition, which is the expensive case")
 		snapshotFlag(fs, &o.anySnapshot)
@@ -212,7 +215,12 @@ func bench(ctx context.Context, args []string) error {
 		return err
 	}
 	if o.writes {
-		return benchWrites(ctx, o, qs, n, unloaded)
+		// The profile is written on this arm too. A flag that silently does nothing on
+		// one of two arms is the same silent failure an unwritable path would be, found
+		// after the run instead of before it. Joined rather than short-circuited: a
+		// commit probe that failed part way still allocated, so its profile is worth
+		// having, and neither error hides the other.
+		return errors.Join(benchWrites(ctx, o, qs, n, unloaded), writeAllocProfile(o.memprofile))
 	}
 	rates, ruleLadder := benchRates(o.rate, o.rates, unloaded)
 
@@ -238,6 +246,12 @@ func bench(ctx context.Context, args []string) error {
 	benchSummary(os.Stdout, o.arm, ruleLadder, rates, p50s, reports, unloaded)
 	if f := failed.Load(); f > 0 {
 		fmt.Printf("\nWARNING: %d requests returned an error and are counted in the distributions above\n", f)
+	}
+	// After the report and regardless of interruption: the profile names call sites and
+	// does not need the ladder to have finished. Its error wins over ctx.Err(), which
+	// the operator who pressed Ctrl-C already knows about.
+	if err := writeAllocProfile(o.memprofile); err != nil {
+		return err
 	}
 	return ctx.Err()
 }
@@ -355,6 +369,48 @@ func startCPUProfile(path string) (func(), error) {
 		pprof.StopCPUProfile()
 		f.Close() //nolint:errcheck // everything worth reporting was written above
 	}, nil
+}
+
+// writeAllocProfile writes the `allocs` profile to path, or nothing when path is
+// empty. Called on the way out of a run rather than around a rung, and both halves of
+// that are deliberate.
+//
+// `allocs` rather than `heap`: the question this answers is what the rung's
+// `KiB/query` line cannot, which call sites those bytes came from, and that is a
+// cumulative-since-start question. A live-heap snapshot taken after the last rung has
+// already had the collector over it and would answer a different one. Cumulative also
+// means a twenty-second run is enough — no ladder is needed to attribute an allocation
+// that happens once per query.
+//
+// What it costs is that the profile carries the index mapping, the cold pass and the
+// unloaded pass beside the rungs. Those are separate call sites, so reading it is a
+// matter of looking at the right subtree rather than of subtracting; `go tool pprof
+// -base` against a run with no rungs is the sharper version if the subtree is ever
+// ambiguous.
+//
+// Written last and reported, not dropped: a 97-minute run whose profile silently did
+// not land is the whole run again.
+func writeAllocProfile(path string) error {
+	if path == "" {
+		return nil
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("memprofile: %w", err)
+	}
+	// Lookup rather than pprof.WriteHeapProfile, which writes the `heap` profile and
+	// has no parameter for choosing the other one.
+	if err := pprof.Lookup("allocs").WriteTo(f, 0); err != nil {
+		f.Close() //nolint:errcheck // the write already failed; this is cleanup
+		return fmt.Errorf("memprofile: %w", err)
+	}
+	// Closed here rather than deferred, because a deferred Close would drop the error
+	// that says the profile is truncated — which is the one failure this function
+	// exists to report.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("memprofile: %w", err)
+	}
+	return nil
 }
 
 // outf is every write below: a report line, to a writer that is os.Stdout in a
