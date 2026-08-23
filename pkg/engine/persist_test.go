@@ -9,7 +9,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"sync/atomic"
 	"testing"
 )
 
@@ -831,6 +833,117 @@ func TestCommitDuringReads(t *testing.T) {
 	<-done
 	if _, err := Open(dir); err != nil {
 		t.Fatalf("Open: %v", err)
+	}
+}
+
+const (
+	// readBatch is how many reads make one unit of progress, and the batching is
+	// what makes the sample honest rather than a way to inflate a number.
+	//
+	// A test cannot see the lock, so it samples the counter around the whole
+	// Commit call — which includes the MkdirAll and the OpenRoot that run before
+	// the lock is taken. A single Lookup on a pending index is a map read behind
+	// an uncontended RLock, so a reader finishes thousands of them inside those
+	// two syscalls and every one would count as progress the lock never granted.
+	// A batch costs more than the syscalls do, so a unit that lands inside the
+	// window is a unit the lock admitted.
+	readBatch = 4096
+
+	// readProgressFloor is how many units this test demands of the commit
+	// window. The expectation after the lock split is in the hundreds and the
+	// expectation before it is zero or one, so anything between them separates
+	// the two; 20 is far enough above one that a scheduler which happens to
+	// admit a straggling batch cannot pass, and far enough below the hundreds
+	// that a loaded machine still clears it.
+	readProgressFloor = 20
+)
+
+// TestReadsMakeProgressWhileACommitEncodes is milestone 9's read clause stated
+// as a property rather than as a stopwatch.
+//
+// It counts completed reads instead of timing the longest one, and that is the
+// difference between an assertion and a flake. A wall-clock threshold is a claim
+// about the machine — a loaded CI runner misses a one-second bound while holding
+// the property this test is for, and a fast one passes it while blocking reads
+// for the whole encode as long as the encode is quick. "Reads finished while a
+// commit was encoding" is the same statement on every machine: today's answer is
+// zero, because Commit holds mu for its whole duration, and the answer after the
+// lock split is however many the reader managed.
+//
+// The corpus is ivfMinDocs documents with vectors, which is the smallest one
+// whose commit trains a partition — buildIVF is where the 11 seconds of
+// docs/PERF.md §3.3 go, and a commit that skips it would not be the commit under
+// test.
+//
+// The counter is sampled around the whole Commit call rather than around the
+// locked section, since a test cannot see the lock. What that admits is the work
+// before the lock is taken — a MkdirAll and an OpenRoot, two syscalls — and the
+// floor above is set well past what a reader can finish in them.
+func TestReadsMakeProgressWhileACommitEncodes(t *testing.T) {
+	// One P cannot interleave a reader with a writer, so on a single-processor
+	// run this measures the scheduler rather than the lock.
+	if runtime.GOMAXPROCS(0) < 2 {
+		t.Skip("needs at least two processors to observe a reader running alongside a commit")
+	}
+
+	const dim = 8
+	vs := clusteredCorpus(ivfMinDocs, dim, 12)
+	ix := New()
+	for i, v := range vs {
+		if _, err := ix.Add(Document{
+			Key:    fmt.Sprintf("doc-%06d", i),
+			Text:   fmt.Sprintf("cluster term%d shared", i%7),
+			Vector: v,
+		}); err != nil {
+			t.Fatalf("Add %d: %v", i, err)
+		}
+	}
+	dir := t.TempDir()
+
+	var batches atomic.Int64
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// The three read paths a caller has: one document by id, the posting
+			// list a text scorer walks, and the corpus statistics BM25 needs. All
+			// three take mu.RLock, which is the lock this test is about, and each
+			// takes it separately — so a batch blocked by a writer stops at the
+			// next acquisition rather than finishing the one it is inside.
+			for i := range readBatch {
+				ix.Doc(DocID(i))
+			}
+			ix.Lookup("term3")
+			ix.Stats()
+			batches.Add(1)
+		}
+	}()
+
+	// Wait for the reader to be running, so the sample below is a live counter
+	// and not the zero of a goroutine that has not been scheduled yet.
+	for batches.Load() == 0 {
+		runtime.Gosched()
+	}
+
+	before := batches.Load()
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	during := batches.Load() - before
+	close(stop)
+	<-done
+
+	t.Logf("%d read batches of %d completed while a commit encoded %d documents", during, readBatch, ivfMinDocs)
+	if during < readProgressFloor {
+		t.Fatalf("%d read batches completed while a commit encoded %d documents, want at least %d: "+
+			"the commit is holding the exclusive lock across its encode",
+			during, ivfMinDocs, readProgressFloor)
 	}
 }
 
