@@ -367,6 +367,7 @@ If these checkpoints are squashed, the summary that must survive:
 
 ---
 
+<!-- markdownlint-disable-next-line MD025 -->
 # Milestone 8, second cycle — the guess, and the instrument that refused it
 
 **Source**: [`.claude/plans/weft-m8.plan.md`](../../.claude/plans/weft-m8.plan.md).
@@ -390,7 +391,7 @@ From the plan, not invented here:
 > As an adopter sizing a container for weft, I want a query's memory cost to scale with
 > what it matched, not with how large the corpus is, so that peak RSS is a function of
 > load rather than of corpus size.
-
+>
 > As the maintainer judging milestone 8's memory clause, I want each rung to report what
 > one query allocated, so that a drop in the ladder's peak mark can be attributed rather
 > than inferred.
