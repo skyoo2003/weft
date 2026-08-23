@@ -359,3 +359,62 @@ func TestBenchReportRefusesToLetAnEarlierRungsPeakReadAsItsOwn(t *testing.T) {
 		t.Errorf("a rung that did not raise the mark let the mark read as its own:\n%s", got)
 	}
 }
+
+// TestBenchReportSaysWhatAQueryAllocated is the other half of the attribution the peak
+// mark cannot give. `ru_maxrss` says what the process reached and refuses to say which
+// rung got it there; a rung's allocation total says what the work cost, and dividing it
+// by the samples that did the work turns a ladder-wide figure into a per-query one that
+// a fix can be held against. FINDINGS milestone 8 section 9 is a mark left unattributed
+// because nothing on the line said this.
+//
+// Shed requests are not in the denominator and must not be: the driver sheds by never
+// dispatching, so a shed request allocates nothing and would only dilute the figure.
+func TestBenchReportSaysWhatAQueryAllocated(t *testing.T) {
+	var w bytes.Buffer
+	const samples = 10000
+	r := benchReport{
+		rate:       13.64,
+		all:        loadgen.Quantiles{N: samples, P50: 41 * time.Millisecond, P50ok: true},
+		shed:       0,
+		faults:     loadgen.FaultCounts{Minor: 52890},
+		allocBytes: samples * 100 * 1024,
+		allocs:     samples * 40,
+		peakRSS:    345 << 20,
+		rssRaised:  206 << 20,
+		elapsed:    12 * time.Minute,
+	}
+
+	r.print(&w)
+
+	got := w.String()
+	if !strings.Contains(got, "100.0") {
+		t.Errorf("a rung that allocated 100.0 KiB per query did not say so:\n%s", got)
+	}
+	if !strings.Contains(got, "40 allocs") {
+		t.Errorf("a rung that made 40 allocations per query did not say so:\n%s", got)
+	}
+}
+
+// TestBenchReportOmitsTheAllocationLineWhenNothingWasMeasured keeps the division honest.
+// A rung interrupted before its first sample has a total and no denominator, and the
+// only two things that could be printed there are a crash and a zero — the second being
+// the same mistake the rusage omission already refuses, a figure that reads as a
+// measurement when nothing was measured.
+func TestBenchReportOmitsTheAllocationLineWhenNothingWasMeasured(t *testing.T) {
+	var w bytes.Buffer
+	r := benchReport{
+		rate:       13.64,
+		all:        loadgen.Quantiles{},
+		allocBytes: 4096,
+		allocs:     8,
+		faults:     loadgen.FaultCounts{Minor: 3},
+		peakRSS:    120 << 20,
+		elapsed:    time.Second,
+	}
+
+	r.print(&w)
+
+	if got := w.String(); strings.Contains(got, "/query") {
+		t.Errorf("a rung with no samples printed a per-query figure anyway:\n%s", got)
+	}
+}
