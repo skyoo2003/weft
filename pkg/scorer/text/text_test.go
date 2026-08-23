@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -340,5 +341,86 @@ func TestSearchIsSafeForConcurrentUse(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Fatalf("concurrent Search: %v", err)
+	}
+}
+
+// A property, not a number: **a query's allocation must scale with the documents it
+// matches, not with the size of the corpus it does not.** Two corpora that answer the
+// same query with the same eight documents must cost about the same to score, whether
+// the corpus around them holds sixty-four documents or sixteen thousand.
+//
+// The accumulator is hinted at the corpus size, so the hint is paid in full by a query
+// matching eight documents: about twenty-eight bytes of map per document nothing looks
+// at. On the evaluation corpus that is 4.5 MiB a query at 171,332 documents, and with
+// forty requests in flight it is the order of the mark
+// [FINDINGS](../../../docs/FINDINGS.md) milestone 8 §7 could not attribute.
+//
+// Written as a property because the fixes differ in mechanism — no hint at all, a hint
+// from the posting list in hand, or a hint from the union of them — and all three satisfy
+// it. The budget is deliberately loose: this is not a benchmark, it is a guard against
+// allocation proportional to something the query never reads.
+
+// allocBytesForTextCandidates commits a synthetic corpus in which only the first eight
+// documents carry the query term, reopens it so the mapped decode path is the one under
+// test, and reports bytes allocated by one scored query.
+func allocBytesForTextCandidates(t *testing.T, docs int) uint64 {
+	t.Helper()
+	const matches = 8
+	ix := engine.New()
+	for i := range docs {
+		// One unique token per document, so every posting list but the query term's
+		// holds exactly one entry and nothing else in the index scales with docs.
+		txt := fmt.Sprintf("filler%d", i)
+		if i < matches {
+			txt = "aardvark " + txt
+		}
+		if _, err := ix.Add(engine.Document{Key: fmt.Sprintf("d%d", i), Text: txt}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+	dir := t.TempDir()
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	open, err := engine.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer open.Close() //nolint:errcheck // nothing left to do about it in a test
+
+	s := New(open)
+	q := engine.Query{Text: "aardvark"}
+	// One scan first: whatever the mapping and the scorer set up once is not what this
+	// measures.
+	if _, err := s.Candidates(t.Context(), q, matches); err != nil {
+		t.Fatalf("Candidates warm-up: %v", err)
+	}
+
+	// TotalAlloc rather than a heap reading: it is cumulative and monotonic, so a
+	// collection landing inside the window cannot move it.
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if _, err := s.Candidates(t.Context(), q, matches); err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+func TestScoringDoesNotAllocateForDocumentsTheQueryNeverMatches(t *testing.T) {
+	const fewDocs, manyDocs = 64, 16384
+	small := allocBytesForTextCandidates(t, fewDocs)
+	large := allocBytesForTextCandidates(t, manyDocs)
+
+	// A map entry costs about twenty-eight bytes of buckets at this key and value width,
+	// which is what a corpus-sized hint charges per document whether the query touches it
+	// or not. A tenth of the difference is the budget: enough slack for the map's own
+	// bookkeeping over eight entries, far less than one bucket per document.
+	const perDoc = 28
+	if budget := uint64(manyDocs-fewDocs) * perDoc / 10; large > small+budget {
+		t.Errorf("scoring allocated %d bytes over %d documents against %d over %d, "+
+			"for the same eight matches: the accumulator is sized by the corpus rather "+
+			"than by what the query found (budget was small+%d)",
+			large, manyDocs, small, fewDocs, budget)
 	}
 }
