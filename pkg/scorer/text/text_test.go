@@ -411,6 +411,11 @@ func TestScoringDoesNotAllocateForDocumentsTheQueryNeverMatches(t *testing.T) {
 	const fewDocs, manyDocs = 64, 16384
 	small := allocBytesForTextCandidates(t, fewDocs)
 	large := allocBytesForTextCandidates(t, manyDocs)
+	// Logged rather than only asserted: the two figures are what docs/FINDINGS.md
+	// quotes for this change, and re-deriving them means reading the budget arithmetic
+	// backwards out of a failure message that only prints when the property breaks.
+	t.Logf("scored the same eight matches for %d bytes over %d documents and %d over %d",
+		large, manyDocs, small, fewDocs)
 
 	// A map entry costs about twenty-eight bytes of buckets at this key and value width,
 	// which is what a corpus-sized hint charges per document whether the query touches it
