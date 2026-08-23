@@ -253,7 +253,20 @@ func (m *mergedSource) postings(t string, yield func(Posting)) int {
 //
 // Atomicity is the manifest flip Commit already uses, so a crash leaves either
 // the pre-merge state or the post-merge one.
+// ponytail: Merge holds mu exclusively for its whole duration, so it is a longer
+// stop than the commit milestone 9 just split — it rewrites the oldest
+// generations rather than one batch. The same restructuring applies almost
+// verbatim: the merged segment is encoded out of state it only reads, and only
+// the manifest flip and the swap need exclusion. It is not done here because
+// nothing measures it. `weft-eval bench -writes` times a commit and no arm times
+// a merge, and a reordering claimed as an improvement without a number is the
+// failure docs/FINDINGS.md exists to stop. Build the arm, then split the lock.
 func (ix *Index) Merge() error {
+	// wmu before mu, the order every mutator uses. Merge is one of the four
+	// places that takes mu exclusively, and a Merge queued in mu.Lock would stall
+	// the readers a concurrent Commit is letting through. See Index.wmu.
+	ix.wmu.Lock()
+	defer ix.wmu.Unlock()
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 

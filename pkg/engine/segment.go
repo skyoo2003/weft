@@ -445,10 +445,13 @@ func writeSegment(segRoot *os.Root, src segSource) error {
 	}
 	meta, docs, post, terms, docoff, keys, ivf := ws[0], ws[1], ws[2], ws[3], ws[4], ws[5], ws[6]
 
-	// No locking here: Commit and Merge both hold the write lock for their whole
-	// duration and sync.RWMutex is not reentrant, so taking a read lock inside
-	// would deadlock against the caller that already holds the write one. An
-	// earlier version locked here because Commit did not.
+	// No locking here: every caller already holds ix.mu for the whole encode, and
+	// sync.RWMutex is not reentrant, so taking a lock inside would deadlock
+	// against the one already held. Which mode differs and does not matter —
+	// Merge holds it exclusively, Commit in read mode since milestone 9 — because
+	// what this needs is that the source cannot change underneath it, and read
+	// mode gives that as long as the mutators are excluded some other way. They
+	// are: Index.wmu. An earlier version locked here because Commit did not.
 	func() {
 		totalLen, vecDim := src.totals()
 		meta.uvarint(uint64(src.count()))
