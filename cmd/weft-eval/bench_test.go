@@ -4,6 +4,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -416,5 +418,59 @@ func TestBenchReportOmitsTheAllocationLineWhenNothingWasMeasured(t *testing.T) {
 
 	if got := w.String(); strings.Contains(got, "/query") {
 		t.Errorf("a rung with no samples printed a per-query figure anyway:\n%s", got)
+	}
+}
+
+// TestWriteAllocProfile is the escalation the rung allocation line earns rather than
+// replaces. That line says a query allocated 15.7 MiB and cannot say what did; the
+// `allocs` profile is by call site, so it can. Cumulative since process start, which is
+// why a twenty-second run answers the question and no ladder is needed — and also why the
+// profile carries the index mapping and the cold pass beside the rung, which is a caveat
+// on reading it rather than on writing it.
+//
+// The failure mode worth a test is the silent one: a path that cannot be written, found
+// after the run rather than before it. An empty path writes nothing and is not an error,
+// because that is every run that did not ask for a profile.
+func TestWriteAllocProfile(t *testing.T) {
+	t.Run("writes a profile a reader can open", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "allocs.pb.gz")
+		if err := writeAllocProfile(path); err != nil {
+			t.Fatalf("writeAllocProfile: %v", err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		// pprof writes gzipped protobuf. Two bytes is the whole check: a truncated or
+		// unflushed write is what this catches, and parsing the profile here would mean
+		// vendoring a reader for it.
+		if len(b) < 2 || b[0] != 0x1f || b[1] != 0x8b {
+			t.Errorf("wrote %d bytes not beginning with the gzip magic: % x", len(b), b[:min(len(b), 8)])
+		}
+	})
+
+	t.Run("refuses a path it cannot write", func(t *testing.T) {
+		// A directory that does not exist, so the failure is the create rather than a
+		// permission the test would have to arrange.
+		path := filepath.Join(t.TempDir(), "nope", "allocs.pb.gz")
+		if err := writeAllocProfile(path); err == nil {
+			t.Error("writing to a directory that does not exist reported success")
+		}
+	})
+
+	t.Run("an empty path is not an error", func(t *testing.T) {
+		if err := writeAllocProfile(""); err != nil {
+			t.Errorf("no -memprofile asked for, and it failed: %v", err)
+		}
+	})
+}
+
+func TestBenchFlagsParsesAMemProfilePath(t *testing.T) {
+	o, err := benchFlags([]string{"-memprofile", "/tmp/allocs.pb.gz"})
+	if err != nil {
+		t.Fatalf("benchFlags: %v", err)
+	}
+	if o.memprofile != "/tmp/allocs.pb.gz" {
+		t.Errorf("memprofile = %q, want the path given", o.memprofile)
 	}
 }
