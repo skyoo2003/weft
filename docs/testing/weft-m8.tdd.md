@@ -364,3 +364,241 @@ If these checkpoints are squashed, the summary that must survive:
   an `io.Writer`, and a rung that raised nothing says the figure is not its own. 2/2 PASS
   under `-race`, `rssAttribution` 100%, field-verified. `pkg/` diff empty, and the fix
   postdates the run that found it.
+
+---
+
+# Milestone 8, second cycle — the guess, and the instrument that refused it
+
+**Source**: [`.claude/plans/weft-m8.plan.md`](../../.claude/plans/weft-m8.plan.md).
+The **Interpretation notes** above say *"There is no plan to interpret"* — that was true
+when written and is no longer. The pass line has since been re-specified,
+[D-014](../DECISIONS.md) recorded the memory clause as a miss, and a plan exists whose
+first two tasks are the cycles below.
+**Branch**: `m8-memory`
+**Date**: 2026-08-23
+
+The plan's design note D2 required attribution to be measured in two places rather than
+one, because [FINDINGS milestone 8 §9](../FINDINGS.md) is a memory figure explained by a
+mechanism from an arm that was never measured. **The second place refused the first.**
+That is what this cycle is: a fix that passed its own property test, and a rung
+measurement that rejected it before any 97-minute campaign was spent on it.
+
+## User journeys
+
+From the plan, not invented here:
+
+> As an adopter sizing a container for weft, I want a query's memory cost to scale with
+> what it matched, not with how large the corpus is, so that peak RSS is a function of
+> load rather than of corpus size.
+
+> As the maintainer judging milestone 8's memory clause, I want each rung to report what
+> one query allocated, so that a drop in the ladder's peak mark can be attributed rather
+> than inferred.
+
+The second journey is the one that survived. The first is now a **known trade** rather
+than a defect, and the second task report is why.
+
+## Task report
+
+### A rung says what one query allocated
+
+**Summary.** `benchRung` reads `runtime.MemStats` either side of the rung and the report
+prints `TotalAlloc` and `Mallocs` differences divided by the samples that did the work.
+Per query rather than per rung, because a rung total is a function of how long the rung
+ran and a per-query figure is a property of the work — which is the one a claim about a
+fix can be held against. Shed requests are not in the denominator: the driver sheds by
+never dispatching, so a shed request allocated nothing and would only dilute the figure.
+
+Both reads sit outside the measured window, the first before the rung's start timestamp
+and the second after `Elapsed` has been taken, and the second is **last** in the
+after-snapshot block. That placement is the same argument milestone 5 §4.1 cost two
+ladders: `ReadMemStats` is the only read in that block that stops the world, so any
+counter read after it would be charged with this instrument's own stop.
+
+**RED** — `go test ./cmd/weft-eval/`:
+
+```text
+cmd/weft-eval/bench_test.go:380:3: unknown field allocBytes in struct literal of type benchReport
+cmd/weft-eval/bench_test.go:381:3: unknown field allocs in struct literal of type benchReport
+cmd/weft-eval/bench_test.go:408:3: unknown field allocBytes in struct literal of type benchReport
+cmd/weft-eval/bench_test.go:409:3: unknown field allocs in struct literal of type benchReport
+FAIL    github.com/skyoo2003/weft/cmd/weft-eval [build failed]
+```
+
+Compile-time RED, the same two shapes the `rssRaised` cycle above produced. Checkpoint
+`35f03e5`.
+
+**GREEN** — `go test -race -run TestBenchReport ./cmd/weft-eval/`:
+
+```text
+--- PASS: TestBenchReportSaysWhichRungRaisedThePeak (0.00s)
+--- PASS: TestBenchReportRefusesToLetAnEarlierRungsPeakReadAsItsOwn (0.00s)
+--- PASS: TestBenchReportSaysWhatAQueryAllocated (0.00s)
+--- PASS: TestBenchReportOmitsTheAllocationLineWhenNothingWasMeasured (0.00s)
+ok      github.com/skyoo2003/weft/cmd/weft-eval    1.502s
+```
+
+Four, of which two are new; the two from the earlier cycle are in the same run because
+`print` grew a line, and a line added to that function is only worth something if the
+claims it already makes are unmoved. Checkpoint `fcc5a97`.
+
+**Field** — `make bench BENCHFLAGS='-rates 5,10 -rotations 2'`:
+
+```text
+rate=5.00/s   ... alloc 19501.6 KiB/query  15915 allocs/query  (1904.5 MiB this rung)
+rate=10.00/s  ... alloc 19501.6 KiB/query  15915 allocs/query  (1904.5 MiB this rung)
+```
+
+Two rungs, identical to the decimal, and that is the evidence the figure is not a
+distribution: 50 judged queries replayed twice is the same work both times, so allocation
+is a deterministic count rather than a sample. It is quotable at `n=100` for exactly that
+reason, where no latency quantile on the same line is — [PERF.md](../PERF.md) §2.3's floor
+applies to the quantiles beside it and not to this.
+
+### A query may not allocate a map entry per document it never matches — measured, and reverted
+
+**Summary.** `pkg/scorer/text` hints its BM25 accumulator at the corpus size. The hint is
+charged in full whether the query matches every document or eight of them: about 28 bytes
+of buckets per document, **4.52 MiB per query** on the 171,332-document corpus, live on
+every one of 40 requests in flight. The plan's D1 named this as the localised target for
+[D-014](../DECISIONS.md)'s 345.2 MiB miss.
+
+**RED** — `go test -run TestScoringDoesNotAllocate ./pkg/scorer/text/`, and exact:
+
+```text
+--- FAIL: TestScoringDoesNotAllocateForDocumentsTheQueryNeverMatches (0.14s)
+    text_test.go:421: scoring allocated 593816 bytes over 16384 documents against 4672
+    over 64, for the same eight matches: the accumulator is sized by the corpus rather
+    than by what the query found (budget was small+45696)
+```
+
+Runtime RED, 36 bytes per document the query never looks at. Written as a property for the
+same reason `pkg/scorer/vector`'s is: three routes to fixing it differ in mechanism and all
+three satisfy it. Checkpoint `314feea`, containing no fix.
+
+**GREEN** — hint taken from the first non-empty posting list instead:
+
+```text
+scored the same eight matches for 2520 bytes over 16384 documents and 2520 over 64
+```
+
+Identical, because the corpus no longer enters the figure — 236× less on the larger
+corpus. `pkg/scorer/text`, `pkg/scorer/vector`, `pkg/engine` and `pkg/fusion` all PASS
+under `-race`. Checkpoint `79f2a5d`.
+
+**REVERTED** — checkpoint `b7e981d`, on the strength of the instrument built one section
+above. Same corpus, same 50 queries, two rotations, only the scorer differing:
+
+| accumulator hint | KiB/query | allocs/query |
+| --- | --- | --- |
+| corpus-sized (before) | 15,691.2 | 15,487 |
+| first posting list (after) | **19,501.6** | 15,915 |
+
+**The replaced comment was right.** A hint from the first posting list is too small for a
+TREC-COVID query, whose term union really is most of the corpus, so the map doubles its
+way up and every abandoned table is charged to the query: **+3.7 MiB**, about one extra
+copy of the final map. Worse for this pass line specifically, because during a growth the
+old table and the new one are live **together**, and the clause under judgement is a peak.
+
+Choosing the other side of the trade does not remove it — a narrow query still pays
+4.52 MiB for a map holding eight entries. What would remove it is a posting count in the
+terms index, and `termSpan` carries byte offsets only, so no cheaper hint is reachable
+without decoding the list first.
+
+**What the instrument said that no guess had.** The hint was never the dominant term:
+15.7 MiB per query with 4.5 MiB of it the map. **The remaining ~11 MiB and 15,487
+allocations per query are unattributed.** The PRD names "30,549 candidates decoded per
+query" as the cause; that is the vector arm, and every figure here is the text arm — the
+same mismatch [FINDINGS milestone 8 §9](../FINDINGS.md) already corrected once. Naming
+them needs a heap profile, which the plan registered as the escalation rather than the
+first step.
+
+So [FINDINGS milestone 8 §9](../FINDINGS.md)'s sentence stands unchanged: **the 345.2 MiB
+remains unattributed.** This cycle is the second wrong guess about it, kept in history
+rather than deleted.
+
+**No campaign ran.** The plan's tasks 4 through 8 — registering the procedure in
+[PERF.md](../PERF.md) §5.3, the 97-minute judgment ladder, `make eval`, the repetitions
+and the verdict — are all downstream of a fix, and there is no longer a fix to judge.
+Spending 4.9 hours of machine time to measure a reverted change is the failure
+[PERF.md](../PERF.md) §3 rule 5 clause 4 exists to prevent, one step earlier than usual.
+
+## Test specification
+
+| # | What is guaranteed | Test | Type | Result | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| 12 | A rung that allocated N bytes over M samples reports N/M per query, and its allocation count per query | `cmd/weft-eval/bench_test.go:TestBenchReportSaysWhatAQueryAllocated` | unit | PASS | `go test -race -run TestBenchReport ./cmd/weft-eval/` |
+| 13 | A rung with no samples omits the per-query line rather than dividing by zero or printing a zero that reads as a measurement | `…:TestBenchReportOmitsTheAllocationLineWhenNothingWasMeasured` | unit | PASS | same |
+| 14 | The two `print` and `rssAttribution` guarantees from the first cycle are unmoved by the new line | `…:TestBenchReport*` (2 earlier tests) | regression | PASS | same |
+| 15 | Per-query allocation is deterministic on a replayed query set, so it is quotable at a sample size no quantile is | two rungs of `make bench BENCHFLAGS='-rates 5,10 -rotations 2'` | field | identical to the decimal | quoted above |
+| 16 | `pkg/` is byte-identical to `main` after the revert, so no correctness invariant can have moved | `git diff main --stat -- pkg/` | gate | PASS (empty) | run by hand |
+| 17 | The module graph and fusion's blindness are untouched | `make deps` | gate | PASS (one line / no scorer) | `make deps` |
+
+Test 16 is why `make eval` was **not** run. The nDCG tolerance of −0.005 is a guard on
+scorer changes, and after the revert there is no scorer change: an empty `pkg/` diff is a
+stronger statement than a re-measured metric, and it costs nothing.
+
+## Coverage and known gaps
+
+```text
+go test -coverprofile … ./cmd/weft-eval/   →  45.0% of statements (package)
+go tool cover -func …                      →  bench.go print   81.8%
+```
+
+The package figure is not the metric, for the reason both earlier reports give: this is
+`package main` around an index build and a load driver that need the 626 MiB corpus, so a
+package percentage measures how much of the command runs without it. `print` is the one
+function this change touched — 77.8% before, 81.8% now, because the new branch is covered
+on both sides.
+
+**Gaps, deliberate:**
+
+1. **No test asserts `allocBytes` and `allocs` are wired correctly in `benchRung`.** They
+   are two subtractions between `ReadMemStats` reads, and asserting them needs the 626 MiB
+   corpus — the same gap the `rssRaised` cycle recorded as its gap 6. The field run above
+   is what covers it, quoted rather than summarised.
+2. **The `text` arm's ~11 MiB per query is not attributed.** A heap profile is the next
+   instrument and `bench` has no `-memprofile`. Registered as the escalation in the plan's
+   D2 rather than added on the way past.
+3. **`bench/` does not get the allocation line.** Same reason as the `-rates` gap: the
+   bleve module is rule 2's comparison arm, and changing the comparison instrument between
+   two measurements is what milestone 5 §4.1 threw two ladders away over.
+4. **The reverted property is not asserted anywhere now.** A narrow query still pays
+   4.52 MiB for eight entries, and there is no test standing over it, because the only
+   available fix makes the measured workload worse. It is a trade recorded here, not a
+   guard.
+5. **`make lint-docs` ran** this time: `markdownlint-cli2` via `npx`, 26 files, 0 issues.
+
+## Interpretation notes
+
+- **A fix can pass its own test and still be wrong**, and the only thing that caught it
+  was an instrument the plan insisted on before the fix was attempted. That ordering is
+  the whole content of this cycle.
+- **The revert is not a failure of the milestone's pass line.** Nothing was judged: shed 0
+  and p50 37.631 ms still stand from §7, and the memory clause is still the miss
+  [D-014](../DECISIONS.md) recorded. What changed is that the target D-014 called
+  "localised" is not, and the next step is a profile rather than a patch.
+- **Milestone 10 still does not fire.** Its trigger is a miss after the milestone's
+  engineering, and this cycle attempted engineering and withdrew it on measurement, which
+  is not the same as having tried and failed to reach 250 MiB. D-014's revival condition —
+  a profile pointing at mapped pages that cannot be avoided — is still unrun.
+
+## Merge evidence
+
+If these checkpoints are squashed, the summary that must survive:
+
+- **RED** `35f03e5` — two assertions against `benchReport` fields that did not exist;
+  build failed on `unknown field allocBytes`.
+- **GREEN** `fcc5a97` — per-query allocation bytes and count, both reads outside the
+  measured window, the stop-the-world read last in the block, and the line omitted when
+  there is no denominator. 4/4 PASS under `-race`, field-verified on the corpus.
+- **RED** `314feea` — a query allocated 593,816 bytes over 16,384 documents against 4,672
+  over 64 for the same eight matches. No fix in the commit.
+- **GREEN** `79f2a5d` — hint from the first posting list; 2,520 bytes on both corpora.
+- **REVERT** `b7e981d` — the instrument measured the fix at 19,501.6 KiB/query against
+  15,691.2 for the code it replaced, so it was withdrawn before any campaign ran. The
+  corpus-sized hint stays, the trade is published, and the 345.2 MiB is still
+  unattributed.
+- **`pkg/` diff against `main` is empty.** No exported API moved, `pkg/fusion` is
+  untouched, `go list -m all` is one line, and `make all` is green including both lint
+  gates.
