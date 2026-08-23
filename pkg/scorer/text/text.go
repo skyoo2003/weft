@@ -81,11 +81,20 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 	// produces one entry per matching document, so an unhinted map re-buckets
 	// its way up through every doubling on exactly the queries that cost most.
 	acc := make(map[engine.DocID]float64, docs)
+	// One buffer for every term, not one list per term. A term's postings are walked and
+	// finished with before the next term is looked up, so what has to be live is the
+	// longest list rather than the sum of them — and the sum is what LookupInto's doc
+	// comment prices at 53.2% of a query's allocation on the evaluation corpus.
+	//
+	// Reassigned from the return value rather than only passed in: LookupInto grows the
+	// array when a longer list arrives, and dropping the grown slice would allocate that
+	// growth again on the next query term.
+	var posts []engine.Posting
 	for _, term := range terms {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		posts := s.ix.Lookup(term)
+		posts = s.ix.LookupInto(term, posts)
 		if len(posts) == 0 {
 			continue // n(q) = 0: a term in no document contributes nothing.
 		}

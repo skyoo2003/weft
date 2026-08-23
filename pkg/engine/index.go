@@ -186,6 +186,37 @@ func (ix *Index) lookupAt(term string) []Posting {
 	return append(out, pending...)
 }
 
+// lookupInto is lookupAt writing into buf instead of allocating, and it is a second
+// traversal of the same structure rather than a wrapper over the first: lookupAt's
+// fast paths exist to avoid materialising a list twice, and there is nothing here to
+// avoid — every posting is written once, into the caller's array.
+//
+// The corruption rule is the reason this can be a buffer at all rather than a
+// callback. A segment that claims the term and fails to decode makes the whole lookup
+// absent, pending included (D-006), and that verdict arrives after some of the term's
+// postings have already been decoded. Holding them in buf means they can be discarded;
+// an iterator would already have yielded them, and a partial posting list is not a
+// shorter answer, it is a wrong one.
+//
+// Requires ix.mu.
+func (ix *Index) lookupInto(term string, buf []Posting) []Posting {
+	out := buf[:0]
+	for _, s := range ix.segs {
+		// Same rule and same reason as lookupAt: the terms index says which segments
+		// have to answer, and one that claims the term and stays silent is damage.
+		if _, claimed := s.terms[term]; !claimed {
+			continue
+		}
+		if s.scanPostings(term, func(n int) { out = slices.Grow(out, n) },
+			func(p Posting) { out = append(out, p) }) == 0 {
+			return nil
+		}
+	}
+	// Pending last, which keeps the whole list ascending for free: segments are ordered
+	// by base and the pending segment's base is past all of them.
+	return append(out, ix.postings[term]...)
+}
+
 // segFor returns the committed segment holding id, or nil. Requires ix.mu.
 //
 // A linear walk, not a binary search. The segment count is bounded by the merge
@@ -495,6 +526,37 @@ func (ix *Index) Lookup(term string) []Posting {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return ix.lookupAt(term)
+}
+
+// LookupInto is Lookup writing into buf, which it truncates and grows as needed and
+// returns. The result is the caller's to keep and to modify — that is the one contract
+// difference from Lookup, which may hand back index state.
+//
+// It exists because a scorer walks a term's postings and is finished with them before it
+// looks up the next term, while Lookup hands it a fresh slice every time. On the
+// evaluation corpus that is 53.2% of what a query allocates: a term's whole posting list,
+// per term, per query. One buffer reused across a query's terms holds the longest list
+// instead of the sum of them, and the sum is what a peak memory figure is made of
+// (docs/FINDINGS.md milestone 8).
+//
+// Two things it does not change, both load-bearing:
+//
+//   - **What the answer is.** Every posting, in the same ascending order Lookup returns,
+//     committed segments before pending. Absence for a term no document holds, and
+//     absence for the whole lookup when a segment that claims the term cannot decode it —
+//     including the postings already written into buf, which are discarded. An iterator
+//     could not promise that second one, which is why this is a buffer.
+//   - **When the lock is held.** One read lock for the whole walk, released before
+//     returning, exactly as Lookup. Nothing of the caller's runs inside it, so a caller
+//     is still free to call DocLen per posting without the re-entrant RLock deadlock the
+//     unexported read path exists to avoid.
+//
+// A nil buf is fine and is the same as calling Lookup once. Passing a buffer still being
+// read from is not: this overwrites it.
+func (ix *Index) LookupInto(term string, buf []Posting) []Posting {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return ix.lookupInto(term, buf)
 }
 
 // Nearest returns the DocIDs worth scoring exactly for v, at least k of them

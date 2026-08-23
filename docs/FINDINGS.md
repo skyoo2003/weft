@@ -2019,3 +2019,93 @@ is still one line, `public_api.txt` does not move, and no existing signature cha
 alternative — a zero-copy decode aliasing the mapping — would have kept the file identical
 while silently changing what a `Document`'s lifetime means, which is a worse trade for the
 same saving. [D-015](DECISIONS.md) carries the argument.
+
+## 10. What a query allocates, measured — and the second wrong guess about the peak
+
+§9 left the 345.2 MiB unattributed and named the open question: what the `text` arm
+allocates per query. It is now measured, and the answer took two attempts, the first of
+which was wrong in a way only the second instrument could see.
+
+**The instrument first.** Each rung now prints what one query allocated — `TotalAlloc` and
+`Mallocs` differences divided by the samples that did the work, both reads outside the
+measured window. And `-memprofile` writes the `allocs` profile, which is cumulative since
+process start and therefore attributes by call site what the rung line gives only as a
+total. Cumulative also means a **twenty-second** run answers it: an allocation that happens
+once per query does not need a ladder.
+
+**The figure, and where it goes:**
+
+```text
+alloc  15691.3 KiB/query  15488 allocs/query
+```
+
+| call site | alloc_space | alloc_objects |
+| --- | --- | --- |
+| `engine.(*segment).lookup.func1` — the slice a `Lookup` builds | **53.2%** | — |
+| `text.(*Scorer).Candidates` (flat) — accumulator map and candidate slice | **44.3%** | 4.7% |
+| `decodeTermPostings` + `(*segReader).unit` | 1.4% | **59.4%** |
+| everything else, index mapping included | ~1% | ~36% |
+
+**Both halves of the byte total are whole-set materialisation, and the cause the PRD names
+is neither of them.** "30,549 candidates decoded per query" is the vector arm, as §9 already
+corrected; on the text arm it is `Lookup` decoding a term's *entire* posting list into a
+fresh slice, per term, per query — 8.3 MiB of the 15.7 — and then `Candidates` holding an
+entry per matching document twice, once in a map and once in a slice.
+
+### The guess that was measured out
+
+The first attempt went after the accumulator's corpus-sized size hint, which charges about
+28 bytes of map per document whether the query matches every document or eight: 4.52 MiB
+per query, live on every one of 40 requests in flight. Hinting from the first posting list
+instead made a synthetic narrow query 236× cheaper — and made the **measured** workload
+worse:
+
+| accumulator hint | KiB/query |
+| --- | --- |
+| corpus-sized | 15,691.2 |
+| first posting list | **19,501.6** |
+
+A TREC-COVID query's term union really is most of the corpus, so the map doubles its way up
+and every abandoned table is charged to the query: +3.7 MiB, about one extra copy of the
+final map. Worse for *this* clause specifically, because during a growth the old table and
+the new one are live together and the clause is a peak. It was reverted. The trade does not
+vanish by taking the other side of it — a narrow query still pays 4.52 MiB for a map
+holding eight entries — and what would remove it is a posting count in the terms index,
+which `termSpan` does not carry.
+
+**That is two wrong guesses about the 345.2 MiB in two milestones**, both plausible, both
+named before anything measured the arm they were about. What changed is that the third
+statement is a profile.
+
+### What was fixed, and what it is worth
+
+`Index.LookupInto` is `Lookup` writing into a caller-owned buffer. One buffer across a
+query's terms holds the **longest** posting list instead of the **sum** of them, and the sum
+is what a peak is made of. Measured as a property rather than a rate, on a corpus where
+every term matches every document so that four extra terms are four extra lists and nothing
+else:
+
+```text
+before   552,912 bytes for 5 terms against 281,232 for one — 4.1 posting lists
+after    290,768 bytes for 5 terms against 281,232 for one — 0.15
+```
+
+It changes nothing about the answer: same postings, same ascending order, committed
+segments before pending, and the same absence for a segment that claims a term and cannot
+decode it. That last one is why this is a buffer and not an iterator — the verdict arrives
+after some postings are decoded, and postings held in a buffer can be discarded where
+yielded ones cannot. The read lock is held for the same span as `Lookup`'s and nothing of
+the caller's runs inside it, so a scorer may still call `DocLen` per posting without meeting
+the re-entrant `RLock` deadlock the unexported read path exists to avoid.
+
+**What it is not:** a ladder figure. No campaign has run against it, so its effect on the
+345.2 MiB is a prediction and not a measurement, and the 44.3% half is untouched.
+
+### The invariant this spent
+
+A second line on `pkg/engine/testdata/engine_api.txt`, after the one §9 spent. `pkg/fusion`
+is untouched, `public_api.txt` does not move, `go list -m all` is one line, and no existing
+signature changes. [D-016](DECISIONS.md) carries the argument for spending it here rather
+than on an iterator, and the allocation count — 59.4% of it two small objects per posting
+inside the decoder — is left alone deliberately: it is 1.4% of the bytes, so it is a
+GC-pacing cost, and this milestone's clause is a peak.
