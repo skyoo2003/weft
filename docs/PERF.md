@@ -200,6 +200,40 @@ Giving each rung its own process would give each a clean mark and destroy the la
 prefix that rule 3, repaired, has just established as the thing a repetition must hold.
 The prefix is worth more than the attribution.
 
+### 2.8 What a query allocated, which the peak mark cannot say
+
+[§2.7](#27-the-memory-figure-is-the-processs-and-only-its-increase-belongs-to-a-rung) ends
+at what `getrusage` cannot decide. This is the figure that decides the other half: each
+rung prints `TotalAlloc` and `Mallocs` differences taken around it, divided by the samples
+that did the work.
+
+```text
+alloc  10869.0 KiB/query  15478 allocs/query  (2122.8 MiB this rung)
+```
+
+Per query and not per rung, because a rung total is a function of how long the rung ran
+while a per-query figure is a property of the work — and a claim about a fix has to be held
+against the second. Shed requests are not in the denominator: the driver sheds by never
+dispatching, so a shed request allocated nothing.
+
+Both reads sit outside the measured window, the first before the rung's start timestamp and
+the second after `Elapsed`, and the second is **last** in the after-snapshot block:
+`ReadMemStats` is the only read there that stops the world, and a counter read after it
+would be charged with this instrument's own stop. `TotalAlloc` and `Mallocs` are cumulative
+and monotonic, so a collection landing inside the rung moves neither difference.
+
+**What it cannot say** is where the bytes went. `-memprofile` writes the `allocs` profile
+for that, by call site, cumulative since process start — which is also why it is cheap to
+ask: an allocation that happens once per query is attributed by a twenty-second run and
+needs no ladder. The cost of cumulative is that the profile carries the index mapping and
+the cold pass beside the rungs; those are separate call sites, so it is a matter of reading
+the right subtree.
+
+**Two figures, two purposes, and they move independently.** Bytes per query is a
+peak-memory statement; allocations per query is a GC-pacing one. The first change measured
+with this instrument moved bytes by 30.7% and the count by 0.06%
+([FINDINGS milestone 8 §10](FINDINGS.md)), which is what "independently" means in practice.
+
 ## 3. Judgment rules — fixed before the numbers exist
 
 Rules 1 and 2 were registered in `.claude/plans/weft-m5.plan.md` before the
@@ -580,6 +614,54 @@ procedure:
 3. **One arm dropped** — deep prefix at `inflight` 10, 1.6 h. Runs A and B had already
    shown `inflight` does not gate the collapse. So clause 1's registered wording, "at
    both `inflight` values", is **half-tested**, and it is published that way.
+
+### 5.3 Milestone 8's memory clause, judged — registered before it is measured
+
+[D-014](DECISIONS.md) recorded the clause as a miss on the ladder's peak, 345.2 MiB against
+250, and kept milestone 10 shut on the grounds that the miss was a target rather than a
+verdict. [FINDINGS milestone 8 §10](FINDINGS.md) is that target being attacked: the first
+attempt was measured out, the second — `Index.LookupInto` — cut what a query allocates by
+**30.7%**, from 15,691.3 to 10,869.0 KiB, and `make eval` puts nDCG@10 at 0.5826 and 0.6211,
+identical to four decimals to the published figures.
+
+None of that is a ladder figure. One run decides it, and it is the same ladder the clause
+was judged on so that nothing but the engine differs:
+
+```bash
+date; caffeinate -dimsu make bench BENCHFLAGS='-rates 3.41,6.82,13.64,27.28'; date
+```
+
+97 minutes, `-rotations 200`, `inflight` 40, `text` arm, on the machine below. `date` either
+side, because a machine that slept is what [milestone 7 §4.1](FINDINGS.md) cost.
+
+**Compared against [FINDINGS milestone 8 §7](FINDINGS.md), rung for rung:** ladder peak RSS,
+each rung's `raised`, bytes and allocations per query, the 13.64 q/s rung's p99, and shed and
+p50 at 27.28 q/s. The last two are the clauses that already passed, and they are re-measured
+rather than assumed — a memory fix that broke them would otherwise be published as a win.
+
+**What each outcome licenses, fixed now:**
+
+1. **Ladder peak ≤ 250 MiB** — the clause is met, the milestone's three targets are all met,
+   and **milestone 10 does not fire**. It closes as a conditional that was never triggered.
+2. **> 250 MiB, and the profile puts the remainder in the Go heap** — one more engineering
+   round inside milestone 8, and **that one is the last**. A second miss after it fires
+   milestone 10. The bound is registered here for the reason rule 5 clause 4 gives:
+   measuring until the answer settles is the failure this file exists to prevent.
+3. **> 250 MiB, and the profile puts the remainder in mapped pages or runtime fixed costs** —
+   [D-014](DECISIONS.md)'s revival condition, and **milestone 10 fires**, on the profile
+   rather than on the number.
+4. **The middle-rung excursion** — 13.64 q/s gave p99 849.853 ms and raised the mark by
+   206.6 MiB while shedding nothing. If the tail and the memory move together, they had one
+   cause and it is named. If they do not, that is a second finding and it goes to the PRD's
+   open questions: no pass-line wording changes here.
+
+**Repetitions** follow *rule 3, repaired* — the same named ladder, three times, 4.9 hours.
+Cut order, fixed now: repetition 3 first, and then the two observations are published as two
+observations and not as a median; then repetition 2, and a single run is published as single.
+**The judgment run is not cut.**
+
+Numbers are Apple M4 / Go 1.26.1 and are quoted with that machine, as
+[D-014](DECISIONS.md) already requires of this clause.
 
 ### Machine
 

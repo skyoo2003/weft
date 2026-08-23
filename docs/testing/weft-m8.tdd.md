@@ -577,6 +577,65 @@ than the candidate decode — the same *shape* of cause the PRD names, in a diff
 Removing it is a streaming read of postings, which is what milestone 10's "sorted
 traversal, no full materialisation" describes.
 
+### The target the profile named — one buffer per query, not one list per term
+
+**Summary.** `Index.LookupInto` is `Lookup` writing into a caller-owned buffer.
+`pkg/scorer/text` keeps one across a query's terms, so what is live is the **longest**
+posting list rather than the **sum** of them — and the sum is what a peak is made of.
+
+A buffer and not the iterator milestone 10's sentence describes, and
+[D-016](../DECISIONS.md) carries the argument: a segment that claims a term and cannot
+decode it makes the whole lookup absent (D-006), and that verdict arrives *after* some
+postings are decoded. Postings in a buffer can be discarded; yielded ones cannot.
+
+**RED** — both halves, `527701c`:
+
+```text
+pkg/engine/lazy_test.go:132:13: got.LookupInto undefined (type *Index has no field or method LookupInto)
+
+--- FAIL: TestScoringDoesNotAllocateAPostingListPerTerm (0.09s)
+    text_test.go:416: a 5-term query allocated 552912 bytes against 281232 for a one-term
+    query over the same corpus: that is 4.1 posting lists of difference
+```
+
+Compile-time in `pkg/engine`, runtime in the scorer, and 4.1 is exactly the four extra
+lists the profile predicted. The engine assertion lives inside `assertReadAPIsAgree`, the
+same helper and the same position `Index.Vector`'s guard took in the cycle above, because
+two spellings of one traversal is how a read path drifts.
+
+**GREEN** — `8fbc09e`:
+
+```text
+--- PASS: TestScoringDoesNotAllocateAPostingListPerTerm (0.09s)
+    text_test.go:408: 290768 bytes for 5 terms against 281232 bytes for one, over 4096 documents
+```
+
+0.15 posting lists of difference against 4.1. `go test -race ./pkg/engine/` ok, 86 s,
+`assertReadAPIsAgree` holding `LookupInto` against `Lookup` for every term of every corpus
+it builds, with one buffer reused across them.
+
+**Field** — `make bench BENCHFLAGS='-rates 10 -rotations 4 -memprofile …'`, same flags as
+the profile that named the target:
+
+| | KiB/query | allocs/query | peakrss |
+| --- | --- | --- | --- |
+| before | 15,691.3 | 15,488 | 97.8 MiB |
+| after | **10,869.0** | 15,478 | 92.9 MiB |
+
+**−30.7% of what a query allocates**, and the count moved 0.06% — the two figures measure
+different things and this is what that looks like. In the profile
+`engine.(*segment).lookup.func1` is gone from the top and `slices.Grow` stands at 31.8%
+where the sum of the lists used to be: the buffer still grows to the longest list, which is
+the intended remainder rather than a leftover.
+
+**Correctness** — `make eval`: `text` **0.5826**, `text+vector` **0.6211**, identical to four
+decimals to the published figures. The registered tolerance is −0.005; identity is stronger
+and is what a change that only moves where postings are written should produce.
+
+**No campaign ran.** [PERF.md](../PERF.md) §5.3 registers the 97-minute judgment ladder and
+what each of its four outcomes licenses, committed before it runs, which is the ordering
+milestone 7's task 2 and [D-012](../DECISIONS.md) both hold this repository to.
+
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result | Evidence |
@@ -590,10 +649,16 @@ traversal, no full materialisation" describes.
 | 18 | `-memprofile` writes a profile a reader can open, refuses a path it cannot write rather than discovering it after the run, and treats an empty path as "not asked for" | `…:TestWriteAllocProfile` (3 subtests) | unit | PASS | `go test -race -run TestWriteAllocProfile ./cmd/weft-eval/` |
 | 19 | The flag reaches `benchOpts` | `…:TestBenchFlagsParsesAMemProfilePath` | unit | PASS | same |
 | 20 | The profile is written on the `-writes` arm too, so the flag is not silently inert on one of two arms | `bench` returns `writeAllocProfile`'s error on both paths | inspection | — | no test; the arm needs the 626 MiB corpus |
+| 21 | A query's allocation does not scale with the number of terms it has | `pkg/scorer/text/text_test.go:TestScoringDoesNotAllocateAPostingListPerTerm` | unit (mapped corpus) | PASS | `go test -run TestScoringDoesNotAllocate ./pkg/scorer/text/` |
+| 22 | `LookupInto` answers exactly what `Lookup` does — every term, both sides of a commit, a term held by several segments, a buffer carrying another term's postings, and an absent term against a used buffer | `pkg/engine/lazy_test.go:assertReadAPIsAgree` (every caller of it) | unit | PASS | `go test -race ./pkg/engine/` |
+| 23 | nDCG@10 is unmoved by the memory work | `make eval` | integration | PASS (0.5826 / 0.6211, identical to published) | `make eval` |
+| 24 | The exported surface grew by exactly one line and `public_api.txt` did not move | `TestEngineAPISurfaceIsUnchanged`, `TestPublicAPISurfaceIsUnchanged` | gate | PASS after a recorded refresh | `git diff pkg/engine/testdata/` |
 
-Test 16 is why `make eval` was **not** run. The nDCG tolerance of −0.005 is a guard on
-scorer changes, and after the revert there is no scorer change: an empty `pkg/` diff is a
-stronger statement than a re-measured metric, and it costs nothing.
+Test 16 was why `make eval` was not run at the point the revert landed: the nDCG tolerance
+of −0.005 is a guard on scorer changes, and an empty `pkg/` diff is a stronger statement
+than a re-measured metric. The third cycle does change `pkg/`, so test 23 runs it, and
+identity to four decimals is what a change that only moves where postings are written
+should produce.
 
 ## Coverage and known gaps
 
@@ -665,6 +730,15 @@ If these checkpoints are squashed, the summary that must survive:
   attributes the whole 15.7 MiB per query: 53.2% is `Lookup` materialising a term's entire
   posting list, 44.3% is the accumulator map and candidate slice. Both are whole-set
   materialisation; neither is the hint the reverted commit went after.
-- **`pkg/` diff against `main` is empty.** No exported API moved, `pkg/fusion` is
-  untouched, `go list -m all` is one line, and `make all` is green including both lint
-  gates.
+- **RED** `527701c` — `LookupInto` undefined in `assertReadAPIsAgree`, and a 5-term query
+  allocating 4.1 posting lists more than a one-term query over the same corpus.
+- **GREEN** `8fbc09e` — `Index.LookupInto` writes into a caller's buffer; 4.1 lists of
+  difference becomes 0.15, and on the corpus a query allocates 10,869.0 KiB against
+  15,691.3, −30.7%. Same postings, same order, same absence on corruption, same lock span.
+  `make eval` identical to four decimals. One line on `engine_api.txt`, recorded in
+  FINDINGS §10 before the refresh; `public_api.txt` unmoved, `pkg/fusion` untouched.
+- **Registration** — [PERF.md](../PERF.md) §2.8 describes the instrument and §5.3 registers
+  the 97-minute judgment ladder with what each of its four outcomes licenses, committed
+  before it runs. [D-016](../DECISIONS.md) is the buffer-not-iterator argument.
+- **`pkg/fusion` diff against `main` is empty**, `go list -m all` is one line, and `make all`
+  is green including both lint gates.
