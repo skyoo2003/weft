@@ -2019,3 +2019,174 @@ is still one line, `public_api.txt` does not move, and no existing signature cha
 alternative — a zero-copy decode aliasing the mapping — would have kept the file identical
 while silently changing what a `Document`'s lifetime means, which is a worse trade for the
 same saving. [D-015](DECISIONS.md) carries the argument.
+
+## 10. What a query allocates, measured — and the second wrong guess about the peak
+
+§9 left the 345.2 MiB unattributed and named the open question: what the `text` arm
+allocates per query. It is now measured, and the answer took two attempts, the first of
+which was wrong in a way only the second instrument could see.
+
+**The instrument first.** Each rung now prints what one query allocated — `TotalAlloc` and
+`Mallocs` differences divided by the samples that did the work, both reads outside the
+measured window. And `-memprofile` writes the `allocs` profile, which is cumulative since
+process start and therefore attributes by call site what the rung line gives only as a
+total. Cumulative also means a **twenty-second** run answers it: an allocation that happens
+once per query does not need a ladder.
+
+**The figure, and where it goes:**
+
+```text
+alloc  15691.3 KiB/query  15488 allocs/query
+```
+
+| call site | alloc_space | alloc_objects |
+| --- | --- | --- |
+| `engine.(*segment).lookup.func1` — the slice a `Lookup` builds | **53.2%** | — |
+| `text.(*Scorer).Candidates` (flat) — accumulator map and candidate slice | **44.3%** | 4.7% |
+| `decodeTermPostings` + `(*segReader).unit` | 1.4% | **59.4%** |
+| everything else, index mapping included | ~1% | ~36% |
+
+**Both halves of the byte total are whole-set materialisation, and the cause the PRD names
+is neither of them.** "30,549 candidates decoded per query" is the vector arm, as §9 already
+corrected; on the text arm it is `Lookup` decoding a term's *entire* posting list into a
+fresh slice, per term, per query — 8.3 MiB of the 15.7 — and then `Candidates` holding an
+entry per matching document twice, once in a map and once in a slice.
+
+### The guess that was measured out
+
+The first attempt went after the accumulator's corpus-sized size hint, which charges about
+28 bytes of map per document whether the query matches every document or eight: 4.52 MiB
+per query, live on every one of 40 requests in flight. Hinting from the first posting list
+instead made a synthetic narrow query 236× cheaper — and made the **measured** workload
+worse:
+
+| accumulator hint | KiB/query |
+| --- | --- |
+| corpus-sized | 15,691.2 |
+| first posting list | **19,501.6** |
+
+A TREC-COVID query's term union really is most of the corpus, so the map doubles its way up
+and every abandoned table is charged to the query: +3.7 MiB, about one extra copy of the
+final map. Worse for *this* clause specifically, because during a growth the old table and
+the new one are live together and the clause is a peak. It was reverted. The trade does not
+vanish by taking the other side of it — a narrow query still pays 4.52 MiB for a map
+holding eight entries — and what would remove it is a posting count in the terms index,
+which `termSpan` does not carry.
+
+**That is two wrong guesses about the 345.2 MiB in two milestones**, both plausible, both
+named before anything measured the arm they were about. What changed is that the third
+statement is a profile.
+
+### What was fixed, and what it is worth
+
+`Index.LookupInto` is `Lookup` writing into a caller-owned buffer. One buffer across a
+query's terms holds the **longest** posting list instead of the **sum** of them, and the sum
+is what a peak is made of. Measured as a property rather than a rate, on a corpus where
+every term matches every document so that four extra terms are four extra lists and nothing
+else:
+
+```text
+before   552,912 bytes for 5 terms against 281,232 for one — 4.1 posting lists
+after    290,768 bytes for 5 terms against 281,232 for one — 0.15
+```
+
+It changes nothing about the answer: same postings, same ascending order, committed
+segments before pending, and the same absence for a segment that claims a term and cannot
+decode it. That last one is why this is a buffer and not an iterator — the verdict arrives
+after some postings are decoded, and postings held in a buffer can be discarded where
+yielded ones cannot. The read lock is held for the same span as `Lookup`'s and nothing of
+the caller's runs inside it, so a scorer may still call `DocLen` per posting without meeting
+the re-entrant `RLock` deadlock the unexported read path exists to avoid.
+
+**What it is not:** a ladder figure. No campaign has run against it, so its effect on the
+345.2 MiB is a prediction and not a measurement, and the 44.3% half is untouched.
+
+### The invariant this spent
+
+A second line on `pkg/engine/testdata/engine_api.txt`, after the one §9 spent. `pkg/fusion`
+is untouched, `public_api.txt` does not move, `go list -m all` is one line, and no existing
+signature changes. [D-016](DECISIONS.md) carries the argument for spending it here rather
+than on an iterator, and the allocation count — 59.4% of it two small objects per posting
+inside the decoder — is left alone deliberately: it is 1.4% of the bytes, so it is a
+GC-pacing cost, and this milestone's clause is a peak.
+
+## 11. The memory clause, judged — and the excursion went with it
+
+**Verdict: all three of milestone 8's targets are met, and the ladder's peak is 100.7 MiB
+against a 250 MiB clause that stood at 345.2.** The procedure and the reading of every
+outcome were registered in [PERF.md](PERF.md) §5.3 before this ran, which
+`git log --oneline -- docs/PERF.md` is where to check.
+
+`-rates 3.41,6.82,13.64,27.28`, `-rotations 200`, `inflight` 40, `text` arm, Apple M4 /
+Go 1.26.1, 2026-08-24 04:57:17 to 06:29:03 KST:
+
+| rung | rate | p50 | p95 | p99 | shed | peak RSS | raised here | alloc/query | GC cycles |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 12.5% | 3.41/s | 78.576 ms | 91.988 ms | 100.857 ms | 0 | 99.0 MiB | +3.7 | 10,868.9 KiB | 5,009 |
+| 25% | 6.82/s | 50.825 ms | 71.173 ms | 77.613 ms | 0 | 99.0 MiB | +0 | 10,868.9 KiB | 5,206 |
+| 50% | 13.64/s | 34.124 ms | 45.105 ms | **53.868 ms** | 0 | 99.0 MiB | **+0** | 10,868.9 KiB | 5,212 |
+| **100%** | **27.28/s** | **33.470 ms** | 45.407 ms | 54.825 ms | **0** | **100.7 MiB** | +1.8 | 10,869.0 KiB | 5,176 |
+
+- **shed 0 at 27.28 q/s — met.** Zero of ten thousand, and zero on every rung below it.
+- **p50 ≤ 100 ms — met.** 33.470 ms against an unloaded 32.231 ms, a ratio of 1.04 and
+  nowhere near rule 1's twice-unloaded saturation bar.
+- **RSS ≤ 250 MiB — met.** The **ladder's** peak, which is the reading
+  [D-014](DECISIONS.md) fixed: **100.7 MiB**. §7's ladder reached 345.2.
+
+**So [PERF.md](PERF.md) §5.3 outcome 1 fires: milestone 10 does not fire, and closes as a
+conditional that was never triggered.** Its trigger was a miss after this milestone's
+engineering; the engineering happened and there is no miss.
+
+### The excursion moved with the memory, so it had one cause
+
+§7's 50% rung is the figure §6 item 6 carried forward as uncharacterised: p99 849.853 ms and
+the process peak raised by 206.6 MiB, while shedding nothing, sitting *below* a clean top
+rung where no pass-line wording would catch it.
+
+| 13.64 q/s | §7 | now |
+| --- | --- | --- |
+| p99 | 849.853 ms | **53.868 ms** |
+| raised the mark by | 206.6 MiB | **+0 MiB** |
+| p50 | 40.974 ms | 34.124 ms |
+
+**Fifteen times less tail and none of the memory**, at the same rate on the same ladder.
+§5.3's outcome 4 registered the reading in advance: if the tail and the memory move
+together, they had one cause and it is named. They moved together, and the cause is the one
+§10 attributed — a term's whole posting list materialised per term per query.
+Carried-forward item 6 is discharged.
+
+### What the run also says, including one thing it does not explain
+
+- **Allocation is flat across the ladder and identical to the smoke run.** 10,868.9 to
+  10,869.0 KiB/query over four rates spanning 8×, against 10,869.0 in a 20-second run. The
+  figure is a property of the query set and not of the load, which is what makes it usable
+  as a before-and-after at all.
+- **The ladder is the same ladder** even though the machine was not in the same state: the
+  unloaded p50 was 32.231 ms against §7's 35.332 ms, 8.8% apart. Because the rates are
+  **named** rather than derived, that difference moves the saturation *ratio* and not the
+  load points — which is the property [D-013](DECISIONS.md) bought, paying for itself here
+  for the first time.
+- **GC cycles fell 4.5× and this run does not explain it.** 5,009–5,212 per rung against
+  §7's 22,466–24,198, while allocation fell 1.44×. Worse for the reading §3 offered: that
+  section ordered four runs inversely by cycles per second and shed per second, and this is a
+  fifth point with the **lowest** collection rate of any of them — about 1.7 cycles per
+  second — and **shed 0 everywhere**. §3 called itself a correlation across four runs rather
+  than a mechanism. It is now a correlation a fifth point contradicts, and nothing here
+  instrumented the pacer either.
+- **Run hygiene.** 91 m 46 s of wall clock against 91 m 38 s of rungs plus the warm-up and a
+  1.6 s cold pass. No `SUSPENDED`. `p99.9` prints `--` on every rung, correctly:
+  [PERF.md](PERF.md) §2.3's floor wants 100 samples beyond the quantile and 10,000 does not
+  reach it.
+
+### One observation, not three
+
+**The repetitions registered in §5.3 were not run**, and each figure above is a **single
+observation**. The cut is recorded beside the figure rather than discovered later, and what
+it costs is stated exactly: milestone 7 measured one rate three times and got 37.9 ms,
+1.539 s and 416 ms, so a single observation on this workload is known to be one draw. What
+differs from milestone 7 is that the variable it could not hold is now held and named — the
+ladder prefix, at depth — and this run reproduces §7's ladder shape rung for rung.
+
+The three quantities the verdict rests on are also the three least likely to be a draw: shed
+is 0 with no near miss, the peak is 100.7 against a bar of 250 rather than 249, and
+allocation per query is deterministic to four significant figures across five runs.

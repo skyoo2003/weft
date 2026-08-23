@@ -4,6 +4,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -357,5 +359,118 @@ func TestBenchReportRefusesToLetAnEarlierRungsPeakReadAsItsOwn(t *testing.T) {
 	got := w.String()
 	if !strings.Contains(got, "unchanged") {
 		t.Errorf("a rung that did not raise the mark let the mark read as its own:\n%s", got)
+	}
+}
+
+// TestBenchReportSaysWhatAQueryAllocated is the other half of the attribution the peak
+// mark cannot give. `ru_maxrss` says what the process reached and refuses to say which
+// rung got it there; a rung's allocation total says what the work cost, and dividing it
+// by the samples that did the work turns a ladder-wide figure into a per-query one that
+// a fix can be held against. FINDINGS milestone 8 section 9 is a mark left unattributed
+// because nothing on the line said this.
+//
+// Shed requests are not in the denominator and must not be: the driver sheds by never
+// dispatching, so a shed request allocates nothing and would only dilute the figure.
+func TestBenchReportSaysWhatAQueryAllocated(t *testing.T) {
+	var w bytes.Buffer
+	const samples = 10000
+	r := benchReport{
+		rate:       13.64,
+		all:        loadgen.Quantiles{N: samples, P50: 41 * time.Millisecond, P50ok: true},
+		shed:       0,
+		faults:     loadgen.FaultCounts{Minor: 52890},
+		allocBytes: samples * 100 * 1024,
+		allocs:     samples * 40,
+		peakRSS:    345 << 20,
+		rssRaised:  206 << 20,
+		elapsed:    12 * time.Minute,
+	}
+
+	r.print(&w)
+
+	got := w.String()
+	if !strings.Contains(got, "100.0") {
+		t.Errorf("a rung that allocated 100.0 KiB per query did not say so:\n%s", got)
+	}
+	if !strings.Contains(got, "40 allocs") {
+		t.Errorf("a rung that made 40 allocations per query did not say so:\n%s", got)
+	}
+}
+
+// TestBenchReportOmitsTheAllocationLineWhenNothingWasMeasured keeps the division honest.
+// A rung interrupted before its first sample has a total and no denominator, and the
+// only two things that could be printed there are a crash and a zero — the second being
+// the same mistake the rusage omission already refuses, a figure that reads as a
+// measurement when nothing was measured.
+func TestBenchReportOmitsTheAllocationLineWhenNothingWasMeasured(t *testing.T) {
+	var w bytes.Buffer
+	r := benchReport{
+		rate:       13.64,
+		all:        loadgen.Quantiles{},
+		allocBytes: 4096,
+		allocs:     8,
+		faults:     loadgen.FaultCounts{Minor: 3},
+		peakRSS:    120 << 20,
+		elapsed:    time.Second,
+	}
+
+	r.print(&w)
+
+	if got := w.String(); strings.Contains(got, "/query") {
+		t.Errorf("a rung with no samples printed a per-query figure anyway:\n%s", got)
+	}
+}
+
+// TestWriteAllocProfile is the escalation the rung allocation line earns rather than
+// replaces. That line says a query allocated 15.7 MiB and cannot say what did; the
+// `allocs` profile is by call site, so it can. Cumulative since process start, which is
+// why a twenty-second run answers the question and no ladder is needed — and also why the
+// profile carries the index mapping and the cold pass beside the rung, which is a caveat
+// on reading it rather than on writing it.
+//
+// The failure mode worth a test is the silent one: a path that cannot be written, found
+// after the run rather than before it. An empty path writes nothing and is not an error,
+// because that is every run that did not ask for a profile.
+func TestWriteAllocProfile(t *testing.T) {
+	t.Run("writes a profile a reader can open", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "allocs.pb.gz")
+		if err := writeAllocProfile(path); err != nil {
+			t.Fatalf("writeAllocProfile: %v", err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		// pprof writes gzipped protobuf. Two bytes is the whole check: a truncated or
+		// unflushed write is what this catches, and parsing the profile here would mean
+		// vendoring a reader for it.
+		if len(b) < 2 || b[0] != 0x1f || b[1] != 0x8b {
+			t.Errorf("wrote %d bytes not beginning with the gzip magic: % x", len(b), b[:min(len(b), 8)])
+		}
+	})
+
+	t.Run("refuses a path it cannot write", func(t *testing.T) {
+		// A directory that does not exist, so the failure is the create rather than a
+		// permission the test would have to arrange.
+		path := filepath.Join(t.TempDir(), "nope", "allocs.pb.gz")
+		if err := writeAllocProfile(path); err == nil {
+			t.Error("writing to a directory that does not exist reported success")
+		}
+	})
+
+	t.Run("an empty path is not an error", func(t *testing.T) {
+		if err := writeAllocProfile(""); err != nil {
+			t.Errorf("no -memprofile asked for, and it failed: %v", err)
+		}
+	})
+}
+
+func TestBenchFlagsParsesAMemProfilePath(t *testing.T) {
+	o, err := benchFlags([]string{"-memprofile", "/tmp/allocs.pb.gz"})
+	if err != nil {
+		t.Fatalf("benchFlags: %v", err)
+	}
+	if o.memprofile != "/tmp/allocs.pb.gz" {
+		t.Errorf("memprofile = %q, want the path given", o.memprofile)
 	}
 }

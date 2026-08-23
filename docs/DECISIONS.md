@@ -1183,3 +1183,107 @@ accessor should have to argue harder than this one did.
 layout is written down once, and `assertReadAPIsAgree` checks that `Vector` and `Doc`
 answer the same on both sides of a commit. If a future field is added to one path only,
 those are the two things that were supposed to catch it.
+
+## D-016 — A buffer, not an iterator, and the second guess about the peak was measured out
+
+**Date:** 2026-08-23
+**Milestone:** 8 — the throughput wall
+**Status:** accepted
+**Context:** [FINDINGS milestone 8 §10](FINDINGS.md), [D-014](#d-014--the-memory-pass-line-reads-the-processs-mark-milestone-8-misses-it-and-milestone-10-does-not-fire-on-that), [D-015](#d-015--one-line-of-exported-surface-rather-than-a-document-whose-lifetime-quietly-changed)
+
+### Context
+
+D-014 recorded milestone 8's memory clause as a miss — 345.2 MiB against 250 — and called
+the target "localised", naming the cause the PRD names: 30,549 candidates decoded per
+query. [FINDINGS milestone 8 §9](FINDINGS.md) had already corrected half of that: every
+ladder ran the `text` arm, where no scorer calls `Doc`, so the candidate decode is the
+vector arm's cost and the 345.2 MiB was unattributed.
+
+Two guesses were then made about what a `text`-arm query allocates, and the instrument
+built to check the first is what refused it:
+
+| accumulator hint | KiB/query |
+| --- | --- |
+| corpus-sized | 15,691.2 |
+| first posting list | 19,501.6 |
+
+The `allocs` profile then attributed the whole figure. 53.2% is `Index.Lookup`
+materialising a term's entire posting list into a fresh slice, per term, per query; 44.3%
+is the accumulator map and the candidate slice.
+
+### Question
+
+Remove the per-term materialisation how — a streaming iterator, which is what milestone
+10's sentence describes, or a caller-owned buffer, which is not a new shape at all?
+
+### Decision
+
+**A buffer.** `Index.LookupInto(term string, buf []Posting) []Posting` is `Lookup` writing
+into the caller's array. `pkg/scorer/text` keeps one across a query's terms, so what is
+live is the longest posting list rather than the sum of them.
+
+**And the first guess is reverted**, on the measurement rather than on the property test it
+passed.
+
+### Why
+
+**D-006 decides it, not performance.** A segment that claims a term and cannot decode it
+makes the whole lookup absent, pending postings included — absence is what this repository
+gives corruption on the read path, because a partial posting list is not a shorter answer,
+it is a wrong one. That verdict arrives *after* some of the term's postings are decoded.
+Postings sitting in a buffer can be discarded; postings already yielded to a caller cannot.
+An iterator would have to either weaken the guarantee or hand back a signal the caller must
+remember to act on, and the second is the first with extra steps.
+
+**It is also the smaller change.** `scanPostings` already streams, because `Merge` needs it
+to; `lookup` is the only caller that builds a slice. So the traversal was already there and
+what was missing was somewhere to put the result. One exported method, no new interface, no
+change to what `Search` or `Fuser` see.
+
+**The lock stays where it was.** One read lock for the whole walk, released before
+returning, and nothing of the caller's runs inside it. An iterator yielding under the lock
+would put the scorer's `DocLen` call inside it, and `index.go` already records what that
+costs: a second `RLock` from a goroutine holding one deadlocks the moment a writer queues
+behind it. Avoiding that would have meant handing document lengths out through the iterator,
+which is a second design decision smuggled into this one.
+
+**Why the first guess loses.** Hinting the accumulator from the first posting list is
+correct for a narrow query and wrong for the workload the clause is judged on: a
+TREC-COVID query's term union really is most of the corpus, so the map doubles its way up
+and every abandoned table is charged to the query. Worse for a *peak* specifically, because
+during a growth the old table and the new one are live together. The trade does not vanish
+by taking the other side — a narrow query still pays 4.52 MiB for a map holding eight
+entries — and what would remove it is a posting count in the terms index, which `termSpan`
+does not carry. So the trade is published rather than resolved.
+
+**The invariant.** A second line on `pkg/engine/testdata/engine_api.txt`, after D-015's
+first. `public_api.txt` does not move, `pkg/fusion` is untouched, `go list -m all` is one
+line, no existing signature changes, and `make eval` returns nDCG@10 identical to four
+decimals. Two lines of exported surface is what this round has spent to keep the
+architecture assertion intact while attacking the memory clause, and both are recorded
+against the invariant rather than against a changelog.
+
+**Milestone 10 is not what this is.** Its sentence is "sorted traversal and early
+termination, so candidates are never fully materialised", and early termination is the half
+that could force a stream to declare its own score bound — the thing the PRD's second
+falsification clause is about. Nothing here declares a bound or reorders a traversal.
+[PERF.md](PERF.md) §5.3 registers what the ladder result licenses, including the case where
+milestone 10 fires after this.
+
+### What would show this decision was wrong
+
+- **The ladder does not move.** 30.7% off what a query allocates is a prediction about the
+  345.2 MiB and not a measurement of it. If the peak is unchanged, the 44.3% half or
+  something not in this profile is what holds it, and §5.3 outcome 2 or 3 applies.
+- **A second caller wants the postings and cannot reuse a buffer.** Two callers with
+  different lifetimes would want the iterator this rejected, and the rejection is about
+  D-006 rather than about there being one caller — so it would need answering again, with
+  the corruption signal designed rather than deferred.
+- **The buffer outlives what a caller expects.** The contract is that the result is the
+  caller's until the next call with the same buffer. A caller that keeps the slice across
+  calls sees it overwritten, and `assertReadAPIsAgree` reusing one buffer across every term
+  is the only thing standing over that today.
+- **The trade published instead of resolved turns out to matter.** An adopter whose queries
+  are two selective terms pays 4.52 MiB a query for an accumulator holding a few thousand
+  entries. If that ever shows up in a real deployment rather than in a synthetic test, a
+  posting count in the terms index is the format change that answers it.

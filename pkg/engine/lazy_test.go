@@ -117,9 +117,21 @@ func assertReadAPIsAgree(t *testing.T, want, got *Index) {
 	if tokens > 0 && len(terms) == 0 {
 		t.Fatalf("%d tokens indexed and no terms to compare postings over", tokens)
 	}
+	// One buffer across every term, which is the whole point of LookupInto and also the
+	// one way it can be wrong: a second call must not depend on what the first left
+	// behind. Reused deliberately here rather than freshly allocated per term.
+	var buf []Posting
 	for term := range terms {
 		if !slices.Equal(got.Lookup(term), want.Lookup(term)) {
 			t.Errorf("Lookup(%q) = %v, want %v", term, got.Lookup(term), want.Lookup(term))
+		}
+		// LookupInto is the same walk writing into a caller's buffer instead of a fresh
+		// slice, and two spellings of one traversal is how a read path drifts. The guard
+		// is that it agrees with Lookup — on both sides of a commit, over a term held by
+		// several segments, and with a buffer carrying another term's postings.
+		buf = got.LookupInto(term, buf)
+		if !slices.Equal(buf, got.Lookup(term)) {
+			t.Errorf("LookupInto(%q) = %v, want Lookup's %v", term, buf, got.Lookup(term))
 		}
 	}
 
@@ -135,6 +147,11 @@ func assertReadAPIsAgree(t *testing.T, want, got *Index) {
 	}
 	if pl := got.Lookup("zzzabsent"); len(pl) != 0 {
 		t.Errorf("Lookup of an absent term returned %d postings", len(pl))
+	}
+	// An absent term must not leave the caller looking at whatever the buffer held. This
+	// is the case where "empty" and "nil" differ and the length is what both agree on.
+	if pl := got.LookupInto("zzzabsent", buf); len(pl) != 0 {
+		t.Errorf("LookupInto of an absent term returned %d postings from a used buffer", len(pl))
 	}
 }
 

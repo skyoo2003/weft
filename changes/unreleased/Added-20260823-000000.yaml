@@ -1,0 +1,17 @@
+kind: Added
+body: '`weft-eval bench` prints what one query allocated on each rung — KiB and allocation
+  count per query, beside the rung total. It is the attribution `peakrss` cannot give:
+  `ru_maxrss` is a high-water mark the kernel never lowers, so a rung can only say how
+  much it raised the process mark, and `docs/FINDINGS.md` milestone 8 section 9 is what
+  that costs — a memory figure explained by a mechanism belonging to an arm that was never
+  measured. An allocation total divided by the samples that did the work is a property of
+  the work rather than of how long the rung ran, so a claim about a fix can be held
+  against it. Shed requests are not in the denominator, because the driver sheds by never
+  dispatching. Both reads sit outside the measured window and the second is last in the
+  after-snapshot block, since `runtime.ReadMemStats` is the only read there that stops the
+  world and would otherwise charge the cycle, pause and fault counters with the
+  instrument''s own stop. A rung with no samples omits the line rather than dividing by
+  zero or printing a zero that reads as a measurement. No exported API under `pkg/` moved.'
+time: 2026-08-23T00:00:00.000000000+09:00
+custom:
+  Issue: 15
