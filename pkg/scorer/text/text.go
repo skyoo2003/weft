@@ -77,21 +77,10 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 	// Duplicate query terms are summed twice, which is the formula taken
 	// literally: the sum is over occurrences in Q, not over the distinct set.
 	//
-	// Hinted from the first posting list, which is why it is made inside the loop
-	// rather than before it. The corpus-sized hint this replaces was right that an
-	// unhinted map re-buckets its way up through every doubling on exactly the
-	// queries that cost most, and wrong about what to pay for that: a hint is
-	// charged in full whether the query matches every document or eight of them.
-	// At this key and value width that is about twenty-eight bytes of buckets per
-	// document — 4.5 MiB per query on the 171,332-document evaluation corpus, live
-	// on every request in flight, for a map that may hold eight entries.
-	//
-	// A term's own posting list is the same evidence with no corpus in it: exact
-	// for the single-term case, and within one doubling of the union when later
-	// terms add documents the first did not. docs/FINDINGS.md milestone 8 is the
-	// mark that could not be attributed, and this package's allocation property
-	// test is what holds it.
-	var acc map[engine.DocID]float64
+	// Sized to the corpus rather than grown from nothing: one common term
+	// produces one entry per matching document, so an unhinted map re-buckets
+	// its way up through every doubling on exactly the queries that cost most.
+	acc := make(map[engine.DocID]float64, docs)
 	for _, term := range terms {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -106,9 +95,6 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		// exactly what the ln(1 + ...) form was chosen to rule out. Clamping
 		// keeps IDF > 0 always; a true snapshot is milestone 2 work
 		// (docs/FINDINGS.md section 4.4).
-		if acc == nil {
-			acc = make(map[engine.DocID]float64, len(posts))
-		}
 		nq := math.Min(float64(len(posts)), n)
 		idf := math.Log(1 + (n-nq+0.5)/(nq+0.5))
 
