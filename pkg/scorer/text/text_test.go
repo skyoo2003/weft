@@ -6,8 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/skyoo2003/weft/pkg/engine"
 )
@@ -340,5 +343,80 @@ func TestSearchIsSafeForConcurrentUse(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Fatalf("concurrent Search: %v", err)
+	}
+}
+
+// A property, not a number: **a query's allocation must not scale with the number of
+// terms it has.** Each term's postings are walked and finished with before the next term
+// is looked up, so one buffer's worth of them is live at a time even though today one
+// buffer per term is allocated.
+//
+// This is 53.2% of what a query allocates on the evaluation corpus — `Index.Lookup`
+// materialising a term's entire posting list into a fresh slice, per term, per query,
+// 8.3 MiB of 15.7. `docs/testing/weft-m8.tdd.md` has the profile and
+// `docs/FINDINGS.md` milestone 8 §8 is the peak it is a candidate for.
+//
+// The corpus is built so that every term matches every document: that makes each posting
+// list corpus-length, so the difference between a one-term and a five-term query is four
+// posting lists and nothing else. The accumulator holds the same entries either way.
+
+// allocBytesForTermCount scores one query of the given terms over a corpus in which every
+// document contains all of them, and reports bytes allocated by that one query.
+func allocBytesForTermCount(t *testing.T, docs, terms int) uint64 {
+	t.Helper()
+	all := make([]string, terms)
+	for i := range all {
+		all[i] = fmt.Sprintf("term%d", i)
+	}
+	text := strings.Join(all, " ")
+
+	ix := engine.New()
+	for i := range docs {
+		if _, err := ix.Add(engine.Document{Key: fmt.Sprintf("d%d", i), Text: text}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+	dir := t.TempDir()
+	if err := ix.Commit(dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	open, err := engine.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer open.Close() //nolint:errcheck // nothing left to do about it in a test
+
+	s := New(open)
+	q := engine.Query{Text: text}
+	if _, err := s.Candidates(t.Context(), q, 10); err != nil {
+		t.Fatalf("Candidates warm-up: %v", err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if _, err := s.Candidates(t.Context(), q, 10); err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+func TestScoringDoesNotAllocateAPostingListPerTerm(t *testing.T) {
+	const docs, many = 4096, 5
+	one := allocBytesForTermCount(t, docs, 1)
+	five := allocBytesForTermCount(t, docs, many)
+	t.Logf("%d bytes for %d terms against %d bytes for one, over %d documents",
+		five, many, one, docs)
+
+	// One posting list over this corpus is docs entries of a two-field struct. The
+	// budget is one whole extra list: four of them is what walking five terms costs
+	// today, and anything at or under one is not a list per term.
+	list := uint64(docs) * uint64(unsafe.Sizeof(engine.Posting{}))
+	if five > one+list {
+		t.Errorf("a %d-term query allocated %d bytes against %d for a one-term query over "+
+			"the same corpus: that is %.1f posting lists of difference, and a term's "+
+			"postings are finished with before the next term is looked up "+
+			"(budget was one+%d)",
+			many, five, one, float64(five-one)/float64(list), list)
 	}
 }
