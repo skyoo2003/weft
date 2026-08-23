@@ -451,7 +451,14 @@ type benchReport struct {
 	gcCycles  uint64
 	pause     time.Duration
 	gcCPU     float64
-	peakRSS   int64
+	// allocBytes and allocs are what this rung allocated: differences of two
+	// cumulative counters, like every field above and unlike rss. Printed per query
+	// rather than per rung, because the per-rung total is a function of how long the
+	// rung ran and the per-query figure is a property of the work — which is the one
+	// a fix, or a claim about a fix, can be held against.
+	allocBytes uint64
+	allocs     uint64
+	peakRSS    int64
 	// rssRaised is how much *this* rung moved that mark: peakRSS at the end minus the
 	// mark as it stood before the rung began. It is the only per-rung memory statement
 	// getrusage can support, and without it the printed peak reads as this rung's when
@@ -476,6 +483,14 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int))
 	// Read here for the same reason the fault counters are: it is a running total, so
 	// the only per-rung statement available is the difference. It cannot be reset.
 	rssBefore := loadgen.MaxRSS()
+	// One stop-the-world per rung, and outside the measured window on both sides: this
+	// read is before `start` and its pair is after `elapsed` has been taken. The same
+	// sentence internal/loadgen applies to ReadMemStats — an instrument that stops the
+	// world to answer must not be on the per-request path — with the per-rung reads it
+	// leaves room for. TotalAlloc and Mallocs are cumulative and monotonic, so a
+	// collection landing inside the rung cannot move either difference.
+	var memBefore runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
 	// Both CPU totals, not their ratio: the ratio of two running totals cannot be
 	// subtracted, and by the fifth rung it is dominated by the index mapping and the
 	// four rungs before this one rather than by what the collector is doing now.
@@ -503,6 +518,11 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int))
 	gcCPU1, totalCPU1 := loadgen.GCCPUSeconds()
 	faultsAfter, cyclesAfter := loadgen.ProcFaults(), loadgen.GCCycles()
 	pausesAfter, peakRSS := loadgen.GCPauseTotal(), loadgen.MaxRSS()
+	// Last in the block, because it is the only read here that stops the world: the
+	// cycle, pause and fault counters above would otherwise be charged with this
+	// instrument's own stop.
+	var memAfter runtime.MemStats
+	runtime.ReadMemStats(&memAfter)
 
 	raw, exGC := loadgen.SplitByGC(samples)
 	return benchReport{
@@ -513,6 +533,8 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int))
 		gcCycles:    cyclesAfter - cyclesBefore,
 		pause:       pausesAfter - pausesBefore,
 		gcCPU:       loadgen.GCCPUShareBetween(gcCPU0, totalCPU0, gcCPU1, totalCPU1),
+		allocBytes:  memAfter.TotalAlloc - memBefore.TotalAlloc,
+		allocs:      memAfter.Mallocs - memBefore.Mallocs,
 		peakRSS:     peakRSS,
 		rssRaised:   peakRSS - rssBefore,
 		elapsed:     elapsed,
@@ -613,6 +635,16 @@ func (r benchReport) print(w io.Writer) {
 	outf(w, "  gc        cycles %d  STW %v (%.3f%% of elapsed)  GC CPU share %.1f%%\n",
 		r.gcCycles, r.pause.Round(time.Microsecond),
 		100*float64(r.pause)/float64(max(r.elapsed, 1)), 100*r.gcCPU)
+	// Omitted rather than divided by zero, and omitted rather than printed as a zero:
+	// a rung interrupted before its first sample has a total and no denominator, and a
+	// 0.0 KiB/query there reads as a measurement. Same rule as the rusage omission
+	// below. Shed requests are not in the denominator — the driver sheds by never
+	// dispatching, so they allocated nothing.
+	if r.all.N > 0 {
+		outf(w, "  alloc     %.1f KiB/query  %d allocs/query  (%.1f MiB this rung)\n",
+			float64(r.allocBytes)/float64(r.all.N)/(1<<10), r.allocs/uint64(r.all.N),
+			float64(r.allocBytes)/(1<<20))
+	}
 	// Omitted rather than printed as zeros where getrusage does not exist. Four
 	// zeroes and a 0.0 MiB peak read as measurements, and a reader would compare them
 	// against the Linux figures in docs/PERF.md; absent is the honest answer, and on
