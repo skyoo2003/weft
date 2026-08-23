@@ -2109,3 +2109,84 @@ signature changes. [D-016](DECISIONS.md) carries the argument for spending it he
 than on an iterator, and the allocation count — 59.4% of it two small objects per posting
 inside the decoder — is left alone deliberately: it is 1.4% of the bytes, so it is a
 GC-pacing cost, and this milestone's clause is a peak.
+
+## 11. The memory clause, judged — and the excursion went with it
+
+**Verdict: all three of milestone 8's targets are met, and the ladder's peak is 100.7 MiB
+against a 250 MiB clause that stood at 345.2.** The procedure and the reading of every
+outcome were registered in [PERF.md](PERF.md) §5.3 before this ran, which
+`git log --oneline -- docs/PERF.md` is where to check.
+
+`-rates 3.41,6.82,13.64,27.28`, `-rotations 200`, `inflight` 40, `text` arm, Apple M4 /
+Go 1.26.1, 2026-08-24 04:57:17 to 06:29:03 KST:
+
+| rung | rate | p50 | p95 | p99 | shed | peak RSS | raised here | alloc/query | GC cycles |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 12.5% | 3.41/s | 78.576 ms | 91.988 ms | 100.857 ms | 0 | 99.0 MiB | +3.7 | 10,868.9 KiB | 5,009 |
+| 25% | 6.82/s | 50.825 ms | 71.173 ms | 77.613 ms | 0 | 99.0 MiB | +0 | 10,868.9 KiB | 5,206 |
+| 50% | 13.64/s | 34.124 ms | 45.105 ms | **53.868 ms** | 0 | 99.0 MiB | **+0** | 10,868.9 KiB | 5,212 |
+| **100%** | **27.28/s** | **33.470 ms** | 45.407 ms | 54.825 ms | **0** | **100.7 MiB** | +1.8 | 10,869.0 KiB | 5,176 |
+
+- **shed 0 at 27.28 q/s — met.** Zero of ten thousand, and zero on every rung below it.
+- **p50 ≤ 100 ms — met.** 33.470 ms against an unloaded 32.231 ms, a ratio of 1.04 and
+  nowhere near rule 1's twice-unloaded saturation bar.
+- **RSS ≤ 250 MiB — met.** The **ladder's** peak, which is the reading
+  [D-014](DECISIONS.md) fixed: **100.7 MiB**. §7's ladder reached 345.2.
+
+**So [PERF.md](PERF.md) §5.3 outcome 1 fires: milestone 10 does not fire, and closes as a
+conditional that was never triggered.** Its trigger was a miss after this milestone's
+engineering; the engineering happened and there is no miss.
+
+### The excursion moved with the memory, so it had one cause
+
+§7's 50% rung is the figure §6 item 6 carried forward as uncharacterised: p99 849.853 ms and
+the process peak raised by 206.6 MiB, while shedding nothing, sitting *below* a clean top
+rung where no pass-line wording would catch it.
+
+| 13.64 q/s | §7 | now |
+| --- | --- | --- |
+| p99 | 849.853 ms | **53.868 ms** |
+| raised the mark by | 206.6 MiB | **+0 MiB** |
+| p50 | 40.974 ms | 34.124 ms |
+
+**Fifteen times less tail and none of the memory**, at the same rate on the same ladder.
+§5.3's outcome 4 registered the reading in advance: if the tail and the memory move
+together, they had one cause and it is named. They moved together, and the cause is the one
+§10 attributed — a term's whole posting list materialised per term per query.
+Carried-forward item 6 is discharged.
+
+### What the run also says, including one thing it does not explain
+
+- **Allocation is flat across the ladder and identical to the smoke run.** 10,868.9 to
+  10,869.0 KiB/query over four rates spanning 8×, against 10,869.0 in a 20-second run. The
+  figure is a property of the query set and not of the load, which is what makes it usable
+  as a before-and-after at all.
+- **The ladder is the same ladder** even though the machine was not in the same state: the
+  unloaded p50 was 32.231 ms against §7's 35.332 ms, 8.8% apart. Because the rates are
+  **named** rather than derived, that difference moves the saturation *ratio* and not the
+  load points — which is the property [D-013](DECISIONS.md) bought, paying for itself here
+  for the first time.
+- **GC cycles fell 4.5× and this run does not explain it.** 5,009–5,212 per rung against
+  §7's 22,466–24,198, while allocation fell 1.44×. Worse for the reading §3 offered: that
+  section ordered four runs inversely by cycles per second and shed per second, and this is a
+  fifth point with the **lowest** collection rate of any of them — about 1.7 cycles per
+  second — and **shed 0 everywhere**. §3 called itself a correlation across four runs rather
+  than a mechanism. It is now a correlation a fifth point contradicts, and nothing here
+  instrumented the pacer either.
+- **Run hygiene.** 91 m 46 s of wall clock against 91 m 38 s of rungs plus the warm-up and a
+  1.6 s cold pass. No `SUSPENDED`. `p99.9` prints `--` on every rung, correctly:
+  [PERF.md](PERF.md) §2.3's floor wants 100 samples beyond the quantile and 10,000 does not
+  reach it.
+
+### One observation, not three
+
+**The repetitions registered in §5.3 were not run**, and each figure above is a **single
+observation**. The cut is recorded beside the figure rather than discovered later, and what
+it costs is stated exactly: milestone 7 measured one rate three times and got 37.9 ms,
+1.539 s and 416 ms, so a single observation on this workload is known to be one draw. What
+differs from milestone 7 is that the variable it could not hold is now held and named — the
+ladder prefix, at depth — and this run reproduces §7's ladder shape rung for rung.
+
+The three quantities the verdict rests on are also the three least likely to be a draw: shed
+is 0 with no near miss, the peak is 100.7 against a bar of 250 rather than 249, and
+allocation per query is deterministic to four significant figures across five runs.

@@ -632,9 +632,42 @@ the intended remainder rather than a leftover.
 decimals to the published figures. The registered tolerance is −0.005; identity is stronger
 and is what a change that only moves where postings are written should produce.
 
-**No campaign ran.** [PERF.md](../PERF.md) §5.3 registers the 97-minute judgment ladder and
-what each of its four outcomes licenses, committed before it runs, which is the ordering
-milestone 7's task 2 and [D-012](../DECISIONS.md) both hold this repository to.
+### The judgment ladder, run — three of three met
+
+**Summary.** `-rates 3.41,6.82,13.64,27.28`, `-rotations 200`, `inflight` 40, 2026-08-24
+04:57:17 to 06:29:03 KST, 91 m 46 s. All four rungs at 10,000 samples, shed 0 on every one.
+Registered in [PERF.md](../PERF.md) §5.3 **before** it ran, which
+`git log --oneline -- docs/PERF.md` is where to check — the ordering milestone 7's task 2 and
+[D-012](../DECISIONS.md) both hold this repository to.
+
+| rung | rate | p50 | p99 | shed | peak RSS | raised | alloc/query |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 12.5% | 3.41/s | 78.576 ms | 100.857 ms | 0 | 99.0 MiB | +3.7 | 10,868.9 KiB |
+| 25% | 6.82/s | 50.825 ms | 77.613 ms | 0 | 99.0 MiB | +0 | 10,868.9 KiB |
+| 50% | 13.64/s | 34.124 ms | **53.868 ms** | 0 | 99.0 MiB | **+0** | 10,868.9 KiB |
+| **100%** | **27.28/s** | **33.470 ms** | 54.825 ms | **0** | **100.7 MiB** | +1.8 | 10,869.0 KiB |
+
+shed **0**, p50 **33.470 ms** against a 100 ms bar, ladder peak **100.7 MiB** against 250 —
+where §7's ladder reached 345.2. **§5.3 outcome 1 fires and milestone 10 does not.**
+
+And the excursion §6 item 6 carried forward went with it: 13.64 q/s from p99 849.853 ms and
++206.6 MiB to **53.868 ms and +0 MiB**. §5.3's outcome 4 registered that reading in advance —
+tail and memory moving together means one cause, and it is the one §10 named.
+
+**What the run does not explain**, recorded rather than smoothed: GC cycles fell 4.5× while
+allocation fell 1.44×, and at about 1.7 cycles per second this is the lowest collection rate
+of any run in this milestone *and* shed 0 everywhere — the opposite order from the four-run
+correlation §3 offered. Nothing here instrumented the pacer either.
+
+**One observation, not three.** The repetitions §5.3 registers were not run; that is cut 2 of
+its order, taken deliberately and recorded beside every figure.
+[FINDINGS §11](../FINDINGS.md) states what it costs and why these three quantities are the
+least likely to be a draw.
+
+**An earlier attempt was interrupted** 42 minutes in, 8,635 of 10,000 samples into rung 1. It
+produced 10,867.3 KiB/query — 0.02% from the smoke figure, confirming the allocation number
+holds at ladder depth — and no verdict, because the peak is decided at a rung it never
+reached. Recorded in §5.3 rather than dropped.
 
 ## Test specification
 
@@ -653,6 +686,8 @@ milestone 7's task 2 and [D-012](../DECISIONS.md) both hold this repository to.
 | 22 | `LookupInto` answers exactly what `Lookup` does — every term, both sides of a commit, a term held by several segments, a buffer carrying another term's postings, and an absent term against a used buffer | `pkg/engine/lazy_test.go:assertReadAPIsAgree` (every caller of it) | unit | PASS | `go test -race ./pkg/engine/` |
 | 23 | nDCG@10 is unmoved by the memory work | `make eval` | integration | PASS (0.5826 / 0.6211, identical to published) | `make eval` |
 | 24 | The exported surface grew by exactly one line and `public_api.txt` did not move | `TestEngineAPISurfaceIsUnchanged`, `TestPublicAPISurfaceIsUnchanged` | gate | PASS after a recorded refresh | `git diff pkg/engine/testdata/` |
+| 25 | At 27.28 q/s the engine sheds nothing, holds p50 under 100 ms, and the ladder's peak RSS is under 250 MiB | `make bench BENCHFLAGS='-rates 3.41,6.82,13.64,27.28'` | field (registered) | PASS (0 / 33.470 ms / 100.7 MiB) | [FINDINGS §11](../FINDINGS.md), one observation |
+| 26 | The 13.64 q/s excursion is gone, and its tail and its memory moved together | same run | field (registered) | PASS (p99 53.868 ms, +0 MiB) | same |
 
 Test 16 was why `make eval` was not run at the point the revert landed: the nDCG tolerance
 of −0.005 is a guard on scorer changes, and an empty `pkg/` diff is a stronger statement
@@ -740,5 +775,11 @@ If these checkpoints are squashed, the summary that must survive:
 - **Registration** — [PERF.md](../PERF.md) §2.8 describes the instrument and §5.3 registers
   the 97-minute judgment ladder with what each of its four outcomes licenses, committed
   before it runs. [D-016](../DECISIONS.md) is the buffer-not-iterator argument.
+- **Verdict** — the ladder ran and outcome 1 fired: shed **0**, p50 **33.470 ms**, ladder
+  peak **100.7 MiB** against 250 where §7 reached 345.2, and the 13.64 q/s excursion went
+  from p99 849.853 ms and +206.6 MiB to 53.868 ms and +0 MiB. **Milestone 10 does not fire.**
+  One observation, and the repetitions cut are recorded beside every figure. What the run
+  does not explain — GC cycles down 4.5× against allocation down 1.44×, contradicting §3's
+  four-run correlation — is published as unexplained.
 - **`pkg/fusion` diff against `main` is empty**, `go list -m all` is one line, and `make all`
   is green including both lint gates.

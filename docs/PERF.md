@@ -663,6 +663,20 @@ observations and not as a median; then repetition 2, and a single run is publish
 Numbers are Apple M4 / Go 1.26.1 and are quoted with that machine, as
 [D-014](DECISIONS.md) already requires of this clause.
 
+**Outcome, 2026-08-24: clause 1 fired.** Ladder peak **100.7 MiB** against 250, shed **0**
+at 27.28 q/s, p50 **33.470 ms**, and the 13.64 q/s excursion went with the memory — p99
+849.853 ms to 53.868 ms, the mark raised by 206.6 MiB to 0. Every figure and the caveats are
+[FINDINGS milestone 8 §11](FINDINGS.md). **Milestone 10 does not fire.** What differed from
+what is registered above:
+
+1. **The repetitions were not run.** Cut 2 of the order above, taken deliberately: the
+   judgment run is published as a single observation and says so beside every figure. It is
+   recorded here because a procedure edited to match what happened is not a procedure.
+2. **An earlier attempt at the same command was interrupted** after 42 minutes, 8,635 of
+   10,000 samples into rung 1. It produced one datum worth keeping — 10,867.3 KiB/query,
+   0.02% from the smoke run's figure at ladder depth — and no verdict, because the peak is
+   decided at a rung it never reached. Nothing about it was published as a measurement.
+
 ### Machine
 
 <!-- Filled in with the published numbers. A latency table without the machine it
