@@ -216,7 +216,7 @@ func ExampleIndex_Commit() {
 			return
 		}
 	}
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(context.Background(), dir); err != nil {
 		fmt.Println("commit:", err)
 		return
 	}

@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"os"
@@ -317,7 +318,11 @@ func (ix *Index) Merge() error {
 
 	src := &mergedSource{segs: ix.segs[:k], base: ix.segs[0].base}
 	merged := segInfo{name: seg, base: src.base, count: src.count()}
-	if err := writeSegment(segRoot, src); err != nil {
+	// context.Background, and the note above this function says why the signature
+	// does not carry one instead. A merge is uncancellable today exactly as it was
+	// before milestone 9, so this is the status quo written down rather than a
+	// decision made here.
+	if err := writeSegment(context.Background(), segRoot, src); err != nil {
 		return fmt.Errorf("merge %s: %w", seg, err)
 	}
 	// A segment built out of something that would not read is not a segment to

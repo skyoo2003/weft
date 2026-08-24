@@ -2190,3 +2190,106 @@ ladder prefix, at depth — and this run reproduces §7's ladder shape rung for 
 The three quantities the verdict rests on are also the three least likely to be a draw: shed
 is 0 with no near miss, the peak is 100.7 against a bar of 250 rather than 249, and
 allocation per query is deterministic to four significant figures across five runs.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 9 — The write-lock ceiling
+
+Two clauses, and both point at the same place. **A read arriving while a commit is in
+flight must wait no more than 1 second**, against the 12.539 s milestone 5 §5 published.
+And **an operator must be able to call a commit off**, which `Commit` could not be asked to
+do: it took no context, and the Limitations table said so.
+
+## 1. What the 11 seconds were, and what had to be exclusive
+
+Milestone 5 §3.3 measured an 11.063 s window in which the writer held `ix.mu`. Of that,
+20,000 `Add` calls were 49 ms. The remaining 11.014 s was the commit itself, and nearly all
+of that was `buildIVF` — 142 centroids refined over 20,000 documents by five Lloyd passes,
+then every document assigned.
+
+**That computation only reads the index.** What has to be exclusive is the manifest rename
+and the `adopt` that follows it: one `openSegment` and one `clear`. So the lock was not
+removed, it was split.
+
+| section | lock | what runs there |
+| --- | --- | --- |
+| 1 | `wmu` + `mu.RLock` | read the manifest, encode the segment, rename — the whole 11 s |
+| 2 | `wmu` + `mu.Lock` | `adopt` + `rememberDir` — one mapping and one clear |
+| 3 | `wmu` only | `prune`, best-effort, touching no index state |
+
+`Index.wmu` is the load-bearing half and not bookkeeping. `sync.RWMutex` prefers writers: a
+goroutine blocked in `mu.Lock` makes every later `RLock` queue behind *it* rather than join
+the readers already inside, so a single concurrent `Add` would have restored the entire
+stall and merely changed its trigger. `wmu` keeps a mutator from reaching `mu.Lock` while a
+commit encodes. All four exclusive sites take it first, and
+`grep -n 'mu.Lock()' pkg/engine/*.go` is the whole enumeration.
+
+It also bought a cheaper design than the `ponytail:` note on `Commit` predicted. That note
+asked for the captured documents to be counted, so an `Add` arriving mid-encode is neither
+written twice nor dropped — a partial hand-off of `docs`, `byKey`, `postings`, `docLen`,
+`totalLen` and `base`. Excluding `Add` for the whole commit means the pending segment cannot
+change, so there is nothing to count and none of that was written. The price is that `Add`
+blocks for a whole commit, which is what it already did.
+
+**This also answers an open question the PRD carried** — whether learning the partition
+outside the lock breaks milestone 2's commit atomicity. It does not. The commit point is
+still the manifest rename, and under `wmu` the pending set cannot change, so what is written
+to the segment is exactly what was pending when the commit was admitted. A document arriving
+during training is not "undefined"; it arrives *after* the commit.
+
+## 2. Cancellation is a corollary of the rename, not a new rule
+
+`Commit` now takes a `context.Context`, and where a cancellation lands is what it means:
+
+- **Before the rename** — `ctx.Err()` is reported and the index is untouched. The pending
+  documents are still pending and the caller may commit again. What may be left in the
+  directory is an unnamed `seg-<gen+1>`, which is *already* a defined state: `Open`
+  documents it as the debris of a commit that never finished, ignores it, and the next
+  `Commit` sweeps it. No cleanup path was added.
+- **After the rename** — the commit has succeeded and `ctx.Err()` is ignored for the rest of
+  the call. Stopping there would leave the directory publishing a generation the live index
+  does not know it holds, and the next `Commit` would then fail the `stored == base`
+  agreement and report the directory as corrupt. **A cancellation is not allowed to reach a
+  state a crash cannot.**
+
+The poll is not per document: entry, each section boundary of the encode, each of the five
+Lloyd passes, every `ivfAssignPoll` (1,024) documents of the assignment pass, and immediately
+before the rename. The coarsest unpolled stretch is one walk of the training sample, bounded
+by `ivfSample` positions. A poll inside `ivfDot` would put a load and a compare in a loop
+that runs `count·nlist·dim` times, which is responsiveness nobody can perceive bought with a
+branch in the writer's hottest loop.
+
+`Merge` did **not** get a context, and did not get its lock split either. The same
+restructuring applies to it almost verbatim and it is a *longer* stop than a commit — it
+rewrites the oldest generations rather than one batch. It is carried forward rather than done
+because nothing measures it: `weft-eval bench -writes` times a commit and there is no arm
+that times a merge. A reordering claimed as an improvement without a number is the failure
+this file exists to stop.
+
+### The invariant this spent
+
+**One line of `pkg/engine/testdata/engine_api.txt` changed rather than added**, which is a
+first: §9 and §10 of milestone 8 each spent a new line, and this is the first existing
+signature to move.
+
+```diff
+-method Index.Commit(string) error
++method Index.Commit(context.Context, string) error
+```
+
+Adding `CommitContext` and keeping `Commit` was the alternative, and it was rejected before
+anything was written. `v0.1.0` is not cut, so there is no compatibility to keep, and an
+`XxxContext` pair planted at a point where nothing has to be preserved becomes permanent
+surface. `Search` already takes a `context.Context` first, so two entry points with different
+conventions is the more expensive outcome. [D-017](DECISIONS.md) carries the argument and both
+rejected alternatives.
+
+Everything else held: `pkg/fusion` is untouched, `public_api.txt` does not move, `go list -m
+all` is one line, and the 82 call sites are all tests, `cmd` and `examples` — a one-time
+mechanical churn traded against permanent surface.
+
+**Segment bytes did not change**, which is asserted rather than argued.
+`TestIVFTrainingIsDeterministic`, `TestSegmentRoundTrip` and the golden-segment comparisons
+all pass under `-race`: a lock mode or a context poll that changed an encoding would be a
+bug, not a speedup.

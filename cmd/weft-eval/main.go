@@ -923,7 +923,11 @@ func build(ctx context.Context, args []string) error {
 		return fmt.Errorf("clear %s before rebuilding: %w", dir, err)
 	}
 	start := time.Now()
-	if err := ix.Commit(dir); err != nil {
+	// The command's context, so Ctrl-C during the commit stops it. What that leaves
+	// is the state the RemoveAll above already created — a directory with no
+	// provenance and no index — which verifyProvenance refuses and this command
+	// rebuilds. A cancelled commit is therefore no worse off than a cancelled build.
+	if err := ix.Commit(ctx, dir); err != nil {
 		return err
 	}
 	log.Printf("committed to %s in %s", dir, time.Since(start).Round(time.Millisecond))

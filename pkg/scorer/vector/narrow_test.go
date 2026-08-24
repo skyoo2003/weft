@@ -65,7 +65,7 @@ func committedVectorIndex(t *testing.T, n, dim, groups int) *engine.Index {
 		}
 	}
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if err := ix.Close(); err != nil {

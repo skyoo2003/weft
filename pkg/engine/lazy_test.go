@@ -276,7 +276,7 @@ func TestOpenDoesNotDecodeTheCorpus(t *testing.T) {
 	}
 	ix := bulkCorpus(t, 2000)
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	onDisk := segmentBytes(t, dir)
@@ -329,7 +329,7 @@ func TestLazyAndEagerAgreeOnEveryReadAPI(t *testing.T) {
 	writer := New()
 	addAll(t, writer, docs)
 	dir := t.TempDir()
-	if err := writer.Commit(dir); err != nil {
+	if err := writer.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if err := writer.Close(); err != nil {
@@ -355,7 +355,7 @@ func TestCloseReleasesTheSegments(t *testing.T) {
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "x x"}, {Key: "b", Text: "x"}})
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	got, err := Open(dir)
@@ -393,7 +393,7 @@ func openHeap(t *testing.T, docs int) (heap uint64, onDisk int64) {
 	func() {
 		ix := bulkCorpus(t, docs)
 		defer ix.Close() //nolint:errcheck // teardown
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 	}()
@@ -466,7 +466,7 @@ func TestCommitIsByteDeterministic(t *testing.T) {
 		dir := t.TempDir()
 		ix := bulkCorpus(t, 200)
 		defer ix.Close() //nolint:errcheck // teardown
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		return dirBytes(t, filepath.Join(dir, segDirName(1)))
@@ -522,7 +522,7 @@ func TestCommitAfterOneAddWritesOneDocument(t *testing.T) {
 	}
 	ix := bulkCorpus(t, 2000)
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("first Commit: %v", err)
 	}
 	first := dirBytes(t, filepath.Join(dir, segDirName(1)))
@@ -531,7 +531,7 @@ func TestCommitAfterOneAddWritesOneDocument(t *testing.T) {
 	if _, err := ix.Add(Document{Key: "one-more", Text: "a single extra document"}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("second Commit: %v", err)
 	}
 
@@ -590,7 +590,7 @@ func commitEach(t *testing.T, dir string, n int) *Index {
 		}); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit %d: %v", i, err)
 		}
 	}
@@ -955,13 +955,13 @@ func TestMergeDoesNotBufferPostingLists(t *testing.T) {
 	// corpus" is the case this is about, and the one that reusing a buffer
 	// across segments would not touch.
 	ubiquitousCorpus(t, ix, 0, 4000)
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	onDisk := segmentBytes(t, dir)
 	for i := range 8 {
 		ubiquitousCorpus(t, ix, 4000+i, 1)
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit %d: %v", i, err)
 		}
 	}
@@ -1012,7 +1012,7 @@ func TestScrubDoesNotMaterializeTheSegment(t *testing.T) {
 	dir := t.TempDir()
 	ix := New()
 	ubiquitousCorpus(t, ix, 0, 4000)
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if err := ix.Close(); err != nil {
@@ -1071,7 +1071,7 @@ func TestATruncatedBlockCountIsRefused(t *testing.T) {
 	for i := range 200 {
 		mustAdd(t, ix, Document{Key: fmt.Sprintf("doc-%03d", i), Text: "fusion"})
 	}
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if err := ix.Close(); err != nil {
@@ -1181,7 +1181,7 @@ func TestADamagedRecordCannotAllocateTheCorpus(t *testing.T) {
 	func() {
 		ix := bulkCorpus(t, docs)
 		defer ix.Close() //nolint:errcheck // teardown
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 	}()
@@ -1362,11 +1362,11 @@ func TestLookupRefusesAPartialAnswer(t *testing.T) {
 	// One term in two segments, so a damaged one still leaves a plausible
 	// nonempty answer behind.
 	mustAdd(t, ix, Document{Key: "one", Text: "fusion"})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	mustAdd(t, ix, Document{Key: "two", Text: "fusion"})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if err := ix.Close(); err != nil {
@@ -1472,7 +1472,7 @@ func TestLookupDoesNotCopyPostingsItWasAlreadyHanded(t *testing.T) {
 		}
 	}
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	open, err := Open(dir)

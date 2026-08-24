@@ -172,7 +172,7 @@ func TestASideStoreSurvivesCommitAndOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search before commit: %v", err)
 	}
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	// Closed because it was committed, not because it was opened: Commit adopts
