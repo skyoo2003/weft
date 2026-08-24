@@ -2513,3 +2513,63 @@ What density is actually load-bearing for is the *docs* section, where a `DocID`
 is a position — and that is why nothing is reclaimed ([D-019](DECISIONS.md)).
 The note was right that ids and deletion are one problem. It named the wrong two
 places.
+
+## 4. Quality, judged — run C of the registered procedure
+
+`docs/PERF.md` §5.5 registered three runs before any of them was executed. This
+is run C. **Runs A and B have not been executed**, so the performance-invariance
+clauses of this milestone are unjudged; §5 says what that leaves open.
+
+```console
+$ make eval
+08:37:28 arm text                              nDCG@10 0.5826  (6.613s)
+08:37:39 arm text+vector                       nDCG@10 0.6211  (10.823s)
+```
+
+| Arm | Published | This round | Delta | Tolerance |
+| --- | --- | --- | --- | --- |
+| `text` | 0.5826 | **0.5826** | 0.0000 | −0.005 |
+| `text+vector` | 0.6211 | **0.6211** | 0.0000 | −0.005 |
+
+Identical to four decimals, which is **reading 1** of the four §5.5 fixed in
+advance. One observation, Apple M4 / go1.26.7, 2026-08-25 — not a median, per
+[D-013](DECISIONS.md).
+
+The argument this was checking is the one §5.5 named: every tombstone check takes
+an empty-set fast path, and the evaluation corpus has no deletions, so the
+scoring path should be the one that earned these numbers. An identical figure is
+consistent with that and does not prove it — what would have disproved it is any
+movement at all, since nothing else in this round touches scoring.
+
+### 4.1 It also read a version 3 index, on the real corpus
+
+`.eval-data/index/MANIFEST` is stamped version **3**, written before this round
+existed. `make eval` opened it, ran five arms over 171,332 documents and returned
+the published figures, with no conversion and no rebuild.
+
+That is the format metric — *existing v3 segments are read unconverted* —
+measured on a real corpus rather than only on the fixture
+`TestAV3GenerationOpensAndAnswers` builds. It was free, in the sense that nothing
+was done to obtain it: it is what running the quality suite at all now requires.
+
+## 5. Carried forward
+
+1. **Runs A and B have not happened.** The performance-invariance clauses —
+   shed 0 at 27.28 q/s, p50 ≤ 40 ms, ladder peak RSS ≤ 120 MiB, worst read inside
+   a commit window ≤ 1 s — are **unjudged**, and nothing in this round should be
+   read as claiming them. The procedure and the four readings are registered at
+   [PERF §5.5](PERF.md); about 1.25 hours of machine time.
+2. **The cost of a tombstone at query time has no instrument.** Run B needs a
+   `-deletefrac` flag `cmd/weft-eval` does not have. Until it exists,
+   [D-019](DECISIONS.md)'s question — *what deleted fraction forces a re-index* —
+   has no number on either the RSS or the recall side.
+3. **Nothing reclaims.** Deletion and update grow the directory monotonically and
+   spend `DocID`s that are never returned. [D-019](DECISIONS.md) prices it and
+   names the trigger for revisiting; `docs/FORMAT.md` §8 publishes it.
+4. **`Index.Nearest` weakened and it is unmeasured.** Tombstones are filtered
+   after a segment has widened its own probe, so its "at least k candidates"
+   contract no longer holds under deletion and recall falls as the deleted
+   fraction rises. No measurement exists.
+5. **The read-path filter is maintained by hand.** Every read method filters
+   today and nothing structural keeps a future one from forgetting — §3 states
+   this as the limit of the architecture result.

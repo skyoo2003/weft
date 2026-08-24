@@ -816,6 +816,20 @@ eval` are not cut.** They are the two that hold this round's denominators.
 **One observation each, and that is written beside the numbers.** [D-013](DECISIONS.md)'s
 truncation applies unchanged: a single run is not a median and must not be called one.
 
+**Outcome, 2026-08-25: run C executed, reading 1. Runs A and B not executed.**
+`make eval` returned nDCG@10 **0.5826** (`text`) and **0.6211** (`text+vector`),
+identical to four decimals to the published figures — the quality-invariance clause
+passes on one observation. The run also opened a format **version 3** index, the one
+`make eval-data` built before this round, so it doubles as the unconverted-read metric
+on the real 171,332-document corpus rather than on a fixture.
+
+Runs A and B were not run, so **the performance-invariance clauses are unjudged** —
+not passed, and not failed. That is the first entry of the cut order above taken,
+plus the `-writes` half of the second; the ladder rung this file said would not be
+cut has also not been run, which is a departure from the order and is recorded here
+rather than in a commit message. [FINDINGS milestone 11 §5](FINDINGS.md) carries it
+forward.
+
 ### Machine
 
 <!-- Filled in with the published numbers. A latency table without the machine it
