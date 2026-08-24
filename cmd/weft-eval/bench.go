@@ -800,18 +800,8 @@ func benchWrites(ctx context.Context, o benchOpts, qs []eval.Query, n int, unloa
 	fmt.Printf("\nweft  %s  writes  rate=%.2f/s  n=%d  inflight=%d  commit adds %d document(s)\n",
 		o.arm, rate, n, o.inflight, o.writedocs)
 
-	// One rotation over the copy before anything is measured. benchWarmup's cold and
-	// warm passes ran against the published index; this is a different mapping of a
-	// different 626 MiB of bytes, and its first-touch faults would otherwise land
-	// inside the measured distribution. Worse, they would land almost entirely in the
-	// `outside` cohort — the commit fires a third of the way in — which is the
-	// baseline the commit's cost is compared against, so the bias pointed at making
-	// the write lock look cheap.
-	for i := range qs {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		wdo(i)
+	if err := benchWarmCopy(ctx, qs, wdo); err != nil {
+		return err
 	}
 
 	// The commit is fired a third of the way in, from its own goroutine, and the
@@ -845,7 +835,12 @@ func benchWrites(ctx context.Context, o benchOpts, qs []eval.Query, n int, unloa
 		// Before the error check, not after it. A cancelled commit now reports
 		// context.Canceled, and blaming the commit for the Ctrl-C that stopped it
 		// would name the wrong thing — an abandoned run has nothing to attribute
-		// either way.
+		// either way. Logged rather than dropped, though: a commit can fail for a
+		// reason the Ctrl-C had nothing to do with, and swallowing an ENOSPC because
+		// the operator interrupted afterwards leaves nothing to read.
+		if w.err != nil {
+			log.Printf("the commit under measurement also failed: %v", w.err)
+		}
 		return ctx.Err()
 	case w.err != nil:
 		// A failed commit used to publish a window anyway: the error was logged, `to`
@@ -884,6 +879,27 @@ func benchWrites(ctx context.Context, o benchOpts, qs []eval.Query, n int, unloa
 		dq.Max.Round(time.Millisecond), oq.Max.Round(time.Millisecond))
 	if f := failed.Load(); f > 0 {
 		fmt.Printf("\nWARNING: %d requests returned an error and are counted in the distributions above\n", f)
+	}
+	return nil
+}
+
+// benchWarmCopy runs one rotation over the copy before anything is measured.
+// benchWarmup's cold and warm passes ran against the published index; this is a
+// different mapping of a different 626 MiB of bytes, and its first-touch faults would
+// otherwise land inside the measured distribution. Worse, they would land almost
+// entirely in the `outside` cohort — the commit fires a third of the way in — which is
+// the baseline the commit's cost is compared against, so the bias pointed at making the
+// write lock look cheap.
+//
+// Not benchCold, which rotates over the same queries: that one prints a `cold` line and
+// a fault delta, and the writes report has no column for either. What this pass is for
+// is the faults being taken here rather than later, not a number to read.
+func benchWarmCopy(ctx context.Context, qs []eval.Query, do func(int)) error {
+	for i := range qs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		do(i)
 	}
 	return nil
 }
