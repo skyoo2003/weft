@@ -2428,10 +2428,21 @@ before refreshing the golden. This is that entry.
 | Line added to `pkg/engine/testdata/engine_api.txt` | What a caller gets |
 | --- | --- |
 | `method Index.Delete(string) bool` | Removes the document with a Key and reports whether there was one |
+| `method Index.Update(Document) (DocID, error)` | Replaces the document holding a Key, returning the id it now has |
+| `var ErrNoSuchKey` | What `Update` reports for a Key no live document holds |
 
-`bool` rather than `error`: the only way this fails is that the key was not
-there, and a segment too damaged to answer reads as absence everywhere else in
-this package ([D-006](DECISIONS.md)). It is the same shape `Resolve` already has.
+**Three lines.** `Delete` is `bool` rather than `error` because the only way it
+fails is that the key was not there, and a segment too damaged to answer reads as
+absence everywhere else in this package ([D-006](DECISIONS.md)); it is the shape
+`Resolve` already has. `Update` can fail four ways that are not that — an empty
+key, a non-finite vector, a mismatched width, a key nobody holds — so it returns
+an error, and the `DocID` it returns is not decoration: an update of a
+*committed* document cannot rewrite the segment holding it, so it tombstones the
+old record and appends a new one under a new id.
+
+`Update` refuses an unknown key rather than inserting, which is
+`ErrDuplicateKey`'s rule read from the other side: a mistyped key must not
+silently become a second document, and it must not silently overwrite one either.
 
 `public_api.txt` is unchanged, `pkg/fusion` is unchanged, and no scorer
 implementation file changed — which is the milestone's actual claim and is

@@ -18,6 +18,7 @@ method Index.Merge() error
 method Index.Nearest([]float32, int) []DocID
 method Index.Resolve(string) (DocID, bool)
 method Index.Stats() (int, float64)
+method Index.Update(Document) (DocID, error)
 method Index.Vector(DocID) ([]float32, bool)
 package engine
 type Candidate struct
@@ -50,4 +51,5 @@ var ErrDuplicateKey = errors.New("engine: duplicate document key")
 var ErrEmptyKey = errors.New("engine: document key is empty")
 var ErrNilScorer = errors.New("engine: nil Scorer")
 var ErrNoFuser = errors.New("engine: nil Fuser")
+var ErrNoSuchKey = errors.New("engine: no document with this key")
 var ErrNonFiniteVector = errors.New("engine: vector has a non-finite component")

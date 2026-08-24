@@ -556,9 +556,17 @@ func downgradeToV2(t *testing.T, dir string) {
 		}
 		for _, s := range segSections {
 			p := filepath.Join(seg, s.name)
-			if _, err := os.Stat(p); err == nil {
-				patchVersion(t, p, 2)
+			if _, err := os.Stat(p); err != nil {
+				continue
 			}
+			// meta carries version 4's live document count and the others carry
+			// nothing new, so meta is the one section that shrinks rather than
+			// merely being restamped.
+			if s.name == metaFile {
+				downgradeSection(t, p, 2)
+				continue
+			}
+			patchVersion(t, p, 2)
 		}
 	}
 	// The tombstone file and the manifest's count of it are version 4's, so a
@@ -574,7 +582,12 @@ func downgradeToV2(t *testing.T, dir string) {
 			t.Fatal(err)
 		}
 	}
-	downgradeManifest(t, filepath.Join(dir, manifestName), 2)
+	// A directory that actually holds tombstones has documents an older reader
+	// must not see, which is the whole reason version 4 exists — so this refuses
+	// to simulate that downgrade rather than producing bytes that lie.
+	if n := downgradeSection(t, filepath.Join(dir, manifestName), 2); n != 0 {
+		t.Fatalf("%s records %d tombstones; a version 2 reader could not express them", manifestName, n)
+	}
 }
 
 // TestAV2SegmentOpensAndAnswersExactly is the dual reader, and the reason the

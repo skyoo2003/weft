@@ -492,6 +492,21 @@ func writeSegment(ctx context.Context, segRoot *os.Root, src segSource) error {
 		meta.uvarint(uint64(src.count()))
 		meta.uvarint(uint64(totalLen))
 		meta.uvarint(uint64(vecDim))
+		// The live count, which is version 4's one addition to this section and
+		// exists to keep a cross-check the keys section would otherwise lose.
+		// Every document is written, tombstones included, but only the live ones
+		// get a keys entry — so "the keys table indexes exactly as many keys as
+		// meta counts documents" stops being true and this is what stands in its
+		// place. Counted here rather than tracked by the source because it is one
+		// pass over a number the source already knows, against a second field on
+		// segSource that both implementations would have to keep honest.
+		live := 0
+		for i := range src.count() {
+			if !src.dead(i) {
+				live++
+			}
+		}
+		meta.uvarint(uint64(live))
 		// docoff records where each record landed, so it is written from what
 		// encodeDocs returns rather than by predicting record sizes twice.
 		offs, lens, docKeys := encodeDocs(docs, src)
@@ -499,7 +514,7 @@ func writeSegment(ctx context.Context, segRoot *os.Root, src segSource) error {
 			return err
 		}
 		encodeDocOffsets(docoff, offs, lens)
-		encodeKeys(keys, docKeys)
+		encodeKeys(keys, docKeys, src.dead)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1010,17 +1025,34 @@ func parseFrame(name string, b []byte, kind byte) (*segReader, error) {
 // decodeMeta returns the collection statistics a segment claims. The claims
 // are cross-checked against the docs file by Open — meta is the snapshot BM25
 // trusts, so it does not get to disagree with the documents it describes.
-func decodeMeta(r *segReader) (docCount, totalLen, vecDim int, err error) {
+// live is how many of those documents were not tombstones when the segment was
+// written, which is what the keys section indexes. A version 3 segment predates
+// deletion, so every document it holds was live and the two numbers are one —
+// which is also what makes such a segment readable here with nothing converted.
+//
+// It is the count at *write* time and not a claim about now: documents are
+// deleted after their segment is sealed, and nothing rewrites a sealed segment.
+func decodeMeta(r *segReader) (docCount, totalLen, vecDim, live int, err error) {
 	if docCount, err = r.intn("doc count", maxDocCount); err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	if totalLen, err = r.intn("total length", maxInt); err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	if vecDim, err = r.intn("vector dim", maxInt); err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
-	return docCount, totalLen, vecDim, r.done()
+	live = docCount
+	if r.version >= 4 {
+		// Bounded by the document count, which is the one thing that makes it a
+		// check rather than a number: a segment claiming more live documents than
+		// it holds would have openSegment demand a keys table longer than the
+		// section could back.
+		if live, err = r.intn("live document count", docCount); err != nil {
+			return 0, 0, 0, 0, err
+		}
+	}
+	return docCount, totalLen, vecDim, live, r.done()
 }
 
 // decodeDocRecord reads one document from wherever r is positioned and returns

@@ -41,6 +41,13 @@ type segment struct {
 	totalLen int
 	vecDim   int
 
+	// live is how many of this segment's documents had no tombstone when it was
+	// written, which is how many entries its keys section holds. It is a
+	// cross-check and nothing reads it at query time: whether a document is
+	// deleted *now* is the index's tombstone set to answer, and that set keeps
+	// growing after a segment is sealed.
+	live int
+
 	maps [][]byte // every mapping, in openSegment order, for close
 
 	docs     []byte // docs payload
@@ -131,7 +138,7 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 	}
 	docsR, postR, termsR, docoffR, keysR := rs[1], rs[2], rs[3], rs[4], rs[5]
 
-	if s.count, s.totalLen, s.vecDim, err = decodeMeta(metaR); err != nil {
+	if s.count, s.totalLen, s.vecDim, s.live, err = decodeMeta(metaR); err != nil {
 		return nil, err
 	}
 	// The partition is read after meta because it is checked against it: the
@@ -159,13 +166,16 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 	if s.keys, err = parseKeyTable(keysR); err != nil {
 		return nil, err
 	}
-	// And the same cross-check for the other seek table. Keys are unique and
-	// every document has one, so the table indexes exactly as many keys as meta
-	// counts documents — FORMAT.md section 5 refuses either seek table
-	// disagreeing with meta, and this is the keys half of that rule.
-	if s.keys.n != s.count {
-		return nil, fmt.Errorf("%s: meta says %d documents, %s indexes %d keys: %w",
-			metaR.name, s.count, keysFile, s.keys.n, ErrCorrupt)
+	// And the same cross-check for the other seek table, against the live count
+	// rather than the document count. A key belongs to one live document, and a
+	// document deleted before this segment was sealed has no entry here — see
+	// encodeKeys for why the table would otherwise stop being searchable. So the
+	// table indexes exactly as many keys as meta counted live, which for a
+	// version 3 segment is every document it holds. FORMAT.md section 5 refuses
+	// either seek table disagreeing with meta, and this is the keys half.
+	if s.keys.n != s.live {
+		return nil, fmt.Errorf("%s: meta says %d live documents, %s indexes %d keys: %w",
+			metaR.name, s.live, keysFile, s.keys.n, ErrCorrupt)
 	}
 	// The postings payload's end is where the last term's entry stops, which is
 	// what gives every entry an extent rather than only a start.

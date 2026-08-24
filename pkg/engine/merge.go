@@ -41,6 +41,14 @@ type segSource interface {
 	totals() (totalLen, vecDim int)
 	doc(local int) Document
 	docLen(local int) int
+	// dead reports whether the document at this segment-local id is a tombstone.
+	//
+	// Every source answers yes for some of its documents eventually, and every
+	// one of them is still written: a DocID is a position in the docs section, so
+	// skipping a record would renumber the ones behind it and move rankings a
+	// deletion has no business moving. What this changes is the keys section
+	// alone — see encodeKeys.
+	dead(local int) bool
 	termList() []string // sorted
 	// postings hands term's postings to yield, ascending by segment-local
 	// DocID, and reports how many it handed over.
@@ -81,7 +89,10 @@ func (p *pendingSource) totals() (totalLen, vecDim int) {
 }
 func (p *pendingSource) doc(local int) Document { return p.ix.docs[local] }
 func (p *pendingSource) docLen(local int) int   { return p.ix.docLen[local] }
-func (p *pendingSource) termList() []string     { return slices.Sorted(maps.Keys(p.ix.postings)) }
+func (p *pendingSource) dead(local int) bool {
+	return p.ix.dead.has(p.ix.base + DocID(local))
+}
+func (p *pendingSource) termList() []string { return slices.Sorted(maps.Keys(p.ix.postings)) }
 
 // postings translates as it yields. The pending postings carry index-wide ids
 // and a segment records local ones, so every term needs its ids shifted — which
@@ -107,6 +118,12 @@ func (p *pendingSource) postings(t string, yield func(Posting)) int {
 type mergedSource struct {
 	segs []*segment
 	base DocID // segs[0].base, the id the merged segment starts at
+
+	// tombs is the index's tombstone set, read rather than owned. A merge does
+	// not change it — ids survive a concatenation untouched — but the keys
+	// section of the segment it writes is the live documents' alone, so the
+	// encoder has to be able to ask.
+	tombs *deadSet
 
 	// err holds the first thing this source could not read.
 	//
@@ -179,6 +196,10 @@ func (m *mergedSource) doc(local int) Document {
 		m.failf("merge: document %d does not read back", id)
 	}
 	return d
+}
+
+func (m *mergedSource) dead(local int) bool {
+	return m.tombs.has(m.base + DocID(local))
 }
 
 func (m *mergedSource) docLen(local int) int {
@@ -320,7 +341,7 @@ func (ix *Index) Merge() error {
 	}
 	defer segRoot.Close()
 
-	src := &mergedSource{segs: ix.segs[:k], base: ix.segs[0].base}
+	src := &mergedSource{segs: ix.segs[:k], base: ix.segs[0].base, tombs: &ix.dead}
 	merged := segInfo{name: seg, base: src.base, count: src.count()}
 	// context.Background, and the note above this function says why the signature
 	// does not carry one instead. A merge is uncancellable today exactly as it was

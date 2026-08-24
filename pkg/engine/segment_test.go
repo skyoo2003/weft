@@ -744,34 +744,43 @@ func patchVersion(t *testing.T, path string, v byte) {
 	}
 }
 
-// downgradeManifest rewrites the manifest as an older version's bytes: the
-// version stamp, and — for anything below 4 — without the tombstone count that
-// version appended.
+// downgradeSection rewrites a section as an older version's bytes: it drops the
+// trailing uvarint format 4 appended and stamps the version. It returns the
+// value it dropped, so a caller can refuse to simulate a downgrade that would
+// lose something.
 //
-// Only a zero count is stripped. A directory that actually holds tombstones has
-// documents an older reader must not see, which is the whole reason version 4
-// exists, so simulating that downgrade would be simulating the bug.
-func downgradeManifest(t *testing.T, path string, v byte) {
+// Version 4 appended exactly one field to each of two sections — the manifest's
+// tombstone count and meta's live document count — and appended them at the end
+// for the reason FORMAT.md §7.7 gives. That is what makes removing them a
+// backwards walk over one varint rather than a re-encode of the payload.
+func downgradeSection(t *testing.T, path string, v byte) uint64 {
 	t.Helper()
-	if v >= 4 {
-		patchVersion(t, path, v)
-		return
-	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The count is the last thing in the payload and the checksum is the last
-	// four bytes of the file, so it is the byte in front of them.
-	if n := b[len(b)-5]; n != 0 {
-		t.Fatalf("%s records %d tombstones; a version %d reader could not express them", path, n, v)
+	// The checksum is the last four bytes, so the value's final byte is the one
+	// in front of them — a uvarint terminates on a byte with the high bit clear,
+	// and every byte before it that has the bit set belongs to it.
+	end := len(b) - crc32.Size
+	start := end - 1
+	if b[start]&0x80 != 0 {
+		t.Fatalf("%s does not end in a complete uvarint", path)
 	}
-	b = append(b[:len(b)-5], b[len(b)-4:]...)
-	b[len(segMagic)] = v
-	binary.LittleEndian.PutUint32(b[len(b)-4:], crc32.Checksum(b[:len(b)-4], segCRC))
+	for start > segHeaderLen && b[start-1]&0x80 != 0 {
+		start--
+	}
+	dropped, n := binary.Uvarint(b[start:end])
+	if n != end-start {
+		t.Fatalf("%s: %d bytes before the checksum are not one uvarint", path, end-start)
+	}
+	b = append(b[:start], b[end:]...)
+	b[len(segMagic)] = v // small versions encode as one varint byte
+	binary.LittleEndian.PutUint32(b[len(b)-crc32.Size:], crc32.Checksum(b[:len(b)-crc32.Size], segCRC))
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return dropped
 }
 
 func TestOtherVersionsAreRefusedNotMisread(t *testing.T) {
@@ -840,7 +849,7 @@ func FuzzSegmentDecoding(f *testing.F) {
 	f.Fuzz(func(t *testing.T, meta, docs, postings, terms, docoff, keys, ivf []byte) {
 		// Errors are the expected outcome for almost every input; the
 		// assertion is the absence of panics.
-		_, _, vecDim, _ := decodeMeta(&segReader{name: metaFile, b: meta})
+		_, _, vecDim, _, _ := decodeMeta(&segReader{name: metaFile, b: meta})
 		offs, _ := parseDocOffsets(&segReader{name: docoffFile, b: docoff})
 		found := map[string]scrubbedKey{}
 		docLen, _, _, err := scrubDocs(&segReader{name: docsFile, b: docs}, offs, segInfo{name: "seg"}, found, &deadSet{})

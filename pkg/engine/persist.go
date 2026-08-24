@@ -856,7 +856,7 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey, dea
 	}
 	docsR, postR, termsR, docoffR, keysR := rs[1], rs[2], rs[3], rs[4], rs[5]
 
-	docCount, totalLen, vecDim, err := decodeMeta(metaR)
+	docCount, totalLen, vecDim, liveCount, err := decodeMeta(metaR)
 	if err != nil {
 		return 0, err
 	}
@@ -904,7 +904,11 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey, dea
 		return 0, fmt.Errorf("meta says %d docs/%d tokens/%d dims, documents hold %d/%d/%d: %w",
 			docCount, totalLen, vecDim, len(docLen), sumLen, width, ErrCorrupt)
 	}
-	if err := verifyKeyTable(keysR, info.name, len(docLen), found); err != nil {
+	// Against meta's live count, not the document count: the keys section indexes
+	// the documents that had no tombstone when the segment was written. decodeMeta
+	// has already ranged that number against the document count, and the walk
+	// above has just confirmed the document count against the records themselves.
+	if err := verifyKeyTable(keysR, info.name, liveCount, found); err != nil {
 		return 0, err
 	}
 	if err := decodePostings(postR, termsR, docLen); err != nil {

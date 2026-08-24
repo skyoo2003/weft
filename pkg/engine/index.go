@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -35,6 +36,16 @@ var (
 	// A document with no vector is not a mismatch; it just has no opinion for
 	// the vector scorer to read.
 	ErrDimMismatch = errors.New("engine: vector width differs from the corpus")
+
+	// ErrNoSuchKey reports an Update whose Key no live document holds — never
+	// added, or deleted since.
+	//
+	// Update refuses rather than inserting for the reason ErrDuplicateKey refuses
+	// rather than replacing, which is the same rule read from the other side: a
+	// mistyped key must not be able to silently become a second document, and it
+	// must not be able to silently overwrite one either. A caller who means
+	// "store this either way" writes the fallback themselves and can see it.
+	ErrNoSuchKey = errors.New("engine: no document with this key")
 )
 
 // Posting is one document's occurrence count for one term.
@@ -428,14 +439,11 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	defer ix.mu.Unlock()
 
 	// A zero-value Index is usable, the same way a bytes.Buffer is. Every read
-	// path already works on nil maps and slices, so Add is the only place that
-	// needs them to exist; without this, `var ix engine.Index` would pass the
-	// duplicate lookup below and then panic assigning into a nil map, which
-	// contradicts what this package promises above about never panicking.
-	if ix.byKey == nil {
-		ix.byKey = make(map[string]DocID)
-		ix.postings = make(map[string][]Posting)
-	}
+	// path already works on nil maps and slices, so the mutators are the only
+	// place that needs them to exist; without this, `var ix engine.Index` would
+	// pass the duplicate lookup below and then panic assigning into a nil map,
+	// which contradicts what this package promises above about never panicking.
+	ix.initMaps()
 
 	// Committed segments are searched too. A key already on disk is as much a
 	// duplicate as one added a moment ago, and after an Open the pending map is
@@ -481,17 +489,32 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// take another: Len and Stats overflowed, and the Commit after it published
 	// a manifest readManifest refuses — a writer call that succeeds and leaves
 	// an index that cannot be reopened.
-	if uint64(ix.base)+uint64(len(ix.docs)) >= uint64(maxDocCount) {
-		return 0, fmt.Errorf("add %q: index is full at %d documents", d.Key, maxDocCount)
-	}
+	return ix.appendPending(d, toks, freq, "add")
+}
 
-	if len(d.Vector) > 0 {
-		if ix.vecDim == 0 {
-			ix.vecDim = len(d.Vector)
-		} else if len(d.Vector) != ix.vecDim {
-			return 0, fmt.Errorf("add %q: vector has %d dims, corpus has %d: %w",
-				d.Key, len(d.Vector), ix.vecDim, ErrDimMismatch)
-		}
+// initMaps makes a zero-value Index usable. Requires ix.mu.
+func (ix *Index) initMaps() {
+	if ix.byKey == nil {
+		ix.byKey = make(map[string]DocID)
+		ix.postings = make(map[string][]Posting)
+	}
+}
+
+// appendPending is the tail Add and Update share: the ceiling, the vector width,
+// and the append itself. Requires ix.wmu and ix.mu, and that the key is free —
+// Add checks that against every live document, and Update frees it by marking
+// the old record.
+//
+// what names the operation in the errors, so an Update that runs out of ids does
+// not report itself as an Add. It is the whole of what the two callers differ by
+// down here, which is the point of them sharing this at all: two appends would be
+// two chances for the pending segment's six parallel structures to disagree.
+func (ix *Index) appendPending(d Document, toks []string, freq map[string]int, what string) (DocID, error) {
+	if uint64(ix.base)+uint64(len(ix.docs)) >= uint64(maxDocCount) {
+		return 0, fmt.Errorf("%s %q: index is full at %d documents", what, d.Key, maxDocCount)
+	}
+	if err := ix.adoptVecDim(d, what); err != nil {
+		return 0, err
 	}
 
 	id := DocID(uint64(ix.base) + uint64(len(ix.docs)))
@@ -508,6 +531,193 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	ix.totalLen += len(toks)
 
 	return id, nil
+}
+
+// adoptVecDim widens the corpus to d's vector, or refuses d for disagreeing with
+// the width the corpus already has. Requires ix.mu.
+//
+// It is the one place a mutator changes index state before it can still fail,
+// which is why the document ceiling is checked in front of it: a rejected write
+// leaving vecDim set to the width of a document that was never stored would make
+// Commit write a meta the docs file cannot back.
+func (ix *Index) adoptVecDim(d Document, what string) error {
+	if len(d.Vector) == 0 {
+		return nil
+	}
+	if ix.vecDim == 0 {
+		ix.vecDim = len(d.Vector)
+		return nil
+	}
+	if len(d.Vector) != ix.vecDim {
+		return fmt.Errorf("%s %q: vector has %d dims, corpus has %d: %w",
+			what, d.Key, len(d.Vector), ix.vecDim, ErrDimMismatch)
+	}
+	return nil
+}
+
+// Update replaces the document holding d.Key and returns the DocID it now has.
+// A Key no live document holds is ErrNoSuchKey — including one whose document was
+// deleted, because an update that quietly inserted would make a typo in a key
+// indistinguishable from a new document.
+//
+// The returned id is the same one only when the document had not been committed
+// yet. A committed record lives in a mapped segment and segments are immutable,
+// so there the old record becomes a tombstone and a new one is appended: the
+// update spends a DocID, and the bytes of the old document stay on disk for as
+// long as the index does. Delete says the rest about what is not reclaimed.
+//
+// Whether an id was spent is observable — `Len` grows, `Stats` does not — and a
+// caller holding a DocID across an update must re-Resolve rather than assume.
+//
+// The replacement is total. Text, Vector, Links and Time are d's, and the fields
+// d leaves zero are zero afterwards; this is not a merge of two documents.
+func (ix *Index) Update(d Document) (DocID, error) {
+	if d.Key == "" {
+		return 0, ErrEmptyKey
+	}
+	// The same clone-then-check order Add gives, and for the reason stated there:
+	// the bytes that were validated have to be the bytes that get stored.
+	d.Vector = slices.Clone(d.Vector)
+	d.Links = slices.Clone(d.Links)
+	for i, c := range d.Vector {
+		if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0, fmt.Errorf("update %q: vector component %d is %v: %w", d.Key, i, c, ErrNonFiniteVector)
+		}
+	}
+	toks := Tokenize(d.Text)
+	freq := make(map[string]int, len(toks))
+	for _, t := range toks {
+		freq[t]++
+	}
+
+	// wmu before mu, the order every mutator uses. See Index.wmu.
+	ix.wmu.Lock()
+	defer ix.wmu.Unlock()
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.initMaps()
+
+	id, ok := ix.resolveLive(d.Key)
+	if !ok {
+		return 0, fmt.Errorf("update %q: %w", d.Key, ErrNoSuchKey)
+	}
+
+	// Pending: the record can be replaced where it stands, so no id is spent and
+	// no tombstone is made. That is worth its own path rather than being folded
+	// into delete-and-append, because a caller updating the same document
+	// repeatedly between commits would otherwise burn an id and leave a dead
+	// record for each one.
+	if uint64(id) >= uint64(ix.base) {
+		return id, ix.replacePending(id, d, toks, freq)
+	}
+
+	// Committed: tombstone the old record and append a new one. The length comes
+	// off the index before the mark, the order Delete uses and for the same
+	// reason — docLenAt answers 0 for a tombstone.
+	ix.dead.mark(id, ix.docLenAt(id))
+	delete(ix.byKey, d.Key)
+	return ix.appendPending(d, toks, freq, "update")
+}
+
+// replacePending rewrites a pending document in place, keeping its DocID.
+// Requires ix.wmu and ix.mu.
+//
+// ponytail: the replaced document is re-tokenized here, under the exclusive
+// lock, because its old terms are what say which posting lists to edit and
+// nothing stores them. Add moved that cost outside the lock and this cannot,
+// since which document is being replaced is only known once the key resolves.
+// The upgrade is the two-section pattern Commit uses — read the old text under
+// ix.mu.RLock, release, tokenize, reacquire exclusively to apply, all with wmu
+// held throughout so nothing can have moved. Owed when a caller updates
+// documents large enough for the tokenization to show up as read latency.
+func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[string]int) error {
+	// Before anything is written, so a refused update leaves the document it
+	// could not replace exactly as it was.
+	if err := ix.adoptVecDim(d, "update"); err != nil {
+		return err
+	}
+	i := uint64(id) - uint64(ix.base)
+	old := ix.docs[i]
+
+	// The terms the old text held and the new one does not. Its postings have to
+	// go, or the document keeps answering a query for words it no longer
+	// contains — and a stale posting is invisible to any check that reads the
+	// record, because the record is right.
+	for t := range tokenSet(old.Text) {
+		if _, kept := freq[t]; !kept {
+			ix.dropPosting(t, id)
+		}
+	}
+	for t, f := range freq {
+		ix.setPosting(t, id, f)
+	}
+
+	// The token total moves with the length it is the sum of. Commit writes the
+	// record's own count from ix.docLen, and Scrub adds a segment's postings back
+	// up and refuses a disagreement, so the two have to move together or the next
+	// commit writes a segment that will not scrub.
+	ix.totalLen += len(toks) - ix.docLen[i]
+	ix.docLen[i] = len(toks)
+	ix.docs[i] = d
+	return nil
+}
+
+// tokenSet is the distinct terms of s. Only the set is wanted — the frequencies
+// of the document being replaced are about to be overwritten by the new one's.
+func tokenSet(s string) map[string]struct{} {
+	toks := Tokenize(s)
+	out := make(map[string]struct{}, len(toks))
+	for _, t := range toks {
+		out[t] = struct{}{}
+	}
+	return out
+}
+
+// setPosting records id's frequency for term, keeping the list ascending by
+// DocID. Requires ix.mu.
+//
+// The insert is what an in-place update needs and an Add does not: Add's ids only
+// increase, so it appends and the list stays sorted for free. A replaced document
+// keeps an id in the middle of the pending segment, and a term it did not hold
+// before has to land at that id's position rather than at the end. Every reader
+// of a posting list — the block encoder's delta chain, Merge, the ascending order
+// TopK's tiebreak rests on — takes that ordering as given.
+//
+// ponytail: the insert moves the tail of the list, so a term held by most of a
+// large pending batch costs a memmove of it. The pending segment is bounded by
+// the commit interval, and the alternative is a per-term index into the list.
+func (ix *Index) setPosting(term string, id DocID, freq int) {
+	pl := ix.postings[term]
+	at, found := slices.BinarySearchFunc(pl, id, func(p Posting, id DocID) int {
+		return cmp.Compare(p.Doc, id)
+	})
+	if found {
+		pl[at].Freq = freq
+		return
+	}
+	ix.postings[term] = slices.Insert(pl, at, Posting{Doc: id, Freq: freq})
+}
+
+// dropPosting removes id from term's list, and the term itself when that empties
+// it. Requires ix.mu.
+//
+// The empty case is not tidiness. encodePostings writes an entry for every term
+// the source names and the decoder refuses an entry with no blocks, so a term
+// left behind with an empty list would produce a segment that commits and then
+// cannot be read back.
+func (ix *Index) dropPosting(term string, id DocID) {
+	pl := ix.postings[term]
+	at, found := slices.BinarySearchFunc(pl, id, func(p Posting, id DocID) int {
+		return cmp.Compare(p.Doc, id)
+	})
+	if !found {
+		return
+	}
+	if len(pl) == 1 {
+		delete(ix.postings, term)
+		return
+	}
+	ix.postings[term] = slices.Delete(pl, at, at+1)
 }
 
 // Delete removes the document with the given Key and reports whether there was
