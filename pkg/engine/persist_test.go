@@ -838,6 +838,25 @@ func TestCommitDuringReads(t *testing.T) {
 	}
 }
 
+// vectorCorpus adds n dim-wide clustered vectors to ix under keys starting at
+// `from`, which is what makes a second batch's keys not collide with the first's.
+//
+// Its size is the point, and it is the same point for both of the tests below
+// that use it: at ivfMinDocs a commit trains a partition, which is the long pole
+// a read has to run alongside and a cancellation has to be able to interrupt.
+func vectorCorpus(t *testing.T, ix *Index, from, n, dim int) {
+	t.Helper()
+	for i, v := range clusteredCorpus(n, dim, 12) {
+		if _, err := ix.Add(Document{
+			Key:    fmt.Sprintf("doc-%06d", from+i),
+			Text:   fmt.Sprintf("cluster term%d shared", i%7),
+			Vector: v,
+		}); err != nil {
+			t.Fatalf("Add %d: %v", from+i, err)
+		}
+	}
+}
+
 const (
 	// readBatch is how many reads make one unit of progress, and the batching is
 	// what makes the sample honest rather than a way to inflate a number.
@@ -868,14 +887,14 @@ const (
 // about the machine — a loaded CI runner misses a one-second bound while holding
 // the property this test is for, and a fast one passes it while blocking reads
 // for the whole encode as long as the encode is quick. "Reads finished while a
-// commit was encoding" is the same statement on every machine: today's answer is
-// zero, because Commit holds mu for its whole duration, and the answer after the
-// lock split is however many the reader managed.
+// commit was encoding" is the same statement on every machine: before the lock
+// split the answer was zero, because Commit held mu for its whole duration, and
+// after it the answer is however many the reader managed.
 //
 // The corpus is ivfMinDocs documents with vectors, which is the smallest one
 // whose commit trains a partition — buildIVF is where the 11 seconds of
-// docs/PERF.md §3.3 go, and a commit that skips it would not be the commit under
-// test.
+// docs/FINDINGS.md milestone 5 §3.3 go, and a commit that skips it would not be
+// the commit under test.
 //
 // The counter is sampled around the whole Commit call rather than around the
 // locked section, since a test cannot see the lock. What that admits is the work
@@ -889,18 +908,12 @@ func TestReadsMakeProgressWhileACommitEncodes(t *testing.T) {
 	}
 
 	const dim = 8
-	vs := clusteredCorpus(ivfMinDocs, dim, 12)
 	ix := New()
-	for i, v := range vs {
-		if _, err := ix.Add(Document{
-			Key:    fmt.Sprintf("doc-%06d", i),
-			Text:   fmt.Sprintf("cluster term%d shared", i%7),
-			Vector: v,
-		}); err != nil {
-			t.Fatalf("Add %d: %v", i, err)
-		}
-	}
+	vectorCorpus(t, ix, 0, ivfMinDocs, dim)
 	dir := t.TempDir()
+	// The Commit below adopts the generation it writes, which maps it into this
+	// index — see Index.Close. Every other test here closes for the same reason.
+	defer ix.Close() //nolint:errcheck // teardown
 
 	var batches atomic.Int64
 	stop := make(chan struct{})
@@ -958,25 +971,6 @@ func TestReadsMakeProgressWhileACommitEncodes(t *testing.T) {
 // the adopt would leave the directory holding a generation the live index does
 // not know about, which is the split the rename exists to rule out.
 // ---------------------------------------------------------------------------
-
-// vectorCorpus adds n dim-wide clustered vectors to a fresh index under keys
-// starting at `from`, which is what makes a second batch's keys not collide with
-// the first's.
-//
-// Its size is the point: at ivfMinDocs a commit trains a partition, and the
-// training is the long pole a cancellation has to be able to interrupt.
-func vectorCorpus(t *testing.T, ix *Index, from, n, dim int) {
-	t.Helper()
-	for i, v := range clusteredCorpus(n, dim, 12) {
-		if _, err := ix.Add(Document{
-			Key:    fmt.Sprintf("doc-%06d", from+i),
-			Text:   fmt.Sprintf("cluster term%d shared", i%7),
-			Vector: v,
-		}); err != nil {
-			t.Fatalf("Add %d: %v", from+i, err)
-		}
-	}
-}
 
 // publishedGen reports the generation dir currently publishes, or 0 for a
 // directory with no manifest at all.
@@ -1074,9 +1068,9 @@ func TestCommitRefusesACancelledContext(t *testing.T) {
 // incomplete.
 //
 // That is why this test is worth having even though it accepts two answers. The
-// invariant it guards is the one D-017 calls Critical: the rename is the commit
-// point, and cancellation is not allowed to become a way to reach a state a
-// crash cannot.
+// invariant it guards is the one D-017 defines cancellation by: the rename is the
+// commit point, and cancellation is not allowed to become a way to reach a state
+// a crash cannot.
 func TestACancelledCommitPublishesNothing(t *testing.T) {
 	const dim = 8
 	ix := New()

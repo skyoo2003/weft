@@ -151,7 +151,7 @@ on is a race, so asserting a side would be a flake.
 `TestACancelledCommitPublishesNothing` allows both and pins each — a commit reporting success
 published a whole generation and scrubs clean; a commit reporting the deadline published none
 and left the pending documents pending. What it refuses is the third thing, a generation that
-is there and incomplete, which is the invariant [D-017](../DECISIONS.md) calls Critical.
+is there and incomplete, which is the invariant [D-017](../DECISIONS.md) defines cancellation by.
 
 ### The API spend, and the order it was spent in
 

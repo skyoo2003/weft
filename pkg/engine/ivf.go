@@ -54,8 +54,8 @@ import (
 // asserted equal across two builds.
 //
 // Context, and only where it is worth a branch. Training is the longest thing a
-// Commit does — nearly the whole of the 11.014 seconds docs/PERF.md §3.3
-// attributes to the encode — so milestone 9 made it cancellable when it changed
+// Commit does — nearly the whole of the 11.014 seconds docs/FINDINGS.md milestone
+// 5 §3.3 attributes to the encode — so milestone 9 made it cancellable when it changed
 // Commit's signature to take one. The poll sits at each of the five Lloyd passes
 // and every ivfAssignPoll documents of the assignment pass, never per vector and
 // never in the arithmetic below: a poll inside ivfDot or ivfNearestCentroid would
@@ -222,8 +222,10 @@ func ivfNList(count int) int {
 // partial partition rather than writing a shorter one, because a partition that
 // names fewer documents than the segment holds would silently lose them from
 // every vector query. The coarsest stretch between two polls is one walk of the
-// training sample, which is bounded by ivfSample positions and is a fraction of
-// the assignment pass.
+// training sample: ivfSample strided positions, and a fraction of the assignment
+// pass. The one exception is ivfTrainingSample's every-position fallback, which a
+// corpus whose strided positions all lack a vector reaches and which then walks
+// count rather than ivfSample of them.
 func buildIVF(ctx context.Context, count, dim int, vecAt func(i int) []float32) (ivfBuild, error) {
 	if count < ivfMinDocs || dim <= 0 {
 		return ivfBuild{}, nil

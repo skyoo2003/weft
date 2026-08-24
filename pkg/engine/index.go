@@ -58,7 +58,7 @@ type Index struct {
 
 	// wmu serializes the mutators against each other, and every place that takes
 	// mu.Lock takes this one first: Add, Close, Merge and Commit, which is the
-	// whole list — `grep -n 'mu.Lock()' pkg/engine/*.go` enumerates it.
+	// whole list — `grep -n 'ix\.mu\.Lock()' pkg/engine/*.go` enumerates it.
 	//
 	// It is not a second name for the same thing. Commit spends almost all of its
 	// time encoding a segment out of state it only reads, so milestone 9 moved
@@ -67,9 +67,9 @@ type Index struct {
 	// goroutine blocked in mu.Lock makes every RLock after it queue behind that
 	// goroutine rather than joining the readers already inside. One concurrent
 	// Add would therefore restore the full stall and merely move its trigger, and
-	// the stall is what docs/PERF.md §3.3 measured at 12.539 seconds. wmu is what
-	// keeps a mutator from reaching mu.Lock while a commit is encoding, so no
-	// writer is ever queued for reads to pile up behind.
+	// the stall is what docs/FINDINGS.md milestone 5 §3.3 measured at 12.539
+	// seconds. wmu is what keeps a mutator from reaching mu.Lock while a commit is
+	// encoding, so no writer is ever queued for reads to pile up behind.
 	//
 	// The second thing it buys is that the pending segment cannot change while a
 	// commit reads it. Encoding under a read lock would otherwise have to count

@@ -123,7 +123,7 @@ type segInfo struct {
 // so it holds ix.mu in read mode; what needs exclusion is the swap that follows
 // the manifest rename, and that is one mapping and one clear. The load test the
 // note below asked for is `weft-eval bench -writes`, docs/PERF.md §5.4 registers
-// the procedure, and §3.3 is the read wait it found.
+// the procedure, and docs/FINDINGS.md milestone 9 §3 is the read wait it found.
 //
 // ponytail: the upgrade that note described came with a cheaper design than it
 // predicted. It asked for the documents captured to be counted, so an Add
@@ -149,10 +149,13 @@ type segInfo struct {
 //
 // The poll is not per document. It is at entry, at each section boundary of the
 // encode, at each of the five Lloyd passes and every ivfAssignPoll documents of
-// the assignment pass, and immediately before the rename. That leaves the coarsest
-// unpolled stretch at one walk of the training sample, which is a fraction of the
-// assignment pass — sub-second response for the price of no branch in the writer's
-// hottest loop.
+// the assignment pass, and immediately before the rename. A section is therefore
+// the granularity, and what that buys depends on the batch. Where a partition is
+// trained it is sub-second: every unpolled stretch is inside buildIVF and none is
+// longer than one walk of the training sample. A batch carrying no vectors skips
+// buildIVF, and there the longest unpolled stretch is the docs section — a commit
+// that big is not called off until that section ends. Polling per record would
+// put a branch in the writer's hottest loop to close that gap.
 //
 // Merge takes no context. The same restructuring applies to it and nothing
 // measures it; see the note there.
@@ -201,8 +204,8 @@ func (ix *Index) Commit(ctx context.Context, dir string) error {
 	// Section one: read the directory, encode the segment, rename the manifest.
 	// Under the read lock, because everything in it reads index state and writes
 	// files. This is where the whole cost of a commit is — buildIVF alone was
-	// 11.014 of the 11.063 seconds docs/PERF.md §3.3 measured — and it is now time
-	// queries no longer wait through.
+	// 11.014 of the 11.063 seconds docs/FINDINGS.md milestone 5 §3.3 measured — and
+	// it is now time queries no longer wait through.
 	segs, pending, err := ix.commitGeneration(ctx, root, dir)
 	if err != nil {
 		return err
@@ -223,32 +226,20 @@ func (ix *Index) Commit(ctx context.Context, dir string) error {
 	// fail the stored==base agreement and report the directory as corrupt. A
 	// cancellation must not be able to produce a state a crash cannot.
 	if pending {
-		if err := func() error {
-			ix.mu.Lock()
-			defer ix.mu.Unlock()
-			// The commit is durable. Adopt what was just written so a second
-			// Commit does not write these documents again, and so reads of them go
-			// through the mapping like every other committed document. Failing
-			// here leaves the directory correct and the in-memory index stale,
-			// which is why it is an error rather than something swallowed: the
-			// caller has to Open again.
-			last := segs[len(segs)-1]
-			if err := ix.adopt(root, last); err != nil {
-				return fmt.Errorf("commit %s: %w", last.name, err)
-			}
-			if err := ix.rememberDir(root, dir); err != nil {
-				return fmt.Errorf("commit %s: %w", dir, err)
-			}
-			return nil
-		}(); err != nil {
+		if err := ix.adoptGeneration(root, dir, segs[len(segs)-1]); err != nil {
 			return err
 		}
 	}
 
-	// Section three: the sweep, under no lock at all. Everything it removes is
+	// Section three: the sweep, with ix.mu released. Everything it removes is
 	// unreachable — nothing reads a segment the manifest does not name — and it
-	// touches no index state, so holding either lock across it would be time
-	// charged to a caller for nothing.
+	// touches no index state, so no query waits through it.
+	//
+	// wmu is still held, and that is load-bearing rather than slack left to be
+	// tidied away: released here, a Merge could be admitted, publish its merged
+	// segment, and leave this sweep deleting a generation that is live. What it
+	// costs is an Add waiting the sweep out, which is the ceiling Index.wmu
+	// already carries.
 	//
 	// Best-effort: the commit above is already durable, and failing to delete a
 	// directory nothing names must not turn a successful commit into a reported
@@ -391,6 +382,29 @@ func (ix *Index) commitGeneration(ctx context.Context, root *os.Root, dir string
 		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
 	return published, true, nil
+}
+
+// adoptGeneration is Commit's second section: the swap, taken exclusively.
+//
+// Requires ix.wmu, and a method for the same reason commitGeneration is one —
+// the read lock has to be released before this one is taken, and one deferred
+// unlock per section is what keeps every error path from having to remember to
+// release by hand.
+func (ix *Index) adoptGeneration(root *os.Root, dir string, info segInfo) error {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	// The commit is durable. Adopt what was just written so a second Commit does
+	// not write these documents again, and so reads of them go through the mapping
+	// like every other committed document. Failing here leaves the directory
+	// correct and the in-memory index stale, which is why it is an error rather
+	// than something swallowed: the caller has to Open again.
+	if err := ix.adopt(root, info); err != nil {
+		return fmt.Errorf("commit %s: %w", info.name, err)
+	}
+	if err := ix.rememberDir(root, dir); err != nil {
+		return fmt.Errorf("commit %s: %w", dir, err)
+	}
+	return nil
 }
 
 // adopt maps the segment a commit just published and folds it into the index,
