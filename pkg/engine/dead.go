@@ -101,14 +101,22 @@ func (d *deadSet) all() []DocID {
 		return nil
 	}
 	out := make([]DocID, 0, d.n)
-	for w, word := range d.bits {
+	// A running base rather than an index times sixty-four. Every id in here was
+	// marked from a DocID, so mark grew this slice to reach one — the base can
+	// therefore never pass what a DocID holds, and the arithmetic stays in the
+	// type instead of widening and narrowing back.
+	base := DocID(0)
+	for _, word := range d.bits {
 		for word != 0 {
 			// The lowest set bit, cleared as it is taken: a word holding one
 			// tombstone costs one iteration rather than sixty-four.
 			b := word & -word
-			out = append(out, DocID(uint64(w)*64+uint64(bits.TrailingZeros64(b))))
+			// 0 through 63: b is a single set bit of a word the loop condition
+			// says is non-zero, so the count is a bit position and nothing wider.
+			out = append(out, base+DocID(bits.TrailingZeros64(b))) //nolint:gosec // a bit position, 0..63
 			word ^= b
 		}
+		base += 64
 	}
 	return out
 }
@@ -169,6 +177,12 @@ func parseDead(r *segReader, want, total int) ([]DocID, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The corpus size is widened once, here, rather than at each comparison
+	// below. Every caller derives it from a manifest readManifest has already
+	// ranged against maxDocCount, so it is neither negative nor past what a
+	// DocID holds — which is what makes the narrowing conversion at the end of
+	// the loop safe, and what a bounds check per iteration would be re-proving.
+	limit := uint64(total) //nolint:gosec // non-negative and ≤ maxDocCount, see above
 	if n != want {
 		return nil, fmt.Errorf("%s: holds %d tombstones, %s says %d: %w",
 			r.name, n, manifestName, want, ErrCorrupt)
@@ -196,11 +210,13 @@ func parseDead(r *segReader, want, total int) ([]DocID, error) {
 			}
 			id = prev + d
 		}
-		if id >= uint64(total) {
+		if id >= limit {
 			return nil, fmt.Errorf("%s: tombstone %d names document %d of a %d-document index: %w",
 				r.name, i, id, total, ErrCorrupt)
 		}
-		out = append(out, DocID(id))
+		// Below limit, which is at most maxDocCount, so this narrowing cannot
+		// wrap — and an id that could would have been refused a line above.
+		out = append(out, DocID(id)) //nolint:gosec // bounded by limit, see above
 		prev = id
 	}
 	return out, r.done()

@@ -2463,3 +2463,53 @@ answers the caller that needs it.
 
 The cost is that a corpus with most of its documents deleted is still walked in
 full by a scorer shaped like `recency`, because nothing here reclaims an id.
+
+## 3. The falsification condition, judged
+
+The PRD fixed this before the round started: *does the index's account of which
+documents exist leak into the scorers' account?* If deletion had forced a wider
+`Scorer`, a wider `Query` or a line of `pkg/fusion`, then "fusion does not know
+what a signal is" would have been true only for a corpus that never changes.
+
+**It did not fire.** Measured the way milestone 1 measures it:
+
+| Clause | Result |
+| --- | --- |
+| `pkg/fusion` diff | **0 lines** |
+| `pkg/scorer/*` implementation diff (tests excluded) | **0 lines** |
+| `Scorer` interface | unchanged |
+| `Query`, `Document`, `Candidate`, `Fuser` | unchanged |
+| `pkg/engine/testdata/public_api.txt` | unchanged |
+| `pkg/engine/testdata/engine_api.txt` | **+3 lines**, §1 |
+| `go list -m all` | one line |
+
+What made it hold is one placement decision. The four scorers reach candidates
+through exactly seven methods — `text` through `LookupInto`, `vector` through
+`Nearest` and `Vector`, `graph` through `Doc` and `Resolve`, `recency` through
+`Len` and `Doc` — and the tombstone check went **inside** them rather than beside
+their callers. No scorer in this repository contains the word.
+
+That is a weaker result than it looks, and the weakness is worth writing down:
+these are *this repository's* four scorers, and the seven methods are the ones
+they happen to use. A scorer written outside the module reaching for a method
+that does not filter would find one — there is none today, because every read
+method filters, but "every read method" is a property maintained by hand and not
+by the type system. The check that would make it structural does not exist.
+
+### 3.1 What §3.4 was wrong about
+
+[Milestone 2 §4](#milestone-2--persistence) carried this forward: *"Two places
+depend on `DocID` increasing densely — the tiebreak in `engine.TopK`, and
+postings staying sorted because appends are monotonic. Deletion and segment merge
+break that invariant; design tombstones and generations first."*
+
+Deletion is built and neither place broke, because **the property those two need
+is monotonicity, not density.** `TopK` breaks ties on `DocID` and a sparse id
+space orders exactly as well as a dense one. Posting lists stay ascending because
+ids are still assigned in increasing order; the gaps a tombstone leaves change
+nothing about the comparison.
+
+What density is actually load-bearing for is the *docs* section, where a `DocID`
+is a position — and that is why nothing is reclaimed ([D-019](DECISIONS.md)).
+The note was right that ids and deletion are one problem. It named the wrong two
+places.
