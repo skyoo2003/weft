@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"os"
@@ -253,7 +254,20 @@ func (m *mergedSource) postings(t string, yield func(Posting)) int {
 //
 // Atomicity is the manifest flip Commit already uses, so a crash leaves either
 // the pre-merge state or the post-merge one.
+// ponytail: Merge holds mu exclusively for its whole duration, so it is a longer
+// stop than the commit milestone 9 just split — it rewrites the oldest
+// generations rather than one batch. The same restructuring applies almost
+// verbatim: the merged segment is encoded out of state it only reads, and only
+// the manifest flip and the swap need exclusion. It is not done here because
+// nothing measures it. `weft-eval bench -writes` times a commit and no arm times
+// a merge, and a reordering claimed as an improvement without a number is the
+// failure docs/FINDINGS.md exists to stop. Build the arm, then split the lock.
 func (ix *Index) Merge() error {
+	// wmu before mu, the order every mutator uses. Merge is one of the four
+	// places that takes mu exclusively, and a Merge queued in mu.Lock would stall
+	// the readers a concurrent Commit is letting through. See Index.wmu.
+	ix.wmu.Lock()
+	defer ix.wmu.Unlock()
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 
@@ -304,7 +318,11 @@ func (ix *Index) Merge() error {
 
 	src := &mergedSource{segs: ix.segs[:k], base: ix.segs[0].base}
 	merged := segInfo{name: seg, base: src.base, count: src.count()}
-	if err := writeSegment(segRoot, src); err != nil {
+	// context.Background, and the note above this function says why the signature
+	// does not carry one instead. A merge is uncancellable today exactly as it was
+	// before milestone 9, so this is the status quo written down rather than a
+	// decision made here.
+	if err := writeSegment(context.Background(), segRoot, src); err != nil {
 		return fmt.Errorf("merge %s: %w", seg, err)
 	}
 	// A segment built out of something that would not read is not a segment to

@@ -4,6 +4,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -118,16 +119,55 @@ type segInfo struct {
 // On success the new segment joins the index in place, so a second Commit does
 // not write the same documents again.
 //
-// ponytail: Commit holds the write lock for its whole duration, so queries wait
-// on it where before they ran alongside. The ceiling is the time to write one
-// commit's worth of new documents, which incremental commit is what bounds. The
-// upgrade is to encode under the read lock and swap under the write lock,
-// counting the documents captured so a concurrent Add is neither written twice
-// nor dropped — worth doing when a load test shows the pause, and not before.
+// Queries run alongside a commit. The encode reads index state and writes files,
+// so it holds ix.mu in read mode; what needs exclusion is the swap that follows
+// the manifest rename, and that is one mapping and one clear. The load test the
+// note below asked for is `weft-eval bench -writes`, docs/PERF.md §5.4 registers
+// the procedure, and docs/FINDINGS.md milestone 9 §3 is the read wait it found.
+//
+// ponytail: the upgrade that note described came with a cheaper design than it
+// predicted. It asked for the documents captured to be counted, so an Add
+// arriving mid-encode is neither written twice nor dropped; Index.wmu excludes
+// Add for the whole commit instead, so the pending segment cannot change and
+// there is nothing to count. What that costs is an Add blocked for a whole
+// commit — which is what it already was — and Index.wmu carries both the ceiling
+// and the way out of it.
+//
+// Cancelling ctx calls the commit off, and where the cancellation lands decides
+// what that means — the rename being the commit point is the whole rule:
+//
+//   - Before the rename, Commit reports ctx.Err() and the index is untouched. The
+//     pending documents are still pending and the caller may commit again. What
+//     may be left in dir is an unnamed seg-<gen+1>, which is the debris of a
+//     commit that never finished and is already a defined state: Open ignores it
+//     and the next Commit sweeps it. Cancellation adds no cleanup path of its own.
+//   - After the rename, the commit has succeeded and ctx.Err() is ignored for the
+//     rest of the call. Stopping there would leave the directory publishing a
+//     generation this index does not know it holds, which is exactly the mixed
+//     state the rename exists to rule out — so cancellation is not allowed to
+//     reach a state a crash cannot.
+//
+// The poll is not per document. It is at entry, at each section boundary of the
+// encode, at each of the five Lloyd passes and every ivfAssignPoll documents of
+// the assignment pass, and immediately before the rename. A section is therefore
+// the granularity, and what that buys depends on the batch. Where a partition is
+// trained it is sub-second: every unpolled stretch is inside buildIVF and none is
+// longer than one walk of the training sample. A batch carrying no vectors skips
+// buildIVF, and there the longest unpolled stretch is the docs section — a commit
+// that big is not called off until that section ends. Polling per record would
+// put a branch in the writer's hottest loop to close that gap.
+//
+// Merge takes no context. The same restructuring applies to it and nothing
+// measures it; see the note there.
 //
 // Commit is not safe alongside another Commit on the same directory. weft has a
 // single writer by design.
-func (ix *Index) Commit(dir string) error {
+func (ix *Index) Commit(ctx context.Context, dir string) error {
+	// Before the MkdirAll, so a commit refused on the way in creates nothing. A
+	// caller who cancelled already is owed no directory.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("commit %s: %w", dir, err)
+	}
 	// 0o700, not 0o755: this directory holds the caller's corpus, and nothing
 	// weft does needs another user on the machine to read it. Owner-only rather
 	// than 0o750, because the segment files inside are written 0o644 — leaving
@@ -143,7 +183,10 @@ func (ix *Index) Commit(dir string) error {
 	}
 	defer root.Close()
 
-	// The write lock, for the whole commit. See the ponytail note above.
+	// wmu, for the whole commit, and it is what makes the split below work rather
+	// than merely reorder it. See Index.wmu: without it a concurrent Add reaching
+	// mu.Lock would put every later query behind itself, and the two sections
+	// would buy nothing.
 	//
 	// Taken before the manifest is read, and that order is load-bearing rather
 	// than tidy. Merge is this index's other public mutator and it holds this
@@ -155,8 +198,76 @@ func (ix *Index) Commit(dir string) error {
 	// the manifest written after it names the source directories the merge has
 	// already deleted. The rename is the commit point, so neither is
 	// recoverable.
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
+	ix.wmu.Lock()
+	defer ix.wmu.Unlock()
+
+	// Section one: read the directory, encode the segment, rename the manifest.
+	// Under the read lock, because everything in it reads index state and writes
+	// files. This is where the whole cost of a commit is — buildIVF alone was
+	// 11.014 of the 11.063 seconds docs/FINDINGS.md milestone 5 §3.3 measured — and
+	// it is now time queries no longer wait through.
+	segs, pending, err := ix.commitGeneration(ctx, root, dir)
+	if err != nil {
+		return err
+	}
+
+	// Section two: the swap, exclusive. A mapping and a clear, and nothing that
+	// touches the filesystem beyond opening the segment just written.
+	//
+	// Between the two sections the index cannot change: every mutator takes wmu
+	// first and wmu is still ours, so what section one read is still true here.
+	// That is what makes the gap safe, and why sync.RWMutex having no upgrade
+	// operation costs nothing.
+	//
+	// ctx is not polled from here on, and that is the contract rather than an
+	// oversight. Section one returned without error, so the rename landed and the
+	// commit is durable on disk; abandoning the adopt would leave dir publishing a
+	// generation this index has no mapping for, and the next Commit would then
+	// fail the stored==base agreement and report the directory as corrupt. A
+	// cancellation must not be able to produce a state a crash cannot.
+	if pending {
+		if err := ix.adoptGeneration(root, dir, segs[len(segs)-1]); err != nil {
+			return err
+		}
+	}
+
+	// Section three: the sweep, with ix.mu released. Everything it removes is
+	// unreachable — nothing reads a segment the manifest does not name — and it
+	// touches no index state, so no query waits through it.
+	//
+	// wmu is still held, and that is load-bearing rather than slack left to be
+	// tidied away: released here, a Merge could be admitted, publish its merged
+	// segment, and leave this sweep deleting a generation that is live. What it
+	// costs is an Add waiting the sweep out, which is the ceiling Index.wmu
+	// already carries.
+	//
+	// Best-effort: the commit above is already durable, and failing to delete a
+	// directory nothing names must not turn a successful commit into a reported
+	// failure.
+	prune(root, segs)
+	return nil
+}
+
+// commitGeneration is Commit's first section: it reads the directory, encodes the
+// pending documents into seg-<gen+1> and renames the manifest onto it.
+//
+// It returns the segment list now published and whether the last entry in it is
+// this commit's own — false for a commit that found nothing pending, which
+// publishes no generation and leaves its caller with only the sweep to do.
+//
+// Requires ix.wmu, which is what lets it take ix.mu in read mode: the pending
+// segment it encodes cannot change while a mutator is excluded, so there is no
+// snapshot to take and no captured count to carry. It is a closure's worth of
+// work in a method rather than in Commit's body because the read lock has to be
+// released before the write lock is taken, and one deferred unlock per section
+// is what keeps every error path from having to remember to do it by hand.
+//
+// Every ctx poll a commit makes is inside here, which is the same statement as
+// "the rename is the commit point": this returns having renamed or having done
+// nothing visible.
+func (ix *Index) commitGeneration(ctx context.Context, root *os.Root, dir string) (segs []segInfo, pending bool, err error) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
 
 	// The previous generation number comes from the manifest. A missing
 	// manifest is a first commit; a corrupt one is not — guessing a generation
@@ -168,10 +279,10 @@ func (ix *Index) Commit(dir string) error {
 		// No manifest means nothing here is published. It does not mean this
 		// directory is weft's.
 		if err := refuseForeignEntries(root); err != nil {
-			return fmt.Errorf("commit %s: %w", dir, err)
+			return nil, false, fmt.Errorf("commit %s: %w", dir, err)
 		}
 	} else if err != nil {
-		return fmt.Errorf("commit %s: %w", dir, err)
+		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
 
 	// The destination has to be the directory this index's committed segments
@@ -186,7 +297,7 @@ func (ix *Index) Commit(dir string) error {
 	// directories reached through the same path are not. An index with nothing
 	// committed has no directory yet and may pick any.
 	if err := ix.sameDir(root); err != nil {
-		return fmt.Errorf("commit %s: %w", dir, err)
+		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
 
 	// The manifest is the authority on what is already stored, and the index in
@@ -199,7 +310,7 @@ func (ix *Index) Commit(dir string) error {
 		stored = uint64(live[n-1].base) + uint64(live[n-1].count)
 	}
 	if stored != uint64(ix.base) {
-		return fmt.Errorf("commit %s: the directory holds %d documents, this index has %d committed: %w",
+		return nil, false, fmt.Errorf("commit %s: the directory holds %d documents, this index has %d committed: %w",
 			dir, stored, ix.base, ErrCorrupt)
 	}
 
@@ -213,16 +324,16 @@ func (ix *Index) Commit(dir string) error {
 	// when a generation already exists: the first Commit on an empty index is
 	// how an empty index gets written at all, which restore asks for.
 	if len(ix.docs) == 0 && gen > 0 {
-		// The sweep still runs. A commit that died between writing its segment
-		// and renaming the manifest leaves a directory nothing names, as large
-		// as the batch it was writing, and Open documents that debris as costing
-		// disk only until the next Commit. Returning before the sweep makes that
-		// false exactly when it matters: the reopened index has nothing pending,
-		// so the orphan survives every commit until one happens to carry a
-		// document. Same keep set and same best-effort contract as the sweep at
-		// the end — everything it removes is unreachable.
-		prune(root, live)
-		return nil
+		// The sweep still runs, which is why this returns the live list rather
+		// than nothing. A commit that died between writing its segment and
+		// renaming the manifest leaves a directory nothing names, as large as the
+		// batch it was writing, and Open documents that debris as costing disk
+		// only until the next Commit. Skipping the sweep here makes that false
+		// exactly when it matters: the reopened index has nothing pending, so the
+		// orphan survives every commit until one happens to carry a document.
+		// Same keep set and same best-effort contract as a commit that published
+		// something — everything it removes is unreachable.
+		return live, false, nil
 	}
 
 	// readManifest has already established that the newest live segment is
@@ -235,18 +346,18 @@ func (ix *Index) Commit(dir string) error {
 	// this directory half-written. It was never visible — no manifest names it
 	// — so replacing it wholesale is safe.
 	if err := root.RemoveAll(seg); err != nil {
-		return fmt.Errorf("commit %s: clearing stale segment: %w", dir, err)
+		return nil, false, fmt.Errorf("commit %s: clearing stale segment: %w", dir, err)
 	}
 	if err := root.Mkdir(seg, 0o700); err != nil {
-		return fmt.Errorf("commit %s: %w", dir, err)
+		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
 	segRoot, err := root.OpenRoot(seg)
 	if err != nil {
-		return fmt.Errorf("commit %s: %w", dir, err)
+		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
 	defer segRoot.Close()
-	if err := writeSegment(segRoot, &pendingSource{ix: ix}); err != nil {
-		return fmt.Errorf("commit %s: %w", seg, err)
+	if err := writeSegment(ctx, segRoot, &pendingSource{ix: ix}); err != nil {
+		return nil, false, fmt.Errorf("commit %s: %w", seg, err)
 	}
 	// The segment directory's entries need to reach disk before the manifest
 	// claims they exist — and so does the segment directory's own entry in dir.
@@ -257,27 +368,42 @@ func (ix *Index) Commit(dir string) error {
 	syncDir(root)
 
 	published := append(slices.Clone(live), segInfo{name: seg, base: ix.base, count: len(ix.docs)})
-	if err := writeManifest(root, gen+1, published); err != nil {
-		return fmt.Errorf("commit %s: %w", dir, err)
+	// The last chance to call the commit off, and the reason it is here rather
+	// than a line later: the rename is the commit point, so this is the boundary
+	// between "nothing happened" and "it is done". A cancellation that arrives
+	// after this poll is ignored for the rest of the call.
+	//
+	// Everything written so far stays as an unnamed seg-<gen+1>, which is the
+	// debris Open already documents and the next Commit already sweeps.
+	if err := ctx.Err(); err != nil {
+		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
+	if err := writeManifest(root, gen+1, published); err != nil {
+		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
+	}
+	return published, true, nil
+}
 
-	// The commit is durable. Adopt what was just written so a second Commit
-	// does not write these documents again, and so reads of them go through the
-	// mapping like every other committed document. Failing here leaves the
-	// directory correct and the in-memory index stale, which is why it is an
-	// error rather than something swallowed: the caller has to Open again.
-	if err := ix.adopt(root, published[len(published)-1]); err != nil {
-		return fmt.Errorf("commit %s: %w", seg, err)
+// adoptGeneration is Commit's second section: the swap, taken exclusively.
+//
+// Requires ix.wmu, and a method for the same reason commitGeneration is one —
+// the read lock has to be released before this one is taken, and one deferred
+// unlock per section is what keeps every error path from having to remember to
+// release by hand.
+func (ix *Index) adoptGeneration(root *os.Root, dir string, info segInfo) error {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	// The commit is durable. Adopt what was just written so a second Commit does
+	// not write these documents again, and so reads of them go through the mapping
+	// like every other committed document. Failing here leaves the directory
+	// correct and the in-memory index stale, which is why it is an error rather
+	// than something swallowed: the caller has to Open again.
+	if err := ix.adopt(root, info); err != nil {
+		return fmt.Errorf("commit %s: %w", info.name, err)
 	}
 	if err := ix.rememberDir(root, dir); err != nil {
 		return fmt.Errorf("commit %s: %w", dir, err)
 	}
-
-	// The previous generation is unreachable now. Pruning it is best-effort:
-	// the commit above is already durable, and a leftover directory nothing
-	// names is invisible — failing to delete it must not turn a successful
-	// commit into a reported failure.
-	prune(root, published)
 	return nil
 }
 

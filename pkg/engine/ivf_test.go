@@ -92,6 +92,20 @@ func vecAt(vs [][]float32) func(int) []float32 {
 	return func(i int) []float32 { return vs[i] }
 }
 
+// mustBuildIVF is buildIVF for the tests that are not about cancellation, which
+// is all of them here: buildIVF's only error is its context's, so a live context
+// makes the second return value dead weight at every call site. It is checked
+// rather than discarded, so a build that somehow reports one fails the test
+// instead of handing back a zero partition that reads as "below the floor".
+func mustBuildIVF(t *testing.T, count, dim int, at func(int) []float32) ivfBuild {
+	t.Helper()
+	b, err := buildIVF(t.Context(), count, dim, at)
+	if err != nil {
+		t.Fatalf("buildIVF: %v", err)
+	}
+	return b
+}
+
 func cosine(a, b []float32) float64 {
 	var ab, aa, bb float64
 	for i := range a {
@@ -116,8 +130,8 @@ func cosine(a, b []float32) float64 {
 // are two different segments.
 func TestIVFTrainingIsDeterministic(t *testing.T) {
 	vs := clusteredCorpus(ivfMinDocs*2, 16, 24)
-	first := buildIVF(len(vs), 16, vecAt(vs))
-	second := buildIVF(len(vs), 16, vecAt(vs))
+	first := mustBuildIVF(t, len(vs), 16, vecAt(vs))
+	second := mustBuildIVF(t, len(vs), 16, vecAt(vs))
 
 	if first.nlist != second.nlist || first.dim != second.dim {
 		t.Fatalf("two builds disagree on shape: %d/%d and %d/%d",
@@ -156,7 +170,7 @@ func TestIVFAssignsEveryVectorToExactlyOneList(t *testing.T) {
 	vs[7] = nil
 	vs[11] = make([]float32, dim)
 
-	b := buildIVF(len(vs), dim, vecAt(vs))
+	b := mustBuildIVF(t, len(vs), dim, vecAt(vs))
 	if b.nlist == 0 {
 		t.Fatalf("a %d-document corpus was not partitioned", len(vs))
 	}
@@ -200,7 +214,7 @@ func TestIVFRecallOnClusteredCorpus(t *testing.T) {
 		k      = 10
 	)
 	vs := clusteredCorpus(ivfMinDocs*2, dim, groups)
-	b := buildIVF(len(vs), dim, vecAt(vs))
+	b := mustBuildIVF(t, len(vs), dim, vecAt(vs))
 	if b.nlist == 0 {
 		t.Fatalf("a %d-document corpus was not partitioned", len(vs))
 	}
@@ -308,7 +322,7 @@ func TestIVFIsNotBuiltWhereItCannotPay(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			b := buildIVF(tc.count, tc.dim, vecAt(tc.vs))
+			b := mustBuildIVF(t, tc.count, tc.dim, vecAt(tc.vs))
 			if b.nlist != 0 {
 				t.Errorf("nlist = %d, want 0", b.nlist)
 			}
@@ -415,7 +429,7 @@ func commitVectors(t *testing.T, n, dim, groups int) (ix *Index, dir string) {
 		}
 	}
 	dir = t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	return ix, dir
@@ -441,7 +455,7 @@ func TestIVFSectionRoundTrips(t *testing.T) {
 
 	// Rebuilt from the documents the index hands back, so the comparison is
 	// against the corpus rather than against a copy of the writer's output.
-	want := buildIVF(ix.Len(), dim, func(i int) []float32 {
+	want := mustBuildIVF(t, ix.Len(), dim, func(i int) []float32 {
 		d, ok := ix.Doc(DocID(i))
 		if !ok {
 			t.Fatalf("Doc(%d) is missing", i)

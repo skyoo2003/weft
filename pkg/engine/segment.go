@@ -5,6 +5,7 @@ package engine
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -424,14 +425,20 @@ func (w *segWriter) close() error {
 // Always the whole list, so the writer only ever produces the current version.
 //
 // Whatever lock src needs is the caller's to hold, and both callers hold ix.mu
-// for writing across the whole encode: the statistics in meta and the documents
-// they describe cannot then come from different moments, which is the atomicity
-// FINDINGS section 4.4 asked for, statistics snapshot included.
+// across the whole encode: the statistics in meta and the documents they describe
+// cannot then come from different moments, which is the atomicity FINDINGS
+// section 4.4 asked for, statistics snapshot included.
 //
 // A source that cannot read something reports it on itself rather than here —
 // see mergedSource.err — because a section file half-written is still a file
 // this function has to close.
-func writeSegment(segRoot *os.Root, src segSource) error {
+//
+// Cancelling ctx abandons the encode at the next section boundary and reports
+// ctx.Err(). What that leaves is a directory of half-written section files, which
+// is what a crashed commit leaves and what the next commit clears: no manifest
+// names it, so nothing can read it. Merge passes a background context — see the
+// note there.
+func writeSegment(ctx context.Context, segRoot *os.Root, src segSource) error {
 	ws := make([]*segWriter, len(segSections))
 	for i, s := range segSections {
 		w, err := newSegWriter(segRoot, s.name, s.kind)
@@ -445,11 +452,20 @@ func writeSegment(segRoot *os.Root, src segSource) error {
 	}
 	meta, docs, post, terms, docoff, keys, ivf := ws[0], ws[1], ws[2], ws[3], ws[4], ws[5], ws[6]
 
-	// No locking here: Commit and Merge both hold the write lock for their whole
-	// duration and sync.RWMutex is not reentrant, so taking a read lock inside
-	// would deadlock against the caller that already holds the write one. An
-	// earlier version locked here because Commit did not.
-	func() {
+	// No locking here: every caller already holds ix.mu for the whole encode, and
+	// sync.RWMutex is not reentrant, so taking a lock inside would deadlock
+	// against the one already held. Which mode differs and does not matter —
+	// Merge holds it exclusively, Commit in read mode since milestone 9 — because
+	// what this needs is that the source cannot change underneath it, and read
+	// mode gives that as long as the mutators are excluded some other way. They
+	// are: Index.wmu. An earlier version locked here because Commit did not.
+	// One ctx poll per section rather than per document or per record. A section
+	// is the unit whose cost is bounded by the corpus and whose boundary needs no
+	// state carried across it, so the poll is a load and a compare against work
+	// measured in millions of operations. Inside the two that are not bounded by
+	// one pass — the partition's training and assignment — buildIVF polls on its
+	// own.
+	if err := func() error {
 		totalLen, vecDim := src.totals()
 		meta.uvarint(uint64(src.count()))
 		meta.uvarint(uint64(totalLen))
@@ -457,9 +473,18 @@ func writeSegment(segRoot *os.Root, src segSource) error {
 		// docoff records where each record landed, so it is written from what
 		// encodeDocs returns rather than by predicting record sizes twice.
 		offs, lens, docKeys := encodeDocs(docs, src)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		encodeDocOffsets(docoff, offs, lens)
 		encodeKeys(keys, docKeys)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		encodePostings(post, terms, src)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// The partition reads the source again, on its own — twice, on a stride
 		// to train and in full to assign. That is where a commit's new minute
 		// goes, and for a merge it means the corpus is decoded once more than
@@ -472,10 +497,25 @@ func writeSegment(segRoot *os.Root, src segSource) error {
 		// unnecessary outright; §1 of the milestone plan names that separation
 		// and Task 5 is what measures whether it is owed. Do not build the
 		// accessor before that measurement.
-		encodeIVF(ivf, buildIVF(src.count(), vecDim, func(i int) []float32 {
+		build, err := buildIVF(ctx, src.count(), vecDim, func(i int) []float32 {
 			return src.doc(i).Vector
-		}))
-	}()
+		})
+		if err != nil {
+			return err
+		}
+		encodeIVF(ivf, build)
+		return nil
+	}(); err != nil {
+		// The writers were created exclusively, so they are closed even though
+		// what they hold is now debris: leaving them open leaks a descriptor per
+		// section, and close is the only thing that releases one. Their errors are
+		// dropped because the encode already has a verdict, and reporting a flush
+		// failure over a cancellation would name the wrong cause.
+		for _, w := range ws {
+			w.f.Close()
+		}
+		return err
+	}
 
 	for i, w := range ws {
 		if err := w.close(); err != nil {

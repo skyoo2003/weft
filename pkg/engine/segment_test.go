@@ -84,7 +84,7 @@ func TestSegmentRoundTrip(t *testing.T) {
 			ix := New()
 			addAll(t, ix, tt.docs)
 			dir := t.TempDir()
-			if err := ix.Commit(dir); err != nil {
+			if err := ix.Commit(t.Context(), dir); err != nil {
 				t.Fatalf("Commit: %v", err)
 			}
 			got, err := Open(dir)
@@ -101,7 +101,7 @@ func TestReopenedIndexAcceptsAdds(t *testing.T) {
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "first words"}})
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	got, err := Open(dir)
@@ -148,7 +148,7 @@ func commitTiny(t *testing.T) (dir, segDir string) {
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "x x"}, {Key: "b", Text: "x"}})
 	dir = t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	return dir, filepath.Join(dir, segDirName(1))
@@ -414,7 +414,7 @@ func TestBlocksStartAtAbsoluteDocIDs(t *testing.T) {
 	}
 	addAll(t, ix, docs)
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	path := filepath.Join(dir, segDirName(1), postingsFile)
@@ -551,7 +551,7 @@ func TestUnsortedTermsAreRefused(t *testing.T) {
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "x y"}})
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	rewriteSection(t, filepath.Join(dir, segDirName(1), termsFile), kindTerms, func(w *segWriter) {
@@ -615,7 +615,7 @@ func TestCommitDoesNotBufferTheSegment(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	runtime.ReadMemStats(&after)
@@ -786,7 +786,7 @@ func FuzzSegmentDecoding(f *testing.F) {
 		}
 	}
 	dir := f.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(f.Context(), dir); err != nil {
 		f.Fatal(err)
 	}
 	payload := func(name string) []byte {

@@ -56,6 +56,38 @@ type Index struct {
 	// throughput ever shows up as a problem; milestone 1 has one writer.
 	mu sync.RWMutex
 
+	// wmu serializes the mutators against each other, and every place that takes
+	// mu.Lock takes this one first: Add, Close, Merge and Commit, which is the
+	// whole list — `grep -n 'ix\.mu\.Lock()' pkg/engine/*.go` enumerates it.
+	//
+	// It is not a second name for the same thing. Commit spends almost all of its
+	// time encoding a segment out of state it only reads, so milestone 9 moved
+	// that part under mu.RLock and left mu.Lock for the swap at the end. That
+	// alone does not let reads through, because sync.RWMutex prefers writers: a
+	// goroutine blocked in mu.Lock makes every RLock after it queue behind that
+	// goroutine rather than joining the readers already inside. One concurrent
+	// Add would therefore restore the full stall and merely move its trigger, and
+	// the stall is what docs/FINDINGS.md milestone 5 §3.3 measured at 12.539
+	// seconds. wmu is what keeps a mutator from reaching mu.Lock while a commit is
+	// encoding, so no writer is ever queued for reads to pile up behind.
+	//
+	// The second thing it buys is that the pending segment cannot change while a
+	// commit reads it. Encoding under a read lock would otherwise have to count
+	// the documents captured, so that an Add arriving mid-encode is neither
+	// written twice nor dropped, and that count is a partial hand-off of docs,
+	// byKey, postings, docLen, totalLen and base. Excluding Add outright means
+	// there is nothing to count, and the set written to the segment is exactly
+	// the set that was pending when the commit was admitted.
+	//
+	// ponytail: the price is that Add blocks for a whole Commit, which is what it
+	// already did, so it is a ceiling rather than a regression. Lifting it is the
+	// capture counting above, and it is owed only once a caller needs to ingest
+	// during a commit — milestone 9's clause is read latency.
+	//
+	// Lock order is wmu then mu, never the reverse, and nothing takes wmu inside
+	// mu.
+	wmu sync.Mutex
+
 	// The pending segment: everything added since the last Commit, held the way
 	// milestone 2 held the whole index. Its DocIDs start at base.
 	docs  []Document       // indexed by DocID-base
@@ -90,11 +122,12 @@ type Index struct {
 }
 
 // The four methods below are the read path with the locking taken out. The
-// exported versions wrap them; writeSegment calls them directly, because it
-// already holds the read lock for the whole encode and taking it again per
-// document would deadlock the moment a writer queued behind it.
+// exported versions wrap them; writeSegment calls them directly, because its
+// caller already holds ix.mu for the whole encode — in whichever mode, RLock for
+// a commit and Lock for a merge — and taking it again per document would deadlock
+// the moment a writer queued behind it.
 //
-// Requires ix.mu.
+// Requires ix.mu in either mode.
 
 func (ix *Index) docAt(id DocID) (Document, bool) {
 	if s := ix.segFor(id); s != nil {
@@ -294,6 +327,12 @@ func (ix *Index) Add(d Document) (DocID, error) {
 		freq[t]++
 	}
 
+	// wmu before mu, the order every mutator uses, and here it is what keeps the
+	// milestone 9 lock split working rather than merely tidy: an Add blocked in
+	// mu.Lock would make every query behind it queue too, including the ones a
+	// concurrent Commit is deliberately letting through. See Index.wmu.
+	ix.wmu.Lock()
+	defer ix.wmu.Unlock()
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 
@@ -404,6 +443,9 @@ func (ix *Index) Len() int {
 // index Commit was called on. So New + Add + Commit holds mappings and does need
 // Close, exactly as an opened index does.
 func (ix *Index) Close() error {
+	// wmu before mu, the order every mutator uses. See Index.wmu.
+	ix.wmu.Lock()
+	defer ix.wmu.Unlock()
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	var first error

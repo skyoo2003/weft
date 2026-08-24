@@ -4,6 +4,7 @@ package engine
 
 import (
 	"cmp"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -52,11 +53,14 @@ import (
 // iteration in the writer, and for the same reason: a segment's bytes are
 // asserted equal across two builds.
 //
-// No context. Training is the longest thing a Commit does and cancellation
-// cannot reach it, because Commit takes no context and the golden API file
-// admits exactly one new name this milestone. Adding one here would be a public
-// API change the plan does not buy; the cost is recorded in docs/FINDINGS.md
-// rather than paid quietly.
+// Context, and only where it is worth a branch. Training is the longest thing a
+// Commit does — nearly the whole of the 11.014 seconds docs/FINDINGS.md milestone
+// 5 §3.3 attributes to the encode — so milestone 9 made it cancellable when it changed
+// Commit's signature to take one. The poll sits at each of the five Lloyd passes
+// and every ivfAssignPoll documents of the assignment pass, never per vector and
+// never in the arithmetic below: a poll inside ivfDot or ivfNearestCentroid would
+// put a load and a compare in a loop that runs count·nlist·dim times, to buy
+// responsiveness nobody can perceive.
 const (
 	// ivfMinDocs is the segment size below which no partition is built.
 	//
@@ -151,6 +155,17 @@ const (
 	// ponytail: five, unmeasured. The observable that would move it is recall at
 	// fixed nprobe — `weft-eval recall` — not the training objective.
 	ivfLloyd = 5
+
+	// ivfAssignPoll is how many documents the assignment pass covers between two
+	// context checks.
+	//
+	// The pass is count·nlist·dim multiply-adds and the check is a load and a
+	// compare, so polling every document would put a branch in the writer's
+	// hottest loop for nothing measurable. At the milestone 4 scale — nlist 414,
+	// d 768 — 1,024 documents is about 3.3e8 MAC, well under a second, which is
+	// the responsiveness an operator cancelling a commit is owed. A power of two
+	// so the modulo is a mask.
+	ivfAssignPoll = 1024
 )
 
 // ivfBuild is a partition before it reaches disk: the centroids, and the
@@ -202,28 +217,46 @@ func ivfNList(count int) int {
 // assignment. Both callers pass a random-access accessor, so nothing here needs
 // the corpus in memory; what it does hold is the training sample, which is
 // bounded by ivfSample·dim rather than by the corpus.
-func buildIVF(count, dim int, vecAt func(i int) []float32) ivfBuild {
+//
+// Cancelling ctx abandons the build and reports ctx.Err(); the caller drops the
+// partial partition rather than writing a shorter one, because a partition that
+// names fewer documents than the segment holds would silently lose them from
+// every vector query. The coarsest stretch between two polls is one walk of the
+// training sample: ivfSample strided positions, and a fraction of the assignment
+// pass. The one exception is ivfTrainingSample's every-position fallback, which a
+// corpus whose strided positions all lack a vector reaches and which then walks
+// count rather than ivfSample of them.
+func buildIVF(ctx context.Context, count, dim int, vecAt func(i int) []float32) (ivfBuild, error) {
 	if count < ivfMinDocs || dim <= 0 {
-		return ivfBuild{}
+		return ivfBuild{}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return ivfBuild{}, err
 	}
 	sample := ivfTrainingSample(count, dim, vecAt)
 	if len(sample) == 0 {
 		// Documents but no usable vectors. Same answer as a segment below the
 		// floor: the reader falls back to every id it holds.
-		return ivfBuild{}
+		return ivfBuild{}, nil
 	}
 	// Never more lists than training vectors. A corpus where most documents
 	// carry no vector would otherwise ask for more centroids than there is
 	// anything to seed them from, and k-means with k > n has no fixed point.
 	nlist := min(ivfNList(count), len(sample)/dim)
 	cent := ivfSeedCentroids(sample, nlist, dim)
-	ivfRefine(cent, sample, nlist, dim)
+	if err := ivfRefine(ctx, cent, sample, nlist, dim); err != nil {
+		return ivfBuild{}, err
+	}
+	lists, err := ivfAssign(ctx, count, dim, vecAt, cent, nlist)
+	if err != nil {
+		return ivfBuild{}, err
+	}
 	return ivfBuild{
 		nlist:     nlist,
 		dim:       dim,
 		centroids: cent,
-		lists:     ivfAssign(count, dim, vecAt, cent, nlist),
-	}
+		lists:     lists,
+	}, nil
 }
 
 // ivfTrainingSample takes up to ivfSample vectors on a fixed stride, normalized,
@@ -310,7 +343,11 @@ func ivfSeedCentroids(sample []float32, nlist, dim int) []float32 {
 // with members against nprobe: an empty centroid parked at a real document's
 // direction ranks high for a query near that document, and charging it a probe
 // would quietly shrink the only screw on recall.
-func ivfRefine(cent, sample []float32, nlist, dim int) {
+// Cancelling ctx stops between passes and reports ctx.Err(). Between them and
+// not inside one: a pass is ns·nlist·dim multiply-adds over a sample bounded by
+// ivfSample, so five of them is the granularity, and a partially refined centroid
+// set is not a thing this returns.
+func ivfRefine(ctx context.Context, cent, sample []float32, nlist, dim int) error {
 	ns := len(sample) / dim
 	// float64 accumulators, for the reason scorer/vector's dot gives: a centroid
 	// is the mean of thousands of float32 components and repeated float32
@@ -318,6 +355,9 @@ func ivfRefine(cent, sample []float32, nlist, dim int) {
 	sums := make([]float64, nlist*dim)
 	counts := make([]int, nlist)
 	for range ivfLloyd {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		clear(sums)
 		clear(counts)
 		for i := range ns {
@@ -336,6 +376,7 @@ func ivfRefine(cent, sample []float32, nlist, dim int) {
 			ivfNormalizeSum(cent[j*dim:(j+1)*dim], sums[j*dim:(j+1)*dim])
 		}
 	}
+	return nil
 }
 
 // ivfAssign walks every document and files it under its nearest centroid.
@@ -343,10 +384,23 @@ func ivfRefine(cent, sample []float32, nlist, dim int) {
 // This is the pass whose cost is count·nlist·dim, and the one that makes a build
 // take a minute where the training takes seconds. What it holds is the lists —
 // four bytes a document — and not the vectors.
-func ivfAssign(count, dim int, vecAt func(i int) []float32, cent []float32, nlist int) [][]DocID {
+//
+// Cancelling ctx stops it and reports ctx.Err(). The partial lists are dropped
+// rather than returned: a partition naming fewer documents than the segment holds
+// would take the rest out of every vector query, which is a wrong answer where a
+// missing partition is only a slow one.
+func ivfAssign(ctx context.Context, count, dim int, vecAt func(i int) []float32, cent []float32, nlist int) ([][]DocID, error) {
 	lists := make([][]DocID, nlist)
 	buf := make([]float32, dim)
 	for i := range count {
+		// Every ivfAssignPoll documents, not every document. See ivfAssignPoll:
+		// the check is a load and a compare, the loop body is nlist·dim
+		// multiply-adds, and the modulo is a mask.
+		if i%ivfAssignPoll == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if !ivfNormalize(buf, vecAt(i)) {
 			continue
 		}
@@ -355,7 +409,7 @@ func ivfAssign(count, dim int, vecAt func(i int) []float32, cent []float32, nlis
 		// what the delta encoding on disk needs.
 		lists[j] = append(lists[j], DocID(i))
 	}
-	return lists
+	return lists, nil
 }
 
 // ivfNearestCentroid is the argmax over centroids of the inner product with v,

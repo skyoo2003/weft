@@ -42,7 +42,7 @@ func commitGenerations(t *testing.T, dir string, sizes []int, dim, groups int) *
 			}
 			next++
 		}
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit generation %d: %v", g+1, err)
 		}
 	}

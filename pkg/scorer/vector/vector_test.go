@@ -292,7 +292,7 @@ func allocBytesForCandidates(t *testing.T, docs, textLen int) uint64 {
 		}
 	}
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	open, err := engine.Open(dir)

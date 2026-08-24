@@ -677,6 +677,88 @@ what is registered above:
    0.02% from the smoke run's figure at ladder depth — and no verdict, because the peak is
    decided at a rung it never reached. Nothing about it was published as a measurement.
 
+### 5.4 Milestone 9's read clause, judged — registered before it is measured
+
+**The `-writes` arm has never been registered.** [FINDINGS milestone 5 §3.3](FINDINGS.md)
+publishes 11.063 s of held lock and a 12.539 s read wait from it, and no section of this file
+said what command produced them or what any result would license. That gap is closed here
+before the arm is run again, not after.
+
+```bash
+date; caffeinate -dimsu make bench BENCHFLAGS='-writes -writedocs 20000'; date
+```
+
+About 45 minutes: a 626 MiB copy of the index, a warm-up rotation, then 10,000 samples at
+about 3.9/s, `inflight` 40, `text` arm, on the machine below. `date` either side, for the
+reason §5.3 gives.
+
+**`-writedocs 20000` is the load-bearing flag.** 20,000 exceeds `ivfMinDocs` (16,384), so the
+commit under measurement trains an IVF partition — which is where 11.014 of the 11.063
+seconds went. A smaller batch skips the training and prices a different event, and would make
+the before-and-after incomparable with milestone 5 §3.3.
+
+**The `text` arm, not `text+vector`.** The lock is a property of the writer and not of the
+query mix; the arm changes what a read costs, which is the other cohort. Measuring under
+`text` keeps the comparison with §3.3 and this line is the record that it was a choice.
+
+**A `before` run on the unmodified tree, and it is for attribution rather than for the pass
+line.** The clause is an absolute — 1 second — so the verdict needs only the `after` run. The
+12.539 s was measured on a pre-milestone-8 tree, and `Index.LookupInto` has since changed the
+read path ([D-016](DECISIONS.md)); without a `before` on the same lineage, a fall cannot be
+attributed to this round rather than to that one. Attributing a fall to the wrong round is
+what [FINDINGS milestone 8 §9](FINDINGS.md) had to correct once already.
+
+**The four quantities compared:** `commit window`, `during` max, `outside` max, `shed`.
+
+**What each outcome licenses, fixed now:**
+
+1. **`during` max ≤ 1 s** — milestone 9's read clause is **met**. `outside` max is published
+   beside it, so that "the lock is no longer the tail" is a comparison and not an assertion.
+2. **> 1 s, and `during` max ≈ `outside` max** — the lock is fixed and what remains is not the
+   lock. First candidate: the 30 MiB segment write plus two `fsync`s contending for IO with
+   the read load. That is published, **and the clause is recorded as missed.** A different
+   cause is not a pass.
+3. **> 1 s, and `during` max ≫ `outside` max** — an exclusive stretch is still long. The
+   remaining candidates are `adopt`'s `openSegment` and the `clear(ix.postings)` beside it,
+   both instrumentable. **One** engineering round is licensed and that one is the last — the
+   same bound as §5.3 outcome 2, for the same reason rule 5 clause 4 gives.
+4. **A cancelled commit leaves a published generation** — an atomicity regression. This is not
+   a performance result and it is not published as one: it **blocks**, and the change is
+   reverted. `TestACancelledCommitPublishesNothing` is what is supposed to catch it before a
+   bench run can.
+
+**Repetitions** follow *rule 3, repaired* and [D-013](DECISIONS.md): the whole named
+procedure, three times, 2.25 hours, on top of 0.75 for the `before`. Cut order, fixed now:
+repetition 3 first, and then the two observations are published as two observations and not as
+a median; then repetition 2, and a single run is published as single, with the same debt
+marked the same way §4.5 marks milestone 5's; then the `before` run, which keeps the verdict
+and loses the attribution — and the loss is published. **The judgment run is not cut.**
+
+`-rotations` is not cut either. The `during` cohort is decided by the arrival rate times the
+window length, so a smaller `n` does not enlarge it, and keeping the same shape as
+[FINDINGS milestone 5 §3.3](FINDINGS.md) is what makes the two comparable at all.
+
+Numbers are Apple M4 / Go 1.26.1 and are quoted with that machine.
+
+**Outcome, 2026-08-24: clause 1 fired.** `during` max **61 ms** against 1 second, from
+**13.072 s** on the unmodified tree — and below the `outside` max of 191 ms, so the commit
+window is no longer the worst part of the run. `shed` 4 to 0. The commit window itself did
+**not** move (11.467 s to 11.284 s), which is the design: the encode is as long as it was and
+is no longer exclusive. Every figure and its caveats are
+[FINDINGS milestone 9 §3](FINDINGS.md). What differed from what is registered above:
+
+1. **Cuts 1 and 2 were both taken.** The three `after` repetitions were not run; each side is
+   a single observation and says so beside every figure. Recorded here because a procedure
+   edited to match what happened is not a procedure.
+2. **The `before` run was kept**, which cut 3 would have dropped. It is what makes the fall
+   attributable to this round rather than to [D-016](DECISIONS.md)'s read-path change, and it
+   reproduced milestone 5 §3.3 within 4.3% on the same tree lineage.
+3. **Two comparisons the run invites are refused rather than published.** `during` max sits
+   below `outside` p50, and `outside` max fell 8.8× in a cohort this change should not have
+   touched. Both are [FINDINGS milestone 9 §4.2 and §4.3](FINDINGS.md), and both need an
+   instrument change this arm does not have: `outside` mixes reads against a one-segment index
+   with reads against a two-segment one, because the commit fires a third of the way in.
+
 ### Machine
 
 <!-- Filled in with the published numbers. A latency table without the machine it

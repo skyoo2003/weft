@@ -36,7 +36,7 @@ func commitSeeded(t *testing.T) (dir, segDir string, ix *Index) {
 		{Key: "bravo", Text: "ranking ranking ranking"},
 	})
 	dir = t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	return dir, filepath.Join(dir, segDirName(1)), ix

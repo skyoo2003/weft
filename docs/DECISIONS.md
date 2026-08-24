@@ -1287,3 +1287,106 @@ milestone 10 fires after this.
   are two selective terms pays 4.52 MiB a query for an accumulator holding a few thousand
   entries. If that ever shows up in a real deployment rather than in a synthetic test, a
   posting count in the terms index is the format change that answers it.
+
+## D-017 — A second mutex, and `Commit` takes a context rather than growing a twin
+
+**Date:** 2026-08-24
+**Milestone:** 9 — the write-lock ceiling
+**Status:** accepted
+**Context:** [FINDINGS milestone 9 §1](FINDINGS.md), [PERF.md §5.4](PERF.md), [D-015](#d-015--one-line-of-exported-surface-rather-than-a-document-whose-lifetime-quietly-changed)
+
+### Context
+
+[FINDINGS milestone 5 §3.3](FINDINGS.md) measured an 11.063 s window in which `Commit` held
+`ix.mu` exclusively, and a read that arrived inside it waiting 12.539 s — 150× the p50
+beside it. Of the window, 20,000 `Add` calls were 49 ms; the other 11.014 s was the commit,
+and nearly all of that was `buildIVF`.
+
+`buildIVF` only reads the index. The `ponytail:` note on `Commit` had already named the
+upgrade — "encode under the read lock and swap under the write lock, counting the documents
+captured so a concurrent `Add` is neither written twice nor dropped" — and priced it at that
+capture counting: a partial hand-off of `docs`, `byKey`, `postings`, `docLen`, `totalLen`
+and `base`.
+
+Separately, `Commit` took no context. The README's Limitations table published that as a
+known limit, and `cmd/weft-eval`'s write-arm probe had to wait out a whole encode on Ctrl-C
+because of it.
+
+### Question
+
+Two questions that turn out to be one:
+
+1. Encoding under the read lock needs the pending segment to stand still. Pay for the
+   capture counting, or find something cheaper?
+2. Make `Commit` cancellable by changing its signature, or by adding `CommitContext`
+   beside it?
+
+### Decision
+
+**A second mutex, `Index.wmu`, and `Commit(ctx context.Context, dir string) error`.**
+
+`wmu` is a plain `sync.Mutex` that every site taking `ix.mu` exclusively takes first —
+`Add`, `Close`, `Merge`, `Commit`, which is all four. `Commit` then holds `wmu` across its
+whole body while taking `ix.mu` in read mode for the encode and exclusively only for the
+`adopt`.
+
+**The capture counting is not built.** With `Add` excluded, the pending segment cannot
+change and there is nothing to count.
+
+**`CommitContext` is not added.** The signature changes, and the golden API file records one
+line altered rather than one added.
+
+### Why
+
+**`wmu` is what makes the split work at all, and this is the part that is easy to get
+wrong.** `sync.RWMutex` prefers writers: while a commit holds `mu.RLock` for 11 seconds, one
+`Add` entering `mu.Lock` makes *every* `RLock` after it queue behind that waiter. Lowering
+the encode to a read lock without `wmu` does not remove the 12.5 s — it only changes what
+triggers it, from "a commit is running" to "a commit is running and somebody added a
+document". `wmu` stops a mutator from reaching `mu.Lock` in the first place.
+
+**The gap between the two sections is safe for the same reason.** `sync.RWMutex` has no
+upgrade operation, so the read lock is released and the write lock taken separately. Nothing
+can change in between, because every mutator takes `wmu` first and `wmu` is still held.
+
+**Not building the capture counting is a smaller diff and a smaller invariant.** The counting
+version has to keep two halves of the pending segment consistent across a hand-off; this
+version has none, and the set written to the segment is exactly the set that was pending when
+the commit was admitted. That is also what keeps milestone 2's atomicity argument intact: the
+commit point is still the rename, and a document arriving during training arrives *after* the
+commit rather than into an undefined state.
+
+**The price is named rather than hidden.** `Add` blocks for a whole `Commit`. It already did,
+so this is a ceiling and not a regression, and `Index.wmu` carries both the ceiling and the
+upgrade path — the capture counting, owed the day a caller needs to ingest during a commit.
+Milestone 9's clause is read latency.
+
+**The signature changes because there is nothing to preserve.** `v0.1.0` is not cut. An
+`XxxContext` twin planted where no compatibility exists becomes permanent surface for a
+compatibility that never existed. `Search` already takes a `context.Context` first, so the
+twin would also leave two entry points with two conventions. The 82 call sites are entirely
+tests, `cmd` and `examples`: a one-time mechanical churn against permanent surface.
+
+**Cancellation is defined by the rename, so it needed no new state.** Before the rename,
+nothing is published and what is left is the unnamed `seg-<gen+1>` that `Open` already
+documents and the next `Commit` already sweeps. After the rename, `ctx.Err()` is ignored:
+stopping between the rename and the `adopt` would leave the directory publishing a generation
+the live index has no mapping for, and the next `Commit` would report that directory as
+corrupt. **A cancellation must not be able to reach a state a crash cannot** — which is why
+that is the one thing the tests assert on both sides of the race rather than picking a side.
+
+### What would show this decision was wrong
+
+- **A caller needs to ingest while a commit runs.** That is the one thing `wmu` forecloses,
+  and the capture counting is then owed with the invariant designed rather than deferred.
+- **`during` max stays above 1 s with `during` ≈ `outside`.** The lock would be fixed and the
+  wait would be something else — the 30 MiB segment write plus two fsyncs is the first
+  candidate — and [PERF.md §5.4](PERF.md) registered that reading in advance. A different
+  cause is not a pass.
+- **A fifth `mu.Lock` site appears without `wmu`.** The whole design rests on the enumeration
+  being complete, and one omission restores the full stall. `grep -n 'mu.Lock()'
+  pkg/engine/*.go` is the check, and `TestReadsMakeProgressWhileACommitEncodes` is what
+  catches it from the outside.
+- **`Merge`'s stop turns out to be what callers actually hit.** It is longer than a commit and
+  this round did not touch it beyond `wmu`, on the grounds that no arm measures it. Build the
+  arm and the same restructuring applies.

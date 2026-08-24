@@ -3,14 +3,18 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // copyTree copies one flat segment directory to a new name, which is how a test
@@ -79,7 +83,7 @@ func TestOpenWithoutACommitReportsNotExist(t *testing.T) {
 
 func TestCommitEmptyIndex(t *testing.T) {
 	dir := t.TempDir()
-	if err := New().Commit(dir); err != nil {
+	if err := New().Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	ix, err := Open(dir)
@@ -105,13 +109,13 @@ func TestCommitWithNothingPendingPublishesNothing(t *testing.T) {
 	dir := t.TempDir()
 	ix := New()
 	addAll(t, ix, []Document{{Key: "only", Text: "the one document there is"}})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("first Commit: %v", err)
 	}
 	want := dirNames(t, dir)
 
 	for i := range 3 {
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit %d with nothing pending: %v", i+2, err)
 		}
 	}
@@ -140,7 +144,7 @@ func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	committed := New()
 	addAll(t, committed, []Document{{Key: "safe", Text: "the committed corpus"}})
 	dir := t.TempDir()
-	if err := committed.Commit(dir); err != nil {
+	if err := committed.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
@@ -150,7 +154,7 @@ func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	orphan := New()
 	addAll(t, orphan, []Document{{Key: "ghost", Text: "the corpus that never landed"}})
 	orphanRoot := makeSegDir(t, dir, segDirName(2))
-	if err := writeSegment(orphanRoot, &pendingSource{ix: orphan}); err != nil {
+	if err := writeSegment(t.Context(), orphanRoot, &pendingSource{ix: orphan}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,7 +181,7 @@ func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	if _, err := got.Add(Document{Key: "later", Text: "added after the restart"}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if err := got.Commit(dir); err != nil {
+	if err := got.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
@@ -204,7 +208,7 @@ func TestSuccessiveCommitsAccumulateGenerations(t *testing.T) {
 	dir := t.TempDir()
 	for i, key := range []string{"one", "two", "three"} {
 		addAll(t, ix, []Document{{Key: key, Text: "generation " + key}})
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit %d: %v", i+1, err)
 		}
 	}
@@ -222,7 +226,7 @@ func TestCommitAfterOpenContinuesTheGenerations(t *testing.T) {
 	first := New()
 	addAll(t, first, []Document{{Key: "a", Text: "written before the restart"}})
 	dir := t.TempDir()
-	if err := first.Commit(dir); err != nil {
+	if err := first.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
@@ -232,7 +236,7 @@ func TestCommitAfterOpenContinuesTheGenerations(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	addAll(t, second, []Document{{Key: "b", Text: "written after the restart"}})
-	if err := second.Commit(dir); err != nil {
+	if err := second.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("second Commit: %v", err)
 	}
 
@@ -254,7 +258,7 @@ func TestCommitRefusesACorruptManifest(t *testing.T) {
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "committed fine"}})
 	dir := t.TempDir()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	path := filepath.Join(dir, manifestName)
@@ -266,7 +270,7 @@ func TestCommitRefusesACorruptManifest(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+	if err := ix.Commit(t.Context(), dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Commit over a corrupt manifest: got %v, want ErrCorrupt", err)
 	}
 }
@@ -308,7 +312,7 @@ func TestCommitRefusesAManifestNamingTheNextGeneration(t *testing.T) {
 	})
 	ix := New()
 	addAll(t, ix, []Document{{Key: "new", Text: "the corpus that must not overwrite"}})
-	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+	if err := ix.Commit(t.Context(), dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Commit: got %v, want ErrCorrupt", err)
 	}
 	if _, err := os.Stat(filepath.Join(segDir, docsFile)); err != nil {
@@ -331,7 +335,7 @@ func TestCommitRefusesAManifestListingTwoSegments(t *testing.T) {
 	})
 	ix := New()
 	addAll(t, ix, []Document{{Key: "new", Text: "nothing here may be published"}})
-	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+	if err := ix.Commit(t.Context(), dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Commit: got %v, want ErrCorrupt", err)
 	}
 	if _, err := os.Stat(filepath.Join(segDir, docsFile)); err != nil {
@@ -362,7 +366,7 @@ func TestCommitRefusesAnExhaustedGeneration(t *testing.T) {
 
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "must not be published as generation 0"}})
-	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+	if err := ix.Commit(t.Context(), dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Commit: got %v, want ErrCorrupt", err)
 	}
 	if _, err := os.Stat(bystander); err != nil {
@@ -391,7 +395,7 @@ func TestFirstCommitRefusesAForeignSegmentDirectory(t *testing.T) {
 
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "x"}})
-	if err := ix.Commit(dir); err == nil {
+	if err := ix.Commit(t.Context(), dir); err == nil {
 		t.Fatal("Commit claimed a directory holding files weft never wrote")
 	}
 	if _, err := os.Stat(bystander); err != nil {
@@ -412,13 +416,13 @@ func TestFirstCommitOverwritesItsOwnDebris(t *testing.T) {
 	dir := t.TempDir()
 	orphan := New()
 	addAll(t, orphan, []Document{{Key: "ghost", Text: "the corpus that never landed"}})
-	if err := writeSegment(makeSegDir(t, dir, segDirName(1)), &pendingSource{ix: orphan}); err != nil {
+	if err := writeSegment(t.Context(), makeSegDir(t, dir, segDirName(1)), &pendingSource{ix: orphan}); err != nil {
 		t.Fatal(err)
 	}
 
 	ix := New()
 	addAll(t, ix, []Document{{Key: "real", Text: "the corpus that did"}})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit over its own unpublished debris: %v", err)
 	}
 	got, err := Open(dir)
@@ -478,7 +482,7 @@ func TestCommitDoesNotFollowASymlinkedTempManifest(t *testing.T) {
 	// Whether the commit succeeds is not the point — it may legitimately fail
 	// on a directory somebody else is meddling with. What it must never do is
 	// write through the link.
-	commitErr := ix.Commit(dir)
+	commitErr := ix.Commit(t.Context(), dir)
 
 	got, err := os.ReadFile(outside)
 	if err != nil {
@@ -569,7 +573,7 @@ func TestAnEntryOfTheWrongKindAtTheManifestIsCorrupt(t *testing.T) {
 	}
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "x"}})
-	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+	if err := ix.Commit(t.Context(), dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Commit over a directory at MANIFEST: got %v, want ErrCorrupt", err)
 	}
 }
@@ -625,7 +629,7 @@ func TestGenerationZeroIsRefused(t *testing.T) {
 
 	ix := New()
 	addAll(t, ix, []Document{{Key: "a", Text: "must not supersede a state weft never wrote"}})
-	if err := ix.Commit(dir); !errors.Is(err, ErrCorrupt) {
+	if err := ix.Commit(t.Context(), dir); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Commit: got %v, want ErrCorrupt", err)
 	}
 	if _, err := os.Stat(bystander); err != nil {
@@ -657,7 +661,7 @@ func TestFirstCommitRefusesADirectoryInsideASegmentName(t *testing.T) {
 
 			ix := New()
 			addAll(t, ix, []Document{{Key: "a", Text: "x"}})
-			if err := ix.Commit(dir); err == nil {
+			if err := ix.Commit(t.Context(), dir); err == nil {
 				t.Fatalf("Commit claimed a directory holding a %s directory weft never wrote", name)
 			}
 			if _, err := os.Stat(bystander); err != nil {
@@ -679,7 +683,7 @@ func TestFirstCommitRefusesAForeignSectionFile(t *testing.T) {
 		t.Helper()
 		ix := New()
 		addAll(t, ix, []Document{{Key: "a", Text: "x"}})
-		return ix.Commit(dir)
+		return ix.Commit(t.Context(), dir)
 	}
 	plant := func(t *testing.T, dir, name string, content []byte) string {
 		t.Helper()
@@ -738,7 +742,7 @@ func TestFirstCommitRefusesAForeignTempManifest(t *testing.T) {
 		t.Helper()
 		ix := New()
 		addAll(t, ix, []Document{{Key: "a", Text: "x"}})
-		return ix.Commit(dir)
+		return ix.Commit(t.Context(), dir)
 	}
 	tmp := manifestName + ".tmp"
 
@@ -825,12 +829,349 @@ func TestCommitDuringReads(t *testing.T) {
 			ix.Doc(0)
 		}
 	}()
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	<-done
 	if _, err := Open(dir); err != nil {
 		t.Fatalf("Open: %v", err)
+	}
+}
+
+// vectorCorpus adds n dim-wide clustered vectors to ix under keys starting at
+// `from`, which is what makes a second batch's keys not collide with the first's.
+//
+// Its size is the point, and it is the same point for both of the tests below
+// that use it: at ivfMinDocs a commit trains a partition, which is the long pole
+// a read has to run alongside and a cancellation has to be able to interrupt.
+func vectorCorpus(t *testing.T, ix *Index, from, n, dim int) {
+	t.Helper()
+	for i, v := range clusteredCorpus(n, dim, 12) {
+		if _, err := ix.Add(Document{
+			Key:    fmt.Sprintf("doc-%06d", from+i),
+			Text:   fmt.Sprintf("cluster term%d shared", i%7),
+			Vector: v,
+		}); err != nil {
+			t.Fatalf("Add %d: %v", from+i, err)
+		}
+	}
+}
+
+const (
+	// readBatch is how many reads make one unit of progress, and the batching is
+	// what makes the sample honest rather than a way to inflate a number.
+	//
+	// A test cannot see the lock, so it samples the counter around the whole
+	// Commit call — which includes the MkdirAll and the OpenRoot that run before
+	// the lock is taken. A single Lookup on a pending index is a map read behind
+	// an uncontended RLock, so a reader finishes thousands of them inside those
+	// two syscalls and every one would count as progress the lock never granted.
+	// A batch costs more than the syscalls do, so a unit that lands inside the
+	// window is a unit the lock admitted.
+	readBatch = 4096
+
+	// readProgressFloor is how many units this test demands of the commit
+	// window. The expectation after the lock split is in the hundreds and the
+	// expectation before it is zero or one, so anything between them separates
+	// the two; 20 is far enough above one that a scheduler which happens to
+	// admit a straggling batch cannot pass, and far enough below the hundreds
+	// that a loaded machine still clears it.
+	readProgressFloor = 20
+)
+
+// TestReadsMakeProgressWhileACommitEncodes is milestone 9's read clause stated
+// as a property rather than as a stopwatch.
+//
+// It counts completed reads instead of timing the longest one, and that is the
+// difference between an assertion and a flake. A wall-clock threshold is a claim
+// about the machine — a loaded CI runner misses a one-second bound while holding
+// the property this test is for, and a fast one passes it while blocking reads
+// for the whole encode as long as the encode is quick. "Reads finished while a
+// commit was encoding" is the same statement on every machine: before the lock
+// split the answer was zero, because Commit held mu for its whole duration, and
+// after it the answer is however many the reader managed.
+//
+// The corpus is ivfMinDocs documents with vectors, which is the smallest one
+// whose commit trains a partition — buildIVF is where the 11 seconds of
+// docs/FINDINGS.md milestone 5 §3.3 go, and a commit that skips it would not be
+// the commit under test.
+//
+// The counter is sampled around the whole Commit call rather than around the
+// locked section, since a test cannot see the lock. What that admits is the work
+// before the lock is taken — a MkdirAll and an OpenRoot, two syscalls — and the
+// floor above is set well past what a reader can finish in them.
+func TestReadsMakeProgressWhileACommitEncodes(t *testing.T) {
+	// One P cannot interleave a reader with a writer, so on a single-processor
+	// run this measures the scheduler rather than the lock.
+	if runtime.GOMAXPROCS(0) < 2 {
+		t.Skip("needs at least two processors to observe a reader running alongside a commit")
+	}
+
+	const dim = 8
+	ix := New()
+	vectorCorpus(t, ix, 0, ivfMinDocs, dim)
+	dir := t.TempDir()
+	// The Commit below adopts the generation it writes, which maps it into this
+	// index — see Index.Close. Every other test here closes for the same reason.
+	defer ix.Close() //nolint:errcheck // teardown
+
+	var batches atomic.Int64
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// The three read paths a caller has: one document by id, the posting
+			// list a text scorer walks, and the corpus statistics BM25 needs. All
+			// three take mu.RLock, which is the lock this test is about, and each
+			// takes it separately — so a batch blocked by a writer stops at the
+			// next acquisition rather than finishing the one it is inside.
+			for i := range readBatch {
+				ix.Doc(DocID(i))
+			}
+			ix.Lookup("term3")
+			ix.Stats()
+			batches.Add(1)
+		}
+	}()
+
+	// Wait for the reader to be running, so the sample below is a live counter
+	// and not the zero of a goroutine that has not been scheduled yet.
+	for batches.Load() == 0 {
+		runtime.Gosched()
+	}
+
+	before := batches.Load()
+	if err := ix.Commit(t.Context(), dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	during := batches.Load() - before
+	close(stop)
+	<-done
+
+	t.Logf("%d read batches of %d completed while a commit encoded %d documents", during, readBatch, ivfMinDocs)
+	if during < readProgressFloor {
+		t.Fatalf("%d read batches completed while a commit encoded %d documents, want at least %d: "+
+			"the commit is holding the exclusive lock across its encode",
+			during, ivfMinDocs, readProgressFloor)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation. Milestone 9's second clause: an operator can call off a commit.
+//
+// The contract is a corollary of the atomicity sentence on Commit rather than a
+// new rule. The rename is the commit point, so cancellation before it publishes
+// nothing and cancellation after it is ignored — stopping between the rename and
+// the adopt would leave the directory holding a generation the live index does
+// not know about, which is the split the rename exists to rule out.
+// ---------------------------------------------------------------------------
+
+// publishedGen reports the generation dir currently publishes, or 0 for a
+// directory with no manifest at all.
+func publishedGen(t *testing.T, dir string) uint64 {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	defer root.Close() //nolint:errcheck // teardown
+	gen, _, err := readManifest(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("readManifest: %v", err)
+	}
+	return gen
+}
+
+// TestCommitRefusesACancelledContext is the cheap half of the contract, and the
+// deterministic one: a context already cancelled on the way in.
+//
+// Nothing about it depends on timing, which is why it carries the assertions the
+// timed test below cannot — that the pending documents are still pending, and
+// that a commit refused this way costs the caller nothing but a retry. It walks
+// both entry states, because "no manifest yet" and "a generation already
+// published" are different branches of Commit and only one of them has a
+// generation number to leave alone.
+func TestCommitRefusesACancelledContext(t *testing.T) {
+	const dim = 8
+	ix := New()
+	vectorCorpus(t, ix, 0, ivfMinDocs, dim)
+	dir := t.TempDir()
+	defer ix.Close() //nolint:errcheck // teardown
+
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// First commit, refused. A directory with no manifest publishes nothing, so
+	// the observable is that it still publishes nothing.
+	if err := ix.Commit(cancelled, dir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Commit with a cancelled context: got %v, want context.Canceled", err)
+	}
+	if _, err := Open(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Open after a refused first commit: got %v, want fs.ErrNotExist", err)
+	}
+	if got := ix.Len(); got != ivfMinDocs {
+		t.Fatalf("Len = %d after a refused commit, want %d: the pending documents were dropped", got, ivfMinDocs)
+	}
+
+	// The same index commits normally afterwards. A refusal that left the index
+	// unable to commit would be a worse outcome than not offering cancellation.
+	if err := ix.Commit(t.Context(), dir); err != nil {
+		t.Fatalf("Commit after a refused one: %v", err)
+	}
+	if got := publishedGen(t, dir); got != 1 {
+		t.Fatalf("published generation %d after the first real commit, want 1", got)
+	}
+
+	// Second commit, refused, this time over a directory that already publishes
+	// something. The generation must not move.
+	vectorCorpus(t, ix, ivfMinDocs, 32, dim)
+	if err := ix.Commit(cancelled, dir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("second Commit with a cancelled context: got %v, want context.Canceled", err)
+	}
+	if got := publishedGen(t, dir); got != 1 {
+		t.Fatalf("published generation %d after a refused second commit, want 1", got)
+	}
+	if got := ix.Len(); got != ivfMinDocs+32 {
+		t.Fatalf("Len = %d after a refused second commit, want %d", got, ivfMinDocs+32)
+	}
+
+	// And the refusal did not damage what was already published.
+	if err := Scrub(dir); err != nil {
+		t.Fatalf("Scrub after a refused second commit: %v", err)
+	}
+	if err := ix.Commit(t.Context(), dir); err != nil {
+		t.Fatalf("Commit after a refused second one: %v", err)
+	}
+	if got := publishedGen(t, dir); got != 2 {
+		t.Fatalf("published generation %d after the second real commit, want 2", got)
+	}
+}
+
+// TestACancelledCommitPublishesNothing is the atomicity invariant under a
+// cancellation that lands somewhere nobody chose.
+//
+// The deadline is short and the commit is long, so the cancellation almost
+// always arrives mid-encode — but the test does not assert which side of the
+// rename it landed on, because that is a race and asserting it would be a flake.
+// Both outcomes are allowed and each is pinned: a commit that reports success
+// published a whole generation, and a commit that reports the deadline published
+// none. What is refused is the third thing — a generation that is there and
+// incomplete.
+//
+// That is why this test is worth having even though it accepts two answers. The
+// invariant it guards is the one D-017 defines cancellation by: the rename is the
+// commit point, and cancellation is not allowed to become a way to reach a state
+// a crash cannot.
+func TestACancelledCommitPublishesNothing(t *testing.T) {
+	const dim = 8
+	ix := New()
+	vectorCorpus(t, ix, 0, ivfMinDocs, dim)
+	dir := t.TempDir()
+	defer ix.Close() //nolint:errcheck // teardown
+
+	// Long enough to be past the MkdirAll and inside the encode, short enough
+	// that the encode cannot finish. Neither bound is asserted on.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Millisecond)
+	defer cancel()
+	err := ix.Commit(ctx, dir)
+
+	switch {
+	case err == nil:
+		t.Log("the commit finished before the deadline; asserting the published side")
+		if got := publishedGen(t, dir); got != 1 {
+			t.Fatalf("published generation %d after a successful commit, want 1", got)
+		}
+		if err := Scrub(dir); err != nil {
+			t.Fatalf("Scrub: %v", err)
+		}
+		got, err := Open(dir)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		defer got.Close() //nolint:errcheck // teardown
+		if n := got.Len(); n != ivfMinDocs {
+			t.Fatalf("the published generation holds %d documents, want %d", n, ivfMinDocs)
+		}
+	case errors.Is(err, context.DeadlineExceeded):
+		t.Log("the deadline fired before the rename; asserting nothing was published")
+		if got := publishedGen(t, dir); got != 0 {
+			t.Fatalf("a cancelled commit published generation %d, want none", got)
+		}
+		if _, err := Open(dir); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("Open after a cancelled commit: got %v, want fs.ErrNotExist", err)
+		}
+		if n := ix.Len(); n != ivfMinDocs {
+			t.Fatalf("Len = %d after a cancelled commit, want %d", n, ivfMinDocs)
+		}
+	default:
+		t.Fatalf("Commit: got %v, want nil or context.DeadlineExceeded", err)
+	}
+}
+
+// TestScrubAfterACancelledCommit is the debris clause: what a cancelled commit
+// leaves is a state the directory already had a name for.
+//
+// Open's own documentation calls an unnamed seg-<gen+1> the debris of a commit
+// that never finished, says a reader ignores it, and says the next Commit sweeps
+// it — see TestUnmanifestedSegmentIsInvisible and TestANoOpCommitStillSweepsDebris,
+// which build that state by hand. This one produces it the way an operator now
+// can, and asserts the same three things hold, so cancellation adds no cleanup
+// path of its own.
+func TestScrubAfterACancelledCommit(t *testing.T) {
+	const dim = 8
+	ix := New()
+	vectorCorpus(t, ix, 0, 64, dim)
+	dir := t.TempDir()
+	defer ix.Close() //nolint:errcheck // teardown
+	if err := ix.Commit(t.Context(), dir); err != nil {
+		t.Fatalf("first Commit: %v", err)
+	}
+
+	// A second batch big enough to train, so the encode is long enough for the
+	// deadline to land inside it.
+	vectorCorpus(t, ix, 64, ivfMinDocs, dim)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Millisecond)
+	defer cancel()
+	err := ix.Commit(ctx, dir)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Commit: got %v, want nil or context.DeadlineExceeded", err)
+	}
+	debris := err != nil && slices.Contains(dirNames(t, dir), segDirName(2))
+	t.Logf("cancelled=%v, seg-000002 standing unnamed=%v", err != nil, debris)
+
+	// Whatever it left, the published generation is intact and readable. This is
+	// the assertion that does not depend on where the deadline landed.
+	if err := Scrub(dir); err != nil {
+		t.Fatalf("Scrub after a cancelled commit: %v", err)
+	}
+	reopened, oerr := Open(dir)
+	if oerr != nil {
+		t.Fatalf("Open after a cancelled commit: %v", oerr)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// And the next commit sweeps it, which is the promise Open makes about how
+	// long the debris costs disk. seg-000002 is the name that commit writes for
+	// itself, so the directory holds exactly the two generations either way.
+	if err := ix.Commit(t.Context(), dir); err != nil {
+		t.Fatalf("Commit after a cancelled one: %v", err)
+	}
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
+		t.Fatalf("directory after the sweep: %v", names)
+	}
+	if err := Scrub(dir); err != nil {
+		t.Fatalf("Scrub after the sweep: %v", err)
 	}
 }
 
@@ -852,11 +1193,11 @@ func TestCommitAfterAVectorlessBatchStaysScrubbable(t *testing.T) {
 	dir := t.TempDir()
 	ix := New()
 	addAll(t, ix, []Document{{Key: "with", Text: "a vector", Vector: []float32{1, 0, 0, 1}}})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("first Commit: %v", err)
 	}
 	addAll(t, ix, []Document{{Key: "without", Text: "no vector at all"}})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("second Commit: %v", err)
 	}
 	if err := Scrub(dir); err != nil {
@@ -880,7 +1221,7 @@ func TestOpenRefusesDamagedMeta(t *testing.T) {
 	dir := t.TempDir()
 	ix := New()
 	addAll(t, ix, []Document{{Key: "one", Text: "a b c"}})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if err := ix.Close(); err != nil {
@@ -926,7 +1267,7 @@ func TestScrubRefusesAManifestCountThatDisagreesWithMeta(t *testing.T) {
 	dir := t.TempDir()
 	ix := New()
 	addAll(t, ix, []Document{{Key: "one", Text: "a b c"}})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if err := ix.Close(); err != nil {
@@ -955,12 +1296,12 @@ func TestScrubRefusesAKeyHeldByTwoSegments(t *testing.T) {
 	one, two := t.TempDir(), t.TempDir()
 	a := New()
 	addAll(t, a, []Document{{Key: "dup", Text: "the first corpus"}})
-	if err := a.Commit(one); err != nil {
+	if err := a.Commit(t.Context(), one); err != nil {
 		t.Fatalf("Commit a: %v", err)
 	}
 	b := New()
 	addAll(t, b, []Document{{Key: "dup", Text: "the second corpus"}})
-	if err := b.Commit(two); err != nil {
+	if err := b.Commit(t.Context(), two); err != nil {
 		t.Fatalf("Commit b: %v", err)
 	}
 
@@ -988,12 +1329,12 @@ func TestCommitRefusesADirectoryItDidNotOpen(t *testing.T) {
 	one, two := t.TempDir(), t.TempDir()
 	a := New()
 	addAll(t, a, []Document{{Key: "a-one", Text: "the first corpus"}})
-	if err := a.Commit(one); err != nil {
+	if err := a.Commit(t.Context(), one); err != nil {
 		t.Fatalf("Commit a: %v", err)
 	}
 	b := New()
 	addAll(t, b, []Document{{Key: "b-one", Text: "the second corpus"}})
-	if err := b.Commit(two); err != nil {
+	if err := b.Commit(t.Context(), two); err != nil {
 		t.Fatalf("Commit b: %v", err)
 	}
 
@@ -1007,11 +1348,11 @@ func TestCommitRefusesADirectoryItDidNotOpen(t *testing.T) {
 	}
 
 	// Same document count, unrelated history.
-	if err := ix.Commit(two); !errors.Is(err, ErrCorrupt) {
+	if err := ix.Commit(t.Context(), two); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Commit into a directory this index was not opened from: got %v, want ErrCorrupt", err)
 	}
 	// And the directory it did open is still where it can commit.
-	if err := ix.Commit(one); err != nil {
+	if err := ix.Commit(t.Context(), one); err != nil {
 		t.Fatalf("Commit into its own directory: %v", err)
 	}
 }
@@ -1033,7 +1374,7 @@ func TestOpenRefusesADamagedDocOffsetTable(t *testing.T) {
 	dir := t.TempDir()
 	ix := New()
 	addAll(t, ix, []Document{{Key: "one", Text: "a b c"}})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if err := ix.Close(); err != nil {
@@ -1123,12 +1464,12 @@ func TestOpenRefusesTwoVectorWidthsInOneIndex(t *testing.T) {
 	one, two := t.TempDir(), t.TempDir()
 	a := New()
 	addAll(t, a, []Document{{Key: "wide", Text: "four wide", Vector: []float32{1, 0, 0, 1}}})
-	if err := a.Commit(one); err != nil {
+	if err := a.Commit(t.Context(), one); err != nil {
 		t.Fatalf("Commit a: %v", err)
 	}
 	b := New()
 	addAll(t, b, []Document{{Key: "narrow", Text: "two wide", Vector: []float32{1, 0}}})
-	if err := b.Commit(two); err != nil {
+	if err := b.Commit(t.Context(), two); err != nil {
 		t.Fatalf("Commit b: %v", err)
 	}
 
@@ -1160,7 +1501,7 @@ func TestAdoptReleasesTheCommittedBatch(t *testing.T) {
 	dir := t.TempDir()
 	ix := New()
 	addAll(t, ix, []Document{{Key: "held", Text: "a text worth releasing", Vector: []float32{1, 2}, Links: []string{"held"}}})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	// Past the length, inside the capacity: what the garbage collector still
@@ -1187,7 +1528,7 @@ func TestOpenStoresAnAbsoluteDirectory(t *testing.T) {
 	dir := t.TempDir()
 	ix := New()
 	addAll(t, ix, []Document{{Key: "one", Text: "a b c"}})
-	if err := ix.Commit(dir); err != nil {
+	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if err := ix.Close(); err != nil {
@@ -1207,7 +1548,7 @@ func TestOpenStoresAnAbsoluteDirectory(t *testing.T) {
 	// The same for the path Commit remembers.
 	fresh := New()
 	addAll(t, fresh, []Document{{Key: "two", Text: "d e f"}})
-	if err := fresh.Commit("."); err != nil {
+	if err := fresh.Commit(t.Context(), "."); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	defer fresh.Close() //nolint:errcheck // teardown
@@ -1297,7 +1638,7 @@ func TestOpenSurvivesAConcurrentMerge(t *testing.T) {
 	// caught in, so there is nothing for a merge to overtake.
 	for i := range 9 {
 		ubiquitousCorpus(t, ix, i*400, 400)
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit %d: %v", i, err)
 		}
 	}
@@ -1329,7 +1670,7 @@ func TestOpenSurvivesAConcurrentMerge(t *testing.T) {
 		if _, err := ix.Add(Document{Key: fmt.Sprintf("round-%03d", i), Text: "shared term0 and more shared"}); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		if err := ix.Merge(); err != nil {
@@ -1369,7 +1710,7 @@ func TestANoOpCommitStillSweepsDebris(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer got.Close() //nolint:errcheck // teardown
-	if err := got.Commit(dir); err != nil {
+	if err := got.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit with nothing pending: %v", err)
 	}
 	if names := dirNames(t, dir); slices.Contains(names, debris) {
@@ -1409,7 +1750,7 @@ func TestScrubSurvivesAConcurrentMerge(t *testing.T) {
 	// caught in, so there is nothing for a merge to overtake.
 	for i := range 9 {
 		ubiquitousCorpus(t, ix, i*400, 400)
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit %d: %v", i, err)
 		}
 	}
@@ -1437,7 +1778,7 @@ func TestScrubSurvivesAConcurrentMerge(t *testing.T) {
 
 	for i := range 10 {
 		ubiquitousCorpus(t, ix, 3600+i, 1)
-		if err := ix.Commit(dir); err != nil {
+		if err := ix.Commit(t.Context(), dir); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		if err := ix.Merge(); err != nil {
@@ -1482,7 +1823,7 @@ func TestCommitAndMergeSerialize(t *testing.T) {
 		}
 		errc := make(chan error, 1)
 		go func() { errc <- ix.Merge() }()
-		cerr := ix.Commit(dir)
+		cerr := ix.Commit(t.Context(), dir)
 		merr := <-errc
 		if cerr != nil {
 			t.Fatalf("round %d: Commit alongside Merge: %v", i, cerr)
@@ -1578,7 +1919,7 @@ func TestCommitRefusesADirectorySwappedUnderIt(t *testing.T) {
 		ix := New()
 		addAll(t, ix, []Document{{Key: "mine-a", Text: "fusion"}, {Key: "mine-b", Text: "ranking"}})
 		defer ix.Close() //nolint:errcheck // teardown
-		if err := ix.Commit(mine); err != nil {
+		if err := ix.Commit(t.Context(), mine); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 	}()
@@ -1598,7 +1939,7 @@ func TestCommitRefusesADirectorySwappedUnderIt(t *testing.T) {
 		ix := New()
 		addAll(t, ix, []Document{{Key: "theirs-a", Text: "fusion"}, {Key: "theirs-b", Text: "ranking"}})
 		defer ix.Close() //nolint:errcheck // teardown
-		if err := ix.Commit(stranger); err != nil {
+		if err := ix.Commit(t.Context(), stranger); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 	}()
@@ -1610,7 +1951,7 @@ func TestCommitRefusesADirectorySwappedUnderIt(t *testing.T) {
 	}
 
 	mustAdd(t, got, Document{Key: "mine-c", Text: "scorer"})
-	if err := got.Commit(mine); !errors.Is(err, ErrCorrupt) {
+	if err := got.Commit(t.Context(), mine); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Commit into a directory swapped under the index: got %v, want ErrCorrupt", err)
 	}
 	// The stranger is untouched: refusing happens before anything is written.
@@ -1651,7 +1992,7 @@ func TestACloseFreesTheIndexToCommitElsewhere(t *testing.T) {
 	// Reused, the way the vecDim reset already promises it can be.
 	mustAdd(t, ix, Document{Key: "after", Text: "fusion"})
 	second := t.TempDir()
-	if err := ix.Commit(second); err != nil {
+	if err := ix.Commit(t.Context(), second); err != nil {
 		t.Fatalf("Commit into a fresh directory after Close: %v", err)
 	}
 	defer ix.Close() //nolint:errcheck // teardown
