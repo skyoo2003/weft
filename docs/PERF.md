@@ -740,6 +740,25 @@ window length, so a smaller `n` does not enlarge it, and keeping the same shape 
 
 Numbers are Apple M4 / Go 1.26.1 and are quoted with that machine.
 
+**Outcome, 2026-08-24: clause 1 fired.** `during` max **61 ms** against 1 second, from
+**13.072 s** on the unmodified tree — and below the `outside` max of 191 ms, so the commit
+window is no longer the worst part of the run. `shed` 4 to 0. The commit window itself did
+**not** move (11.467 s to 11.284 s), which is the design: the encode is as long as it was and
+is no longer exclusive. Every figure and its caveats are
+[FINDINGS milestone 9 §3](FINDINGS.md). What differed from what is registered above:
+
+1. **Cuts 1 and 2 were both taken.** The three `after` repetitions were not run; each side is
+   a single observation and says so beside every figure. Recorded here because a procedure
+   edited to match what happened is not a procedure.
+2. **The `before` run was kept**, which cut 3 would have dropped. It is what makes the fall
+   attributable to this round rather than to [D-016](DECISIONS.md)'s read-path change, and it
+   reproduced milestone 5 §3.3 within 4.3% on the same tree lineage.
+3. **Two comparisons the run invites are refused rather than published.** `during` max sits
+   below `outside` p50, and `outside` max fell 8.8× in a cohort this change should not have
+   touched. Both are [FINDINGS milestone 9 §4.2 and §4.3](FINDINGS.md), and both need an
+   instrument change this arm does not have: `outside` mixes reads against a one-segment index
+   with reads against a two-segment one, because the commit fires a third of the way in.
+
 ### Machine
 
 <!-- Filled in with the published numbers. A latency table without the machine it

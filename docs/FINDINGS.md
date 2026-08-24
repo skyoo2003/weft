@@ -2293,3 +2293,120 @@ mechanical churn traded against permanent surface.
 `TestIVFTrainingIsDeterministic`, `TestSegmentRoundTrip` and the golden-segment comparisons
 all pass under `-race`: a lock mode or a context poll that changed an encoding would be a
 bug, not a speedup.
+
+## 3. The read clause, judged — 61 ms against a 1-second bar, and the window did not shrink
+
+**Verdict: milestone 9's read clause is met.** The worst read due inside a commit waited
+**61 ms**, against a clause of 1 second and against **13.072 s** measured on the same tree
+lineage forty-seven minutes earlier. The procedure and the reading of every outcome were
+registered in [PERF.md](PERF.md) §5.4 before either run, which
+`git log --oneline -- docs/PERF.md` is where to check.
+
+`-writes -writedocs 20000`, `-rotations 200`, `inflight` 40, `text` arm, Apple M4 / Go
+1.26.1. `before` on `f0fcedc` (the RED commit, engine untouched) 2026-08-24 22:25:47 to
+23:10:25 KST; `after` on `cacc258` 23:12:49 to 23:56:54 KST.
+
+| | before | after | |
+| --- | --- | --- | --- |
+| unloaded p50 | 33.322 ms | 32.916 ms | 1.2% apart — the machine is the same machine |
+| arrival rate | 3.75/s | 3.80/s | derived from the unloaded p50, hence the difference |
+| commit window | 11.467 s | 11.284 s | **unchanged** |
+| the commit itself | 11.413 s | 11.233 s | unchanged |
+| **`during` max** | **13.072 s** (n=40) | **61 ms** (n=43) | **214×** |
+| `outside` p50 | 72.004 ms | 70.270 ms | unchanged |
+| `outside` p95 | 90.068 ms | 90.279 ms | unchanged |
+| `outside` max | 1.676 s | 191 ms | 8.8× — see §4.2 |
+| shed | 4 | 0 | |
+
+**So [PERF.md](PERF.md) §5.4 outcome 1 fires.** `during` max is 61 ms against a 1-second
+bar, and it is **below** `outside` max at 191 ms: the commit window is no longer the worst
+part of the run. Outcome 4 — the blocking one, a cancelled commit publishing a generation —
+did not occur, and `TestACancelledCommitPublishesNothing` is what stands over it.
+
+**The window did not shrink, and that is the design rather than a disappointment.** 11.467 s
+of held lock became 11.284 s of held lock; the encode is exactly as long as it was. What
+changed is that the long part of it is no longer exclusive. Milestone 5 §3.3's number was
+never "the commit is slow" — it was "the commit is slow *and* nothing may read during it",
+and only the second clause was worth attacking. A reader who wanted the first should read
+[FINDINGS milestone 3b](#milestone-3b--the-vector-scan) on what the partition costs to build.
+
+**The before run reproduces milestone 5 §3.3 on this tree**, which is the whole reason it was
+run: 11.467 s of window against 11.063 s and 13.072 s of worst read against 12.539 s — 3.7%
+and 4.3% apart, four milestones and one read-path change later. Without it, the fall could not
+be attributed to this round rather than to [D-016](DECISIONS.md)'s, and that misattribution is
+one this file has had to correct once already (§9 of milestone 8).
+
+## 4. Known costs
+
+### 4.1 One observation per side
+
+[PERF.md](PERF.md) §5.4 registered three `after` repetitions and cut order for dropping them.
+**Cuts 1 and 2 were both taken**: each figure above is a **single observation**, and this
+sentence rather than a later reader is where that is said. What survives the cut is the
+comparison itself — `before` and `after` are one observation each, same procedure, same
+machine, forty-seven minutes apart — and the margin the verdict rests on is 16× rather than a
+few percent.
+
+The debt is the same one milestone 5 §4.5 and milestone 8 §11 carry, marked the same way. It
+is not equally dangerous here: milestone 7 found a *load point* irreproducible, and this arm
+measures the writer's own lock rather than a knee, which is why the two lock windows agree to
+1.6% across two runs and two trees.
+
+### 4.2 `outside` fell 8.8× and this run does not prove why
+
+`outside` max went 1.676 s to 191 ms — a cohort the fix should not have touched, since it is
+by definition the reads due when no commit was running.
+
+The candidate is drainage. `loadgen.SplitByWindow` classifies a sample by its **due** time, so
+a request due a millisecond after the window closed but queued behind the backlog an
+11-second stall had built is counted `outside` and carries the stall's cost. That would make
+the before run's 1.676 s the same event as its 13.072 s, measured on the other side of a
+boundary drawn in due-time.
+
+**It is a candidate and not a finding.** Nothing here instrumented queue depth, and the
+instrument cannot separate the two populations that `outside` actually holds — which is the
+next item.
+
+### 4.3 `during` max is below `outside` p50, and that comparison is refused
+
+61 ms against 70.270 ms. Forty-three samples all landing under the median of nine thousand is
+not something forty-three samples can establish, which is exactly the floor
+[PERF.md](PERF.md) §2.3 draws — and it is why `during` p50 prints `--` rather than a number.
+
+There is also a reason the two cohorts may not be comparable at all, and it is structural
+rather than statistical. **`outside` is not one population.** The commit fires a third of the
+way into the run, so a third of that cohort is reads against a one-segment index and
+two-thirds are reads against a two-segment index holding 20,000 more documents — every point
+query walks the segment list, and `Lookup` merges across it. The `during` cohort sits in the
+transition. Comparing a maximum from one index shape against a median mixed from two is not a
+comparison, and the arm reports no split that would fix it.
+
+What the verdict rests on is therefore the **absolute** figure — 61 ms against 1,000 — and the
+**before-and-after on the same cohort**, 13.072 s to 61 ms. Neither needs the cross-cohort
+comparison, and this section is here so that nobody later reads one into the table.
+
+### 4.4 Accuracy, checked rather than assumed
+
+`make eval`: nDCG@10 **0.5826** (`text`) and **0.6211** (`text+vector`), identical to four
+decimals to the published figures and inside the −0.005 tolerance by construction. A lock
+restructuring cannot change an answer — that is an argument, and this run is the argument's
+check.
+
+## 5. Carried forward
+
+1. **`Merge` has neither a context nor a split lock.** It is a *longer* stop than a commit and
+   this round did not measure it. `weft-eval bench -writes` times a commit and no arm times a
+   merge; building that arm is what licenses the same restructuring.
+2. **`Add` blocks for a whole commit.** Recorded as a ceiling on `Index.wmu` with the way out
+   named (the capture counting the `ponytail:` note described). Owed the day a caller needs to
+   ingest during a commit.
+3. **The `-writes` arm cannot split its own baseline.** §4.3: `outside` mixes two index shapes
+   and §4.2's drainage hypothesis needs the same split to be testable. A per-third or
+   pre/post-window breakdown is the instrument change, and it is cheap.
+4. **The commit is still 11 seconds.** Nothing here attacked that, and
+   [milestone 3b](#milestone-3b--the-vector-scan)'s `ponytail:` note on `writeSegment` still
+   names the structure that would — a `vectors` section, so the assignment pass stops decoding
+   four fields to read one.
+5. **Three `ctx.Err()` polls have no test that lands on them deterministically** (the two
+   `writeSegment` section boundaries and the Lloyd-pass poll). See
+   [the TDD report](testing/weft-m9.tdd.md) for why pinning them was declined.
