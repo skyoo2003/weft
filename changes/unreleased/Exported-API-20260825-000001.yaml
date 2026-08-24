@@ -1,0 +1,13 @@
+kind: Exported API
+body: 'Three lines: `Index.Delete(string) bool`, `Index.Update(Document) (DocID, error)`
+  and `ErrNoSuchKey`. `Delete` returns a bool because the only way it fails is that
+  the key was not there, which is the shape `Resolve` already has. `Update` returns
+  the `DocID` the document now holds — the same one when it had not been committed
+  yet, a fresh one when it had — and refuses a key no live document holds rather than
+  inserting, which is `ErrDuplicateKey`''s rule read from the other side. `Len` now
+  means one past the highest assigned `DocID` rather than the document count: the two
+  differ once anything is deleted, and `Stats` is the live population. No existing
+  signature changed and `public_api.txt` is untouched.'
+time: 2026-08-25T00:00:01.000000000+09:00
+custom:
+  Issue: 17

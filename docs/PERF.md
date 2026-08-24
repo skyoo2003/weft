@@ -759,6 +759,63 @@ is no longer exclusive. Every figure and its caveats are
    instrument change this arm does not have: `outside` mixes reads against a one-segment index
    with reads against a two-segment one, because the commit fires a third of the way in.
 
+### 5.5 Milestone 11's invariance clauses, judged — registered before they are measured
+
+Milestone 11 has no performance target of its own. What it has is three **invariance**
+clauses, and their denominators are figures earlier rounds published — which makes the most
+plausible failure of this round *quietly moving one of them*. Registering the readings before
+the runs is the only thing that makes "unchanged" a finding rather than an absence.
+
+The claim under test is an argument, and it is worth stating so that the run is checking
+something falsifiable: **every tombstone check takes an empty-set fast path**, so an index
+that has never had a document deleted pays one branch per lookup rather than one per posting,
+and the evaluation corpus has no deletions at all. If that argument holds, run A and run C
+reproduce their published figures. If it does not, they will not.
+
+```bash
+# Run A — the published operating point, no deletions.
+date; caffeinate -dimsu make bench BENCHFLAGS='-rates 27.28'; date
+date; caffeinate -dimsu make bench BENCHFLAGS='-writes -writedocs 20000'; date
+
+# Run C — quality, no deletions.
+make eval
+
+# Run B — the price of a tombstone, which is an observation and not a pass line.
+# Deletes a tenth of the corpus after the copy, then the same rung as A.
+date; caffeinate -dimsu make bench BENCHFLAGS='-rates 27.28 -deletefrac 0.1'; date
+```
+
+**Run B needs a flag that does not exist yet.** `-deletefrac` is not in `cmd/weft-eval`; it is
+part of run B's cost and is named here so that "run B was cut" is legible as a decision rather
+than as an omission.
+
+**The four readings, fixed now:**
+
+1. **A reproduces M8 and M9, C reproduces M4's nDCG.** Shed 0 at 27.28 q/s, p50 ≤ 40 ms
+   (M8: 33.470 ms), ladder peak RSS ≤ 120 MiB (M8: 100.7 MiB), worst read inside a commit
+   window ≤ 1 s (M9: 61 ms), nDCG@10 within −0.005 of 0.5826 / 0.6211. → the invariance
+   clauses pass.
+2. **A misses and the miss is attributable to the tombstone checks.** The fast path is
+   leaking. **Revert and fix.** This is a blocking reading, not a publishable one — the
+   milestone's own metric table calls performance an invariant, so a regression here is a
+   defect and not a result.
+3. **A misses and the same miss reproduces on the pre-milestone tree.** Then it is drift in
+   the machine or the toolchain and not this round's. **Publish the drift and say so
+   explicitly**, with both numbers; do not let a shared miss read as a pass.
+4. **B pushes RSS past 120 MiB, or moves p50.** That is what a tombstone actually costs, and
+   it is the first number anyone has on it. It does **not** block: no clause in the PRD binds
+   it. Publish it as the opening figure on "when does a deleted fraction force a re-index",
+   which [D-019](DECISIONS.md) leaves open.
+
+**Budget and the cut order, fixed now.** A is about 1.25 h (one ladder rung plus the
+`-writes` arm), B about 0.75 h plus the flag that does not exist, C is minutes. Cut in this
+order: **B first** — the open question stays open and is published as still open; then the
+`-writes` half of A — which loses only the milestone 9 clause; **the ladder rung and `make
+eval` are not cut.** They are the two that hold this round's denominators.
+
+**One observation each, and that is written beside the numbers.** [D-013](DECISIONS.md)'s
+truncation applies unchanged: a single run is not a median and must not be called one.
+
 ### Machine
 
 <!-- Filled in with the published numbers. A latency table without the machine it

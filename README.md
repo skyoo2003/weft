@@ -25,7 +25,7 @@ If you need text + vector hybrid search today, [bleve](https://github.com/bleves
 
 ## Status
 
-Milestones 1 through 6 are done. **Not usable in production:** documents cannot be deleted, a commit holds a write lock for as long as it takes — 11 seconds for a 20,000-document batch, with reads queueing behind it — and sustained query load collapses at 27 queries per second on the machine measured rather than degrading.
+Milestones 1 through 6 are done. **Not usable in production:** a commit holds a write lock for as long as it takes — 11 seconds for a 20,000-document batch, with reads queueing behind it — and sustained query load collapses at 27 queries per second on the machine measured rather than degrading.
 
 | # | Milestone | State |
 | --- | --- | --- |
@@ -206,7 +206,9 @@ make bench      # milestone 5's latency ladder (needs a prepared corpus, ~90 min
 | --- | --- |
 | Sustained throughput collapses rather than degrades | At 27 queries/s — its own sequential rate — p50 goes 39 ms to 1.27 s, 14% of queries are shed and RSS goes 126 to 853 MiB. The wall is live heap under concurrency: every candidate decodes a whole record. Usable throughput is somewhere in 13.6–27.3/s: [FINDINGS milestone 5 §3.2](docs/FINDINGS.md). |
 | A commit is slow, and since milestone 9 it is only slow | Writing a 20,000-document batch still holds the writer for 11.3 s and nothing bounds that. What it no longer does is stop reads: the worst read due inside that window waits **61 ms**, from 13.072 s on the same measurement before the lock was split. `Commit` takes a `context.Context` and can be called off. What still blocks for a whole commit is `Add`, and `Merge` is still an uncancellable stop longer than a commit: [FINDINGS milestone 9](docs/FINDINGS.md), [D-017](docs/DECISIONS.md). |
-| No deletion | Documents can be added, never removed. Tombstones and DocID namespacing are one design problem and neither is built: [FINDINGS, milestone 2 §4](docs/FINDINGS.md). |
+| Deletion reclaims nothing | `Delete` and `Update` exist and a deleted document is invisible to every scorer, but its record, key and postings stay on disk and every `Merge` copies them forward. Emptying the slot would mean renumbering, and `DocID` is what `TopK` breaks ties on, what keeps posting lists ascending, and what lets a merge be a concatenation. A full re-index is the only compaction: [D-019](docs/DECISIONS.md). |
+| An update spends a DocID | Updating a *committed* document tombstones the old record and appends a new one, so `Len` grows while `Stats` does not. The ceiling `Add` enforces is 2³²−1 ids, not documents, and a corpus updated hot enough reaches it first. Unmeasured. |
+| Vector recall falls as documents are deleted | `Index.Nearest` promises at least k candidates when the index holds k vectors. Tombstones are filtered after a segment has widened its own probe, so fewer than k can survive — the widening loop does not know about them: [D-019](docs/DECISIONS.md). |
 | Caller-held scorer data is not persisted | A signal whose data is not an `engine.Document` field lives in your program, so `Commit` does not write it and `Open` does not restore it. Rebuild it keyed by `Document.Key` after every open. |
 | Durability stops at fsync | Atomic against process death; best-effort against power loss, with no platform write barrier: [FORMAT.md §6](docs/FORMAT.md). |
 | No early termination | The top-k candidate interface forecloses WAND-style skipping. Cost and extension path: [FINDINGS §3.1](docs/FINDINGS.md). |

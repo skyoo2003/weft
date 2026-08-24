@@ -1,15 +1,16 @@
-# On-disk format, version 3
+# On-disk format, version 4
 
 `pkg/engine/segment.go`, `pkg/engine/seek.go`, `pkg/engine/ivf.go` and
 `pkg/engine/persist.go` are what the bytes actually obey. Where this document and
 those files disagree, the document is wrong.
 
 Milestone 2 wrote version 1; milestone 3a replaced it with version 2; milestone 3b
-appended one section and made it version 3. It is written down because a format is
+appended one section and made it version 3; milestone 11 added a file at the index
+root and made it version 4. It is written down because a format is
 the one thing in weft that cannot be quietly rewritten — code is replaceable, a
 file on a user's disk demands a migration.
 
-**Versions 2 and 3 are both read. Version 1 is refused, not migrated.** `Open`
+**Versions 2, 3 and 4 are all read. Version 1 is refused, not migrated.** `Open`
 reports `ErrBadVersion` for v1. That reason is not technical: weft has no users,
 and the only v1 directory that existed was rebuildable from its sources. That
 argument rests on a user count and is therefore available exactly once —
@@ -42,6 +43,7 @@ reader fixes that.
 ```text
 dir/
   MANIFEST              the only entry point; one atomic rename publishes a commit
+  dead-000007           the tombstone set, whole                  ← v4
   seg-000007/           one generation, immutable once the manifest names it
     meta                collection statistics — the BM25 snapshot
     docs                every document, in DocID order
@@ -52,11 +54,18 @@ dir/
     ivf                 centroids + inverted lists                ← v3
 ```
 
-**The version decides the section list.** A v2 segment has six files, a v3 segment
-has seven, and every frame inside one segment must declare the same version. A v3
-segment missing `ivf` is damage, not an older segment; a v2 segment with an `ivf`
-file beside it has a file nothing names. `meta` is opened first for exactly this
-reason — its frame is what says which list applies.
+**The version decides the section list.** A v2 segment has six files; v3 and v4
+segments have seven, and every frame inside one segment must declare the same
+version. A v3 segment missing `ivf` is damage, not an older segment; a v2 segment
+with an `ivf` file beside it has a file nothing names. `meta` is opened first for
+exactly this reason — its frame is what says which list applies.
+
+**Version 4 added no section to a segment.** What it added is `dead-<gen>`, beside
+`MANIFEST` rather than inside a generation, so a v3 segment and a v4 segment are
+identical in shape and a directory holding both is the ordinary state of one that
+has been committed to since the upgrade. The reason it is at the root and not in a
+segment is that **a commit which only deletes documents publishes no segment** —
+there would be nowhere to put it.
 
 A commit writes **one segment holding what was added since the last commit**, and
 leaves the previous generations' files untouched. A segment stores ids local to
@@ -149,6 +158,7 @@ segment count   uvarint
   segment name  string      e.g. "seg-000007"
   base          uvarint     the first DocID this segment owns
   count         uvarint     how many documents it holds
+tombstones      uvarint     how many ids dead-<gen> holds             ← v4
 ```
 
 The bases must tile `[0, total)` contiguously and in ascending order. A list that
@@ -156,12 +166,19 @@ did not would give two segments overlapping ids, and a reader would answer with
 whichever it walked into first — a wrong document, not an error — so this is
 checked while the list is read rather than afterwards.
 
-Some published segment must be named for the current generation, and none may be
-named for the next one: each write clears `seg-<gen+1>` before using it, so a
-manifest already naming it would aim that removal at live data. Version 1 could say
-something stronger — the *last* segment is the generation's — because a commit
-published exactly one; a merge publishes its result at the front, since it replaces
-the oldest run.
+No segment may be named for the next generation, and none may be named past the
+current one. The first is what makes a write safe: each clears `seg-<gen+1>`
+before using it, so a manifest already naming it would aim that removal at live
+data. The second replaces a narrower rule versions 1 through 3 could state —
+*some* segment is named for the current generation — which version 4 cannot keep,
+because a commit that only deletes documents publishes a generation and no segment
+of its own, republishing the list it inherited. What stands in its place is
+stronger where it matters: every name is one some commit produced, and none is
+past the generation claiming to have written it, so a doctored manifest cannot
+smuggle in a segment named for a generation that has not happened. Version 1 could
+say something stronger still — the *last* segment is the generation's — because a
+commit published exactly one; a merge publishes its result at the front, since it
+replaces the oldest run.
 
 Segment names come off disk and are therefore validated, not trusted: a name must
 start with `seg-`, contain no path separator, and equal its own basename. A
@@ -173,12 +190,23 @@ manifest naming `seg-../../etc` is refused rather than followed.
 document count  uvarint     ≤ 2³²−1, the DocID ceiling
 total length    uvarint     Σ document token counts
 vector width    uvarint     0 when no document carries a vector
+live count      uvarint     ≤ document count; how many keys are indexed  ← v4
 ```
 
-These three are the collection statistics BM25 reads, written under the same read
-lock as the documents, so a commit is a point-in-time snapshot with its statistics
-intact ([FINDINGS §4.4](FINDINGS.md)). `Open` cross-checks all three against the
-`docs` file and refuses a segment whose meta disagrees with its own documents.
+The first three are the collection statistics BM25 reads, written under the same
+read lock as the documents, so a commit is a point-in-time snapshot with its
+statistics intact ([FINDINGS §4.4](FINDINGS.md)). `Open` cross-checks all three
+against the `docs` file and refuses a segment whose meta disagrees with its own
+documents.
+
+The fourth is version 4's, and it exists to replace a cross-check deletion took
+away. Every document is written, tombstones included — a `DocID` is a position in
+`docs`, so skipping one would renumber everything behind it — but only the live
+ones get a `keys` entry, so "the keys table indexes as many keys as meta counts
+documents" stops being true. This is what it indexes instead. It is the count at
+*write* time and not a claim about now: documents are deleted after their segment
+is sealed and nothing rewrites a sealed segment. A v3 segment has no such field
+and every document it holds was live, so it reads as the document count.
 
 ### docs
 
@@ -367,6 +395,39 @@ becomes a candidate, the answer becomes exact, and the query becomes slow. That 
 [D-006](DECISIONS.md)'s rule where absence is the safest answer, and `Scrub` is
 what names the damage.
 
+### dead-&lt;gen&gt; (v4)
+
+```text
+tombstone count uvarint     must equal the count MANIFEST carries
+  id delta      uvarint     first absolute, then strictly positive gaps
+```
+
+The one file that is not part of a segment. It holds the whole tombstone set of
+the index, ascending, and it is republished under the new generation by every
+`Commit` and every `Merge` — so the live generation's file is the entire set and a
+reader needs exactly one. `prune` removes every other.
+
+Deltas rather than fixed-width ids because nothing seeks into this section: every
+reader of it wants all of it, unlike `docoff` and `keys`. A corpus with a large
+fraction deleted has small gaps, so the file is about a byte per tombstone.
+
+**It carries no per-entry checksum, and its frame checksum is verified eagerly.**
+That is the opposite of the choice made for the sections inside a segment, and the
+size is why: this section is the size of the tombstone set, not of the corpus. What
+it buys is that the one structure standing between a query and a deleted document
+cannot be quietly wrong.
+
+**Absence is corruption, not an empty set.** `MANIFEST` carries the count, so a
+file lost to a bad prune or a partial copy is refused rather than read as "nothing
+was deleted" — which would hand back every document it named. A commit writes the
+file even when the set is empty, so that the one state which must not be ambiguous
+is not the same state as a file that went missing.
+
+**Nothing here reclaims anything.** A tombstoned document keeps its record, its
+`docs` bytes and its postings, and every `Merge` copies them forward. Emptying the
+slot would mean renumbering, and ids are what `TopK` breaks ties on, what keeps
+posting lists ascending, and what lets a merge be a concatenation. §8 prices it.
+
 ## 5. What a reader rejects
 
 Bytes from disk are a trust boundary. Every failure is an error wrapping
@@ -433,6 +494,19 @@ today, and a reader demanding the two agree would refuse every segment written
 before a tokenizer change. The invariants above are the ones the scorers actually
 rest on; term-to-text correspondence is not one of them, and buying it would cost
 a full re-tokenization of the corpus on every `Open`.
+
+**Version 4's own rejections**, all of them cases where the alternative is a
+plausible wrong answer rather than a crash:
+
+| Rejected | Why it matters |
+| --- | --- |
+| `dead-<gen>` missing while `MANIFEST` counts tombstones | Nothing names this file, so absence would otherwise read as "nothing was deleted" and every deleted document would come back |
+| its count disagreeing with `MANIFEST`'s | The two are written by one commit and read by different paths; a disagreement means one is not describing this index |
+| a repeated id | Counted twice, the live document count is one too low for the life of the index |
+| an id at or past the corpus size | Damage, or a tombstone file copied in from a larger index — where it hides whichever documents land on those ids here |
+| `keys` indexing a number of entries other than meta's live count | The check that "one key, one document" replaced once tombstones made the document count the wrong denominator |
+| two *live* records carrying one Key | One live holder per key is what `Resolve` rests on. Two records carrying one key is legal and is what every update leaves behind; two live ones is a state neither `Add` nor `Update` could produce |
+| a segment named past the generation claiming to have written it | A doctored manifest naming a generation that has not happened |
 
 ## 6. Atomicity and durability
 
@@ -551,12 +625,29 @@ Two things that follows from, and one it does not:
    old version stays readable by construction. A version that retypes or reorders
    an existing field gets no such discount and owes the converter.
 
+8. **Version 4 paid it the same way, and more cheaply still.** v4 appends a file
+   at the index *root* and one uvarint to each of two existing sections, all at the
+   end of their payloads. A v3 segment is not a v4 segment missing a section — it is
+   the same seven files — and the two fields it lacks have answers that need no
+   branch of their own: no tombstone file means nothing was deleted, and a `meta`
+   with no live count means every document it held was live. So the lesson §7.7
+   drew has a sharper form: **a root-level file costs less than a segment section**,
+   because it does not enter the per-version section list at all. What v4 could not
+   avoid is the version bump itself, and that is the *point* rather than the price —
+   nothing names the new file, so a build that predates it would not look for it and
+   would answer with every deleted document still sitting in the segments. Stamping
+   `MANIFEST` with 4 makes such a build refuse the whole directory at the first
+   frame it reads.
+
 ## 8. Known limits
 
 | Limit | Value | Where it goes |
 | --- | --- | --- |
 | Documents per index | 2³²−1 | `DocID` is uint32; `Add` refuses past it |
-| Deletion | Not supported | Tombstones and generations ([FINDINGS §4.3](FINDINGS.md)) |
+| Deletion reclaims nothing | A deleted document keeps its record, its bytes and its postings forever | Renumbering is the only alternative and ids are load-bearing; a full re-index is the only compaction ([FINDINGS milestone 11](FINDINGS.md)) |
+| An update spends a DocID | Updating a committed document tombstones it and appends; the ceiling is 2³²−1 ids, not documents | A corpus updated hot enough exhausts ids before it exhausts documents. Unmeasured |
+| `Nearest` weakens under deletion | It promised at least k candidates when k vectors exist; tombstones are filtered after the segment widened its probe, so fewer may come back | Recall falls as the deleted fraction rises. The widening loop would have to know about tombstones |
+| A corpus-walking scorer still walks tombstones | `Len` is the id bound, so `scorer/recency` visits deleted ids and skips them | The cost of keeping `Len` meaning what a scorer needs it to mean ([FINDINGS milestone 11 §2](FINDINGS.md)) |
 | DocID namespacing | None — a DocID means nothing outside its index | Unresolved; a DocID is meaningful only inside one index directory |
 | Vector search is approximate | recall@10 = 0.992 against a brute-force scan on the evaluation corpus | The screw is `nprobe`, and it is not exposed. [EVAL §5](EVAL.md) carries the curve |
 | A vector query's working set | 210 MiB per query of a 626 MiB `docs` section | The partition cut the arithmetic 5.6× and the bytes 3.0×. Why the second number is so much worse than the first, and what would actually fix it, is [FINDINGS milestone 3b](FINDINGS.md) |
