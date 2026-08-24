@@ -2410,3 +2410,45 @@ check.
 5. **Three `ctx.Err()` polls have no test that lands on them deterministically** (the two
    `writeSegment` section boundaries and the Lloyd-pass poll). See
    [the TDD report](testing/weft-m9.tdd.md) for why pinning them was declined.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 11 — Deletion and update
+
+> In progress. The verdict sections are written as the round produces them; what
+> is here already is what has been paid for.
+
+## 1. The exported API cost, recorded before the golden moved
+
+`architecture_test.go` asks that a change to engine's surface be a deliberate
+edit rather than a passing one, and that the author write down what it bought
+before refreshing the golden. This is that entry.
+
+| Line added to `pkg/engine/testdata/engine_api.txt` | What a caller gets |
+| --- | --- |
+| `method Index.Delete(string) bool` | Removes the document with a Key and reports whether there was one |
+
+`bool` rather than `error`: the only way this fails is that the key was not
+there, and a segment too damaged to answer reads as absence everywhere else in
+this package ([D-006](DECISIONS.md)). It is the same shape `Resolve` already has.
+
+`public_api.txt` is unchanged, `pkg/fusion` is unchanged, and no scorer
+implementation file changed — which is the milestone's actual claim and is
+judged in full below once the round closes.
+
+## 2. What `Len` stopped meaning
+
+`Len` counted documents and was also one past the highest `DocID`. A tombstone
+makes those two different numbers, and this round kept `Len` as the **id bound**
+and moved the population to `Stats`.
+
+The split is forced by a scorer that never mentions deletion. `scorer/recency`
+walks `for i := range ix.Len()` and skips whatever `Doc` refuses; narrowing `Len`
+to the live count would stop that walk short of the newest documents and return a
+wrong ranking rather than a slow one. `Stats` is what BM25 normalizes against, so
+leaving tombstones in *that* number is what would be quietly wrong. Each half now
+answers the caller that needs it.
+
+The cost is that a corpus with most of its documents deleted is still walked in
+full by a scorer shaped like `recency`, because nothing here reclaims an id.
