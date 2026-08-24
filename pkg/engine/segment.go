@@ -32,13 +32,25 @@ import (
 // stable across versions: a future reader can only reject what it cannot
 // parse if the version is always in the same place.
 const (
-	// formatVersion 3 is milestone 3b's: version 2 plus the ivf section, with
+	// formatVersion 4 is milestone 11's: version 3 plus a `dead-<gen>` file at
+	// the index root, and one uvarint on `MANIFEST`. Nothing inside a segment
+	// moved, so segSectionsFor hands v3 and v4 the same seven sections.
+	//
+	// The bump is not bookkeeping for the new file — it is the reason the file is
+	// safe to add at all. `MANIFEST` does not name it, so a build that predates
+	// tombstones would not look for it, would find every deleted document still
+	// sitting in the segments, and would hand them back. Stamping the manifest
+	// with 4 makes that build refuse the whole directory at the first frame it
+	// reads, rather than at whichever query happened to reach a resurrected
+	// document.
+	//
+	// formatVersion 3 was milestone 3b's: version 2 plus the ivf section, with
 	// nothing else changed. Version 2 was milestone 3a's, and version 1 wrote
 	// documents as a bare run of variable-length records and rebuilt byKey by
 	// reading all of them, so neither a DocID nor a Key could reach its document
 	// without decoding every document in front of it — no arrangement of a lazy
 	// reader fixes that, only different bytes do.
-	formatVersion = 3
+	formatVersion = 4
 
 	// minFormatVersion is the oldest version this build reads.
 	//
@@ -68,6 +80,11 @@ const (
 	kindDocoff   byte = 6
 	kindKeys     byte = 7
 	kindIVF      byte = 8
+
+	// kindDead is format v4's tombstone list. It is the first section that is
+	// not part of a segment: the set it holds spans the whole index, and a
+	// commit that only deletes documents publishes no segment to put it in.
+	kindDead byte = 9
 
 	// blockSize is how many postings share one block and one
 	// (maxDocID, maxTF, minDocLen) header on disk. The metadata is written now
@@ -168,10 +185,15 @@ var segSections = []segSection{
 //
 // A count per version rather than a prefix of the newest one, and that is not
 // bookkeeping. "Everything before the last entry" reads as v2's list only while
-// v3 is the newest: a version 4 appending an eighth section — the very migration
+// v3 is the newest: a version appending an eighth section — the very migration
 // §7.7 of FORMAT.md recommends — would hand v2 seven sections and have openSegment
 // demand an ivf file from a milestone 3a segment. Adding a version is one line
 // here; one that removes or reorders a section needs a list rather than a length.
+//
+// Version 4 needed no line at all, which is the cheaper half of that lesson: what
+// it added lives at the index root rather than inside a segment, so v3 and v4
+// segments are byte-identical in shape and a v3 segment beside a v4 one is the
+// ordinary state of a directory that has been committed to since the upgrade.
 //
 // The capacity is cut with the returned length, so a caller that appends to this
 // cannot write through into segSections itself — which every other reader of that

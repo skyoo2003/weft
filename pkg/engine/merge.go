@@ -294,7 +294,11 @@ func (ix *Index) Merge() error {
 		return fmt.Errorf("merge %s: %w", ix.dir, err)
 	}
 
-	gen, live, err := readManifest(root)
+	// The tombstone count the directory publishes is not read back: this index's
+	// own set is the authority, sameDir has just established that the directory
+	// is the one these segments came from, and Merge holds the write lock so the
+	// set cannot move underneath it.
+	gen, live, _, err := readManifest(root)
 	if err != nil {
 		return fmt.Errorf("merge %s: %w", ix.dir, err)
 	}
@@ -346,8 +350,21 @@ func (ix *Index) Merge() error {
 		return fmt.Errorf("merge %s: %w", seg, err)
 	}
 
+	// The tombstone set, republished under the new generation before the manifest
+	// names it. Its contents do not change: a merge concatenates adjacent
+	// segments and renumbers nothing, which is the same property that keeps every
+	// ranking — so every id in the set still names the document it named.
+	//
+	// It has to be rewritten all the same, because prune keeps exactly the live
+	// generation's file and this generation is about to be a different number.
+	if err := writeDead(root, gen+1, ix.dead.all()); err != nil {
+		replacement.close() //nolint:errcheck // already returning an error
+		return fmt.Errorf("merge %s: %w", ix.dir, err)
+	}
+	syncDir(root)
+
 	published := append([]segInfo{merged}, live[k:]...)
-	if err := writeManifest(root, gen+1, published); err != nil {
+	if err := writeManifest(root, gen+1, published, ix.dead.n); err != nil {
 		replacement.close() //nolint:errcheck // already returning an error
 		return fmt.Errorf("merge %s: %w", ix.dir, err)
 	}
@@ -360,6 +377,6 @@ func (ix *Index) Merge() error {
 		s.close() //nolint:errcheck // the merge is published; there is nothing to undo
 	}
 
-	prune(root, published)
+	prune(root, published, gen+1)
 	return nil
 }

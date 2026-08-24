@@ -744,6 +744,36 @@ func patchVersion(t *testing.T, path string, v byte) {
 	}
 }
 
+// downgradeManifest rewrites the manifest as an older version's bytes: the
+// version stamp, and — for anything below 4 — without the tombstone count that
+// version appended.
+//
+// Only a zero count is stripped. A directory that actually holds tombstones has
+// documents an older reader must not see, which is the whole reason version 4
+// exists, so simulating that downgrade would be simulating the bug.
+func downgradeManifest(t *testing.T, path string, v byte) {
+	t.Helper()
+	if v >= 4 {
+		patchVersion(t, path, v)
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The count is the last thing in the payload and the checksum is the last
+	// four bytes of the file, so it is the byte in front of them.
+	if n := b[len(b)-5]; n != 0 {
+		t.Fatalf("%s records %d tombstones; a version %d reader could not express them", path, n, v)
+	}
+	b = append(b[:len(b)-5], b[len(b)-4:]...)
+	b[len(segMagic)] = v
+	binary.LittleEndian.PutUint32(b[len(b)-4:], crc32.Checksum(b[:len(b)-4], segCRC))
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOtherVersionsAreRefusedNotMisread(t *testing.T) {
 	dir, _ := commitTiny(t)
 	for _, path := range segmentFiles(t, dir) {
@@ -813,7 +843,7 @@ func FuzzSegmentDecoding(f *testing.F) {
 		_, _, vecDim, _ := decodeMeta(&segReader{name: metaFile, b: meta})
 		offs, _ := parseDocOffsets(&segReader{name: docoffFile, b: docoff})
 		found := map[string]scrubbedKey{}
-		docLen, _, _, err := scrubDocs(&segReader{name: docsFile, b: docs}, offs, "seg", found)
+		docLen, _, _, err := scrubDocs(&segReader{name: docsFile, b: docs}, offs, segInfo{name: "seg"}, found, &deadSet{})
 		if err != nil {
 			docLen = fuzzDocLen()
 		}

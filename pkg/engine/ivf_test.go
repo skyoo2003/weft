@@ -561,7 +561,20 @@ func downgradeToV2(t *testing.T, dir string) {
 			}
 		}
 	}
-	patchVersion(t, filepath.Join(dir, manifestName), 2)
+	// The tombstone file and the manifest's count of it are version 4's, so a
+	// version 2 directory has neither. Removing the file and stripping the count
+	// is the same "produce the bytes rather than keep a fixture" argument the ivf
+	// section above gets.
+	deads, err := filepath.Glob(filepath.Join(dir, deadPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range deads {
+		if err := os.Remove(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	downgradeManifest(t, filepath.Join(dir, manifestName), 2)
 }
 
 // TestAV2SegmentOpensAndAnswersExactly is the dual reader, and the reason the

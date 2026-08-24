@@ -51,7 +51,7 @@ func republish(t *testing.T, dir string, gen uint64, segs []segInfo) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := writeManifest(root, gen, segs); err != nil {
+	if err := writeManifest(root, gen, segs, 0); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -170,7 +170,7 @@ func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	}
 	// A reader must not delete a directory a concurrent Commit could be
 	// filling in right now, so the orphan is still there after the Open.
-	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "dead-000001", "seg-000001", "seg-000002"}) {
 		t.Fatalf("Open touched the directory: %v", names)
 	}
 	// The next commit is generation 2, so it writes seg-000002 — the orphan's
@@ -184,7 +184,7 @@ func TestUnmanifestedSegmentIsInvisible(t *testing.T) {
 	if err := got.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "dead-000002", "seg-000001", "seg-000002"}) {
 		t.Fatalf("orphan segment not swept by the next commit: %v", names)
 	}
 	// The name survived; the contents did not.
@@ -212,7 +212,7 @@ func TestSuccessiveCommitsAccumulateGenerations(t *testing.T) {
 			t.Fatalf("Commit %d: %v", i+1, err)
 		}
 	}
-	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002", "seg-000003"}) {
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "dead-000003", "seg-000001", "seg-000002", "seg-000003"}) {
 		t.Fatalf("after three commits: %v, want all three generations", names)
 	}
 	got, err := Open(dir)
@@ -245,7 +245,7 @@ func TestCommitAfterOpenContinuesTheGenerations(t *testing.T) {
 		t.Fatalf("second Open: %v", err)
 	}
 	assertReadAPIsAgree(t, second, got)
-	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "dead-000002", "seg-000001", "seg-000002"}) {
 		t.Fatalf("generations did not continue past the restart: %v", names)
 	}
 }
@@ -981,7 +981,7 @@ func publishedGen(t *testing.T, dir string) uint64 {
 		t.Fatalf("OpenRoot: %v", err)
 	}
 	defer root.Close() //nolint:errcheck // teardown
-	gen, _, err := readManifest(root)
+	gen, _, _, err := readManifest(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0
 	}
@@ -1167,7 +1167,7 @@ func TestScrubAfterACancelledCommit(t *testing.T) {
 	if err := ix.Commit(t.Context(), dir); err != nil {
 		t.Fatalf("Commit after a cancelled one: %v", err)
 	}
-	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "seg-000001", "seg-000002"}) {
+	if names := dirNames(t, dir); !slices.Equal(names, []string{"MANIFEST", "dead-000002", "seg-000001", "seg-000002"}) {
 		t.Fatalf("directory after the sweep: %v", names)
 	}
 	if err := Scrub(dir); err != nil {
@@ -1580,7 +1580,7 @@ func TestOpenRereadsAManifestAMergeReplaced(t *testing.T) {
 	}
 	defer root.Close()
 	// What a reader that got here before the merge is holding.
-	_, stale, err := readManifest(root)
+	staleGen, stale, staleDead, err := readManifest(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1589,7 +1589,7 @@ func TestOpenRereadsAManifestAMergeReplaced(t *testing.T) {
 		t.Fatalf("Merge: %v", err)
 	}
 
-	if _, err := mapGeneration(root, dir, stale); !errors.Is(err, errSegmentGone) {
+	if _, err := mapGeneration(root, dir, stale, staleGen, staleDead); !errors.Is(err, errSegmentGone) {
 		t.Fatalf("mapping the manifest a merge replaced: got %v, want errSegmentGone", err)
 	}
 	// And it is still ErrCorrupt to every caller that only asks what kind of
@@ -1866,7 +1866,7 @@ func TestScrubRereadsAManifestAMergeReplaced(t *testing.T) {
 	}
 	defer root.Close()
 	// What a scrub that got here before the merge is holding.
-	_, stale, err := readManifest(root)
+	staleGen, stale, staleDead, err := readManifest(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1874,7 +1874,7 @@ func TestScrubRereadsAManifestAMergeReplaced(t *testing.T) {
 		t.Fatalf("Merge: %v", err)
 	}
 
-	if err := scrubGeneration(root, stale); !errors.Is(err, errSegmentGone) {
+	if err := scrubGeneration(root, stale, staleGen, staleDead); !errors.Is(err, errSegmentGone) {
 		t.Fatalf("scrubbing the manifest a merge replaced: got %v, want errSegmentGone", err)
 	}
 	// The directory was sound throughout, which is the whole complaint.
