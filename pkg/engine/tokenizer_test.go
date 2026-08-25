@@ -353,7 +353,9 @@ func TestGuardPassesACorpusWithNoTextToJudge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with a different tokenizer over a textless corpus: %v", err)
 	}
-	defer got.Close() //nolint:errcheck // test cleanup
+	if err := got.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 }
 
 // TestTokenizeIsStillThePackageDefault keeps engine.Tokenize exported and
