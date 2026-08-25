@@ -18,7 +18,8 @@ import (
 )
 
 // Sentinel errors from Open, and from Commit when an existing directory is
-// unreadable. Both are properties of bytes on disk, not of the index.
+// unreadable. The first two are properties of bytes on disk, not of the index;
+// the third is the one disagreement between the two that can be checked.
 var (
 	// ErrCorrupt reports a file that failed its checksum, ended mid-value, or
 	// decoded into a state the write path could never have produced. Callers
@@ -31,6 +32,23 @@ var (
 	// the bytes mean something different, and "probably compatible" is how a
 	// wrong index gets loaded silently.
 	ErrBadVersion = errors.New("engine: unsupported index format version")
+
+	// ErrTokenizerMismatch reports a directory whose documents were indexed by a
+	// tokenizer other than the one this Open was given.
+	//
+	// It is the same trade ErrDimMismatch makes, one layer over: caught here it
+	// is one refused Open, and not caught it is every query answering zero hits
+	// for the life of the index — because the query's terms and the corpus's
+	// terms are then different strings and no posting list is ever consulted.
+	// There is nothing in a zero-hit result to tell a caller which of the two
+	// happened, which is what makes the silence worth an error.
+	//
+	// The check reads bytes that were already on disk rather than a recorded
+	// tokenizer name, and what it can and cannot catch is published: see
+	// checkTokenizer and docs/FORMAT.md section 8. It is a new way for a
+	// directory that opened yesterday to fail today, and the thing traded for
+	// that is the query that used to answer nothing.
+	ErrTokenizerMismatch = errors.New("engine: documents were indexed by a different tokenizer")
 )
 
 const (
@@ -575,7 +593,11 @@ func (ix *Index) adopt(root *os.Root, info segInfo) error {
 // delete a live writer's work and leave the directory naming a segment that no
 // longer exists. Until the next Commit, unnamed debris costs disk and nothing
 // else.
-func Open(dir string) (*Index, error) {
+// A directory committed with one tokenizer and opened with another is refused
+// with ErrTokenizerMismatch rather than answering every query with nothing. Pass
+// the same WithTokenizer the commit was made with, or none if it was made with
+// none.
+func Open(dir string, opts ...Option) (*Index, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
@@ -595,7 +617,7 @@ func Open(dir string) (*Index, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open %s: %w", dir, err)
 		}
-		ix, err := mapGeneration(root, dir, m)
+		ix, err := mapGeneration(root, dir, m, opts...)
 		if err == nil {
 			return ix, nil
 		}
@@ -611,8 +633,11 @@ func Open(dir string) (*Index, error) {
 const openAttempts = 3
 
 // mapGeneration maps every segment one manifest names, in order.
-func mapGeneration(root *os.Root, dir string, m manifest) (*Index, error) {
-	ix := New()
+//
+// Variadic rather than a slice parameter so that a caller with no options — the
+// tests reaching in from inside the package — writes the call it already wrote.
+func mapGeneration(root *os.Root, dir string, m manifest, opts ...Option) (*Index, error) {
+	ix := New(opts...)
 	for _, info := range m.segs {
 		s, err := openSegment(root, info.name, info.base)
 		if err != nil {
