@@ -2860,3 +2860,102 @@ The replacement tokenizer does not ship. A character bigram over Hangul
 syllable runs lives in the test file and in `ExampleWithTokenizer`, which is
 what an adopter's own tokenizer looks like plugged in; weft shipping a second
 one would make the seam a menu instead of a seam.
+
+## 2. The spend, against the budget
+
+**Seven diff lines against a 5-to-7 budget, and `public_api.txt` did not move.**
+
+| Item | Budgeted | Spent | |
+| --- | --- | --- | --- |
+| `type Tokenizer func(string) []string` | +1 | +1 | |
+| `type Option` and its members | +1 to +2 | **+1** | `type Option func(*Index)` — a func type renders on one line, so the low end |
+| `func WithTokenizer(Tokenizer) Option` | +1 | +1 | |
+| `method Index.Tokenize(string) []string` | +1 | +1 | |
+| `var ErrTokenizerMismatch` | +1 | +1 | |
+| `func New(...Option) *Index` | 1 changed | 1 changed | |
+| `func Open(string, ...Option) (*Index, error)` | 1 changed | 1 changed | |
+| **`engine_api.txt`** | **5 to 7** | **5 added, 2 changed = 7** | Top of the range, nothing unbudgeted |
+| **`public_api.txt`** | **0** | **0** | Nothing outside `pkg/engine` gained a name |
+
+Nothing was overspent, so there is nothing here to excuse. The one estimate that
+was a range came in at its low end: `Option` is a function type, and
+`architecture_test.go`'s renderer puts a function type's whole signature on the
+declaration line rather than listing members under it.
+
+The rest of the invariant table registered in [§1.2](#12-the-invariants-fixed-in-advance) held:
+
+```text
+git diff --stat pkg/fusion/                                              (empty)
+git diff --stat -- pkg/scorer/graph pkg/scorer/recency pkg/scorer/vector  (empty)
+```
+
+`Scorer`, `Fuser`, `Candidate`, `Document` and `Query` are byte-identical, which
+the golden file above is the mechanical proof of — every field and every method
+signature of all five is recorded in it and none of those lines moved.
+
+## 3. The falsification condition, judged
+
+**It did not fire.** `pkg/scorer/text/text.go` is a nine-line diff of which one
+line is code:
+
+```diff
+-    terms := engine.Tokenize(q.Text)
++    terms := s.ix.Tokenize(q.Text)
+```
+
+The other eight lines are the comment saying why. Read against the two readings
+registered in [§1.3](#13-where-the-falsification-condition-is-read): **the
+scorer asks the index and does not receive a tokenizer.** `s.ix.Tokenize` sits
+beside `s.ix.Stats` and `s.ix.LookupInto` in the same function and is the same
+kind of call — a question the index answers out of state it owns. Nothing was
+added to `Query`, nothing was added to the `Scorer` interface, and the dependency
+direction is where it was: `engine` still imports no scorer, which
+`TestNeitherEngineNorFusionImportsAScorer` checks from the import graph rather
+than from anybody's reading of the code.
+
+What that buys is stated narrowly, because the claim is narrow. **There is one
+tokenizer per index and no way to configure the index side and the query side
+apart.** `Add`, `Update`, `Update`'s re-tokenization of a replaced document's old
+text, and `scorer/text` all call `Index.Tokenize`;
+`TestTokenizeSeamIsSharedByIndexAndQuery` records the strings that reached the
+seam and asserts all four are there, so this is held mechanically rather than by
+inspection.
+
+## 4. The guard lost a check under test, and the ceiling widened
+
+[§1.4](#14-the-guard-is-a-recomputation-not-a-stored-name) registered a
+three-step check. **Two shipped. The third was written, run, and taken back
+out**, and this is where that is published rather than quietly edited into the
+registration.
+
+The third step compared every recomputed term against the segment's terms index.
+It failed three existing tests — `TestALyingTermOffsetIsNeverFollowed`,
+`TestAnImpossibleFrequencyIsRefused`, `TestALyingBlockMinimumIsRefused` — each of
+which replaces a segment's whole `terms` section with a doctored one-entry
+payload and then asserts that `Open` **succeeds** and the damage surfaces as
+absence at query time.
+
+Those tests are right and the check was wrong, for two reasons that are the same
+reason twice:
+
+- **The bytes are ambiguous.** A terms section that does not claim a live
+  document's terms is what a replaced tokenizer looks like *and* what a damaged
+  or doctored terms section looks like. Reporting `ErrTokenizerMismatch` for the
+  second is a wrong diagnosis handed to a caller who would then go looking for a
+  tokenizer they never changed.
+- **It moved work back into `Open`.** Milestone 3 stopped verifying sections
+  `Open` does not need, and [D-006](DECISIONS.md) settled which way damage on a
+  lazy path reports: as absence, with `Scrub` as the thing that names it. The
+  third step reversed that for one section.
+
+**What the loss costs, stated exactly.** The guard now compares a token *count*
+and nothing else, so **a tokenizer that preserves token count passes whatever it
+does to the terms** — and a stemmer is precisely that shape, one token in and one
+token out. The registration's own ceiling list already published "the guard
+catches the large failure and not a stemmer added to an otherwise identical
+tokenizer", so the published ceiling is unchanged; what changed is that it is now
+exactly true rather than conservative. `docs/FORMAT.md` §8 carries it, and so
+does the `ponytail:` comment on `checkTokenizer`.
+
+The two steps that shipped are enough for the failure the milestone is about: a
+bigram index opened with the default reads 7 tokens on disk against 2 recomputed.
