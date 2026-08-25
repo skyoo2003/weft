@@ -317,6 +317,87 @@ func TestAKeyIsReusableOnceItsDocumentIsDeleted(t *testing.T) {
 	assertReadsBack(t, reopened, 5)
 }
 
+// TestScrubAcceptsAKeyWhoseEveryRecordIsATombstone is the case one past the test
+// above, and the one the milestone shipped broken.
+//
+// A key carried twice with one holder live is what an update leaves; a key
+// carried twice with *both* holders dead is what deleting the replacement leaves,
+// and it is reached by any caller who deletes, re-adds and deletes again — or who
+// updates one committed document twice across commits. Nothing about it is
+// damage: no keys table names a dead record, so the segment reads back correctly
+// either way.
+//
+// Scrub is where it went wrong. The docs walk keeps one record per key so that
+// verifyKeyTable has something to check each keys entry against, and when both
+// records were dead it kept the *first* — while the entry, if the segment has
+// one, names the last, because a key can only be re-added once its previous
+// holder is dead. So the two disagreed and a healthy directory was reported as
+// ErrCorrupt: a scheduled integrity check failing on the ordinary spelling of an
+// update.
+func TestScrubAcceptsAKeyWhoseEveryRecordIsATombstone(t *testing.T) {
+	// Both records in one segment, and then one each side of a commit boundary:
+	// the winner is picked during a segment's own walk, so which segment holds
+	// which record is exactly what could make one arrangement pass and the other
+	// not.
+	for _, split := range []bool{false, true} {
+		name := "one segment"
+		if split {
+			name = "two segments"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			ix := engine.New()
+			deletionCorpus(t, ix)
+			key := deletionKey(5)
+
+			if split {
+				if err := ix.Commit(t.Context(), dir); err != nil {
+					t.Fatalf("Commit: %v", err)
+				}
+			}
+			if !ix.Delete(key) {
+				t.Fatal("Delete: false")
+			}
+			if _, err := ix.Add(updatedDoc(5)); err != nil {
+				t.Fatalf("Add after deleting the key: %v", err)
+			}
+			if err := ix.Commit(t.Context(), dir); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+			// One live holder and one tombstone, which the test above covers.
+			if err := engine.Scrub(dir); err != nil {
+				t.Fatalf("Scrub with one holder still live: %v", err)
+			}
+
+			// And now neither is live. This commit publishes a generation and no
+			// segment — the tombstone set is all that changed.
+			if !ix.Delete(key) {
+				t.Fatal("Delete of the re-added key: false")
+			}
+			if err := ix.Commit(t.Context(), dir); err != nil {
+				t.Fatalf("Commit after the second Delete: %v", err)
+			}
+			if err := ix.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			if err := engine.Scrub(dir); err != nil {
+				t.Fatalf("Scrub with every holder of %q a tombstone: %v", key, err)
+			}
+			reopened, err := engine.Open(dir)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer reopened.Close() //nolint:errcheck // teardown
+			if _, ok := reopened.Resolve(key); ok {
+				t.Errorf("Resolve(%q) answers after both of its records were deleted", key)
+			}
+			if docs, _ := reopened.Stats(); docs != deletionCorpusSize-1 {
+				t.Errorf("Stats() counts %d documents, want %d", docs, deletionCorpusSize-1)
+			}
+		})
+	}
+}
+
 // TestAnUpdateReadsBackAcrossCommitsAndMerges is the milestone's update metric
 // in one test: the latest read survives a commit boundary and a merge.
 //

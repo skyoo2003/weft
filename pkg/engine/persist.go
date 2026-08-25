@@ -1015,9 +1015,14 @@ func scrubDocs(docsR *segReader, offs docOffsets, info segInfo, found map[string
 		// a second live holder is a state neither could have produced — while a
 		// dead holder beside a live one is what every update leaves behind.
 		//
-		// The live record wins the slot whichever order the two are walked in, and
-		// that is what verifyKeyTable then checks the keys table against: the table
-		// indexes the documents that were live when the segment was written.
+		// A live record wins the slot over a dead one; between two dead ones the
+		// later record wins, and that second half is what verifyKeyTable rests on.
+		// The table indexes the documents that were live when the segment was
+		// sealed, and a key can only be re-added once its previous holder is dead —
+		// so within a segment every record for a key but the last is dead at seal
+		// time, and the entry, if there is one, names the last. Keeping the *first*
+		// dead record instead would leave this slot naming a record no keys table
+		// points at, and every re-added-then-deleted key would read as damage.
 		self := scrubbedKey{seg: seg, id: DocID(i), dead: dead.has(info.base + DocID(i))}
 		if prev, dup := found[d.Key]; dup {
 			if !prev.dead && !self.dead {
@@ -1027,7 +1032,7 @@ func scrubDocs(docsR *segReader, offs docOffsets, info segInfo, found map[string
 				}
 				return nil, 0, 0, fmt.Errorf("key %q is also held by a live document in %s: %w", d.Key, prev.seg, ErrCorrupt)
 			}
-			if self.dead {
+			if self.dead && !prev.dead {
 				self = prev
 			}
 		}
@@ -1266,15 +1271,17 @@ func segGen(name string) (uint64, bool) {
 // weft happens to reserve, and a first Commit aimed at, say, a home directory
 // would recursively delete data it never wrote.
 //
-// The same holds for MANIFEST.tmp, the other name Commit deletes on sight.
+// The same holds for the two plain-file names Commit deletes on sight:
+// MANIFEST.tmp, and dead-* — prune removes every generation's tombstone file but
+// the live one.
 //
 // A commit that crashed before its rename must still be recoverable, so the test
 // is what such a commit leaves behind rather than mere absence: a seg-* entry may
 // exist, but only as a real directory holding nothing but regular section files,
-// and MANIFEST.tmp may exist too — and every one of those files has to carry
-// weft's magic, because a name and a file type are things a caller's own data can
-// have by coincidence and four bytes of magic are not. Anything else and Commit
-// refuses before it mutates a thing.
+// and MANIFEST.tmp and a dead-* file may exist too — and every one of those files
+// has to carry weft's magic, because a name and a file type are things a caller's
+// own data can have by coincidence and four bytes of magic are not. Anything else
+// and Commit refuses before it mutates a thing.
 func refuseForeignEntries(root *os.Root) error {
 	entries, err := readDir(root, ".")
 	if err != nil {
