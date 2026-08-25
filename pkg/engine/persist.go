@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -65,7 +66,12 @@ func segDirName(gen uint64) string { return fmt.Sprintf("%s%06d", segPrefix, gen
 // to be cleared rather than truncated open — and removing a symlink removes the
 // link, never its target. The rename is the commit point, for a merge exactly as
 // for a commit.
-func writeManifest(root *os.Root, gen uint64, segs []segInfo) error {
+// deadN is how many tombstones the generation's `dead-<gen>` file holds. It
+// rides here rather than being left to that file alone so the two have to agree:
+// nothing names that file, so without a count over here one lost to a bad prune
+// or a partial copy would read as "nothing was deleted" and hand back every
+// document it named. Format v3 manifests carry no such field and read as zero.
+func writeManifest(root *os.Root, gen uint64, segs []segInfo, deadN int) error {
 	tmp := manifestName + ".tmp"
 	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("clearing stale %s: %w", tmp, err)
@@ -81,6 +87,10 @@ func writeManifest(root *os.Root, gen uint64, segs []segInfo) error {
 		w.uvarint(uint64(s.base))
 		w.uvarint(uint64(s.count))
 	}
+	// After the segment list, so a v3 payload is a prefix of a v4 one. Nothing
+	// reads it that way — the version decides what is there — but a format whose
+	// sections only ever grow at the end is the one FORMAT.md §7.7 found cheap.
+	w.uvarint(uint64(deadN))
 	if err := w.close(); err != nil {
 		return fmt.Errorf("%s: %w", manifestName, err)
 	}
@@ -91,12 +101,93 @@ func writeManifest(root *os.Root, gen uint64, segs []segInfo) error {
 	return nil
 }
 
+// writeDead publishes the tombstone set as gen's `dead-<gen>` file.
+//
+// Exclusively created, like every other file weft writes, so a leftover from a
+// crashed writer has to be cleared rather than truncated open — and clearing it
+// is safe because no manifest names gen yet. It is fsynced by segWriter.close
+// before the manifest rename that publishes it, which is what puts it on the
+// durable side of the commit point along with the segment.
+//
+// Always written, even for an empty set. The manifest's count is what a reader
+// checks the file against, and "the count is zero so the file is optional" would
+// make the one state that must not be ambiguous — no tombstones — the same state
+// as a file that went missing.
+func writeDead(root *os.Root, gen uint64, ids []DocID) error {
+	name := deadFileName(gen)
+	if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("clearing stale %s: %w", name, err)
+	}
+	w, err := newSegWriter(root, name, kindDead)
+	if err != nil {
+		return err
+	}
+	encodeDead(w, ids)
+	if err := w.close(); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return nil
+}
+
+// readDead reads gen's tombstone list. want is what the manifest says it holds
+// and total is the corpus size its ids are ranged against.
+//
+// A v3 generation has no such file, and its manifest says so — hasDead is false
+// and this is not called at all, which is what makes a version 3 directory
+// readable by this build with nothing converted. Every v4 generation has one, so
+// want may be zero and the file still has to be there and still has to verify.
+//
+// The frame checksum is verified here rather than deferred to Scrub, unlike the
+// sections inside a segment. What that costs is the size of the tombstone set,
+// and what it buys is that the one structure standing between a query and a
+// deleted document cannot be quietly wrong.
+func readDead(root *os.Root, gen uint64, want, total int) ([]DocID, error) {
+	name := deadFileName(gen)
+	r, b, err := openSection(root, name, kindDead, true)
+	if err != nil {
+		// Absence is the same window a vanished segment is, and gets the same
+		// answer: errSegmentGone, so Open and Scrub re-read the manifest and ask
+		// again. A merge prunes the generation it replaced, this file included, so
+		// a reader holding the manifest from before it is looking for a file that
+		// was pruned out from under a list that is simply stale — which is not
+		// damage, and reporting it as damage turns a scheduled integrity check into
+		// a false alarm. A manifest that keeps naming a file nothing can open is
+		// damage, and that is what surviving the retries means; errSegmentGone is
+		// an ErrCorrupt, so the verdict a caller finally gets is unchanged.
+		if errors.Is(err, errSegmentGone) {
+			return nil, fmt.Errorf("%s: the manifest counts %d tombstones and no file holds them: %w",
+				name, want, errSegmentGone)
+		}
+		return nil, err
+	}
+	defer unmapFile(b) //nolint:errcheck // nothing left to do about it here
+	return parseDead(r, want, total)
+}
+
 // segInfo is one entry in the manifest's segment list: where the segment's
 // files are, and which slice of the index's DocID space it owns.
 type segInfo struct {
 	name  string
 	base  DocID
 	count int
+}
+
+// manifest is a decoded MANIFEST.
+//
+// hasDead is the format version reduced to the one question every reader of a
+// manifest asks of it: does this generation have a `dead-<gen>` file. It is not
+// deadN > 0. A version 4 commit writes that file whether or not the set is empty
+// — FORMAT.md says why, and the whole point is that "no tombstones" and "the file
+// is gone" must not be the same state — so a reader that skips it on a zero count
+// hands back exactly the ambiguity the file was written to remove: a lost or
+// truncated `dead-000007` would pass Open, and would pass Scrub, which claims to
+// verify every byte. A version 3 generation has no such file and must not be asked
+// for one, which is what makes those directories readable with nothing converted.
+type manifest struct {
+	gen     uint64
+	segs    []segInfo
+	deadN   int
+	hasDead bool
 }
 
 // Commit writes everything added since the last commit into dir as a new
@@ -206,7 +297,7 @@ func (ix *Index) Commit(ctx context.Context, dir string) error {
 	// files. This is where the whole cost of a commit is — buildIVF alone was
 	// 11.014 of the 11.063 seconds docs/FINDINGS.md milestone 5 §3.3 measured — and
 	// it is now time queries no longer wait through.
-	segs, pending, err := ix.commitGeneration(ctx, root, dir)
+	segs, gen, pending, err := ix.commitGeneration(ctx, root, dir)
 	if err != nil {
 		return err
 	}
@@ -244,16 +335,17 @@ func (ix *Index) Commit(ctx context.Context, dir string) error {
 	// Best-effort: the commit above is already durable, and failing to delete a
 	// directory nothing names must not turn a successful commit into a reported
 	// failure.
-	prune(root, segs)
+	prune(root, segs, gen)
 	return nil
 }
 
 // commitGeneration is Commit's first section: it reads the directory, encodes the
 // pending documents into seg-<gen+1> and renames the manifest onto it.
 //
-// It returns the segment list now published and whether the last entry in it is
-// this commit's own — false for a commit that found nothing pending, which
-// publishes no generation and leaves its caller with only the sweep to do.
+// It returns the segment list now published, the generation that now stands, and
+// whether the last entry in the list is this commit's own — false for a commit
+// that wrote no segment, which is now two cases rather than one: nothing to do
+// at all, and a generation published for tombstones alone.
 //
 // Requires ix.wmu, which is what lets it take ix.mu in read mode: the pending
 // segment it encodes cannot change while a mutator is excluded, so there is no
@@ -265,7 +357,7 @@ func (ix *Index) Commit(ctx context.Context, dir string) error {
 // Every ctx poll a commit makes is inside here, which is the same statement as
 // "the rename is the commit point": this returns having renamed or having done
 // nothing visible.
-func (ix *Index) commitGeneration(ctx context.Context, root *os.Root, dir string) (segs []segInfo, pending bool, err error) {
+func (ix *Index) commitGeneration(ctx context.Context, root *os.Root, dir string) (segs []segInfo, liveGen uint64, pending bool, err error) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 
@@ -273,17 +365,18 @@ func (ix *Index) commitGeneration(ctx context.Context, root *os.Root, dir string
 	// manifest is a first commit; a corrupt one is not — guessing a generation
 	// on top of a directory in an unknown state could orphan a commit the
 	// caller believes exists, so Commit refuses and reports.
-	gen, live, err := readManifest(root)
+	m, err := readManifest(root)
 	if errors.Is(err, fs.ErrNotExist) {
-		gen, live = 0, nil
+		m = manifest{}
 		// No manifest means nothing here is published. It does not mean this
 		// directory is weft's.
 		if err := refuseForeignEntries(root); err != nil {
-			return nil, false, fmt.Errorf("commit %s: %w", dir, err)
+			return nil, 0, false, fmt.Errorf("commit %s: %w", dir, err)
 		}
 	} else if err != nil {
-		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
+		return nil, 0, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
+	gen, live, deadN := m.gen, m.segs, m.deadN
 
 	// The destination has to be the directory this index's committed segments
 	// came from. The count comparison below cannot tell two unrelated
@@ -297,7 +390,7 @@ func (ix *Index) commitGeneration(ctx context.Context, root *os.Root, dir string
 	// directories reached through the same path are not. An index with nothing
 	// committed has no directory yet and may pick any.
 	if err := ix.sameDir(root); err != nil {
-		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
+		return nil, 0, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
 
 	// The manifest is the authority on what is already stored, and the index in
@@ -310,20 +403,30 @@ func (ix *Index) commitGeneration(ctx context.Context, root *os.Root, dir string
 		stored = uint64(live[n-1].base) + uint64(live[n-1].count)
 	}
 	if stored != uint64(ix.base) {
-		return nil, false, fmt.Errorf("commit %s: the directory holds %d documents, this index has %d committed: %w",
+		return nil, 0, false, fmt.Errorf("commit %s: the directory holds %d documents, this index has %d committed: %w",
 			dir, stored, ix.base, ErrCorrupt)
 	}
 
-	// Nothing pending: an empty generation would grow the manifest and the
-	// segment list without holding a document, and nothing bounds how often a
-	// caller may ask. Every point query walks that list, so the cost of a no-op
-	// Commit would land on every read after it.
+	// Whether there is a segment to write. An empty generation would grow the
+	// manifest and the segment list without holding a document, and nothing
+	// bounds how often a caller may ask; every point query walks that list, so
+	// the cost of a no-op Commit would land on every read after it.
 	//
-	// Checked after the agreement above, not before, so a Commit against the
-	// wrong directory still reports rather than quietly succeeding. And only
-	// when a generation already exists: the first Commit on an empty index is
-	// how an empty index gets written at all, which restore asks for.
-	if len(ix.docs) == 0 && gen > 0 {
+	// Decided after the agreement above, not before, so a Commit against the
+	// wrong directory still reports rather than quietly succeeding. The gen == 0
+	// arm is what lets an empty index be written at all, which restore asks for.
+	writeSeg := len(ix.docs) > 0 || gen == 0
+
+	// A commit with no segment to write still has something to publish when
+	// documents have been deleted since the last one. The tombstone set is not
+	// in any segment — it spans the index and lives at the root — so this is the
+	// one kind of generation that changes what the directory says without adding
+	// a document to it.
+	//
+	// Compared by count rather than by contents, which is exact because the set
+	// only ever grows: Delete adds and nothing removes, so two sizes agreeing is
+	// two sets agreeing. See deadSet.
+	if !writeSeg && ix.dead.n == deadN {
 		// The sweep still runs, which is why this returns the live list rather
 		// than nothing. A commit that died between writing its segment and
 		// renaming the manifest leaves a directory nothing names, as large as the
@@ -333,55 +436,72 @@ func (ix *Index) commitGeneration(ctx context.Context, root *os.Root, dir string
 		// orphan survives every commit until one happens to carry a document.
 		// Same keep set and same best-effort contract as a commit that published
 		// something — everything it removes is unreachable.
-		return live, false, nil
+		return live, gen, false, nil
 	}
 
-	// readManifest has already established that the newest live segment is
-	// named for gen and that gen+1 does not wrap, and refuseForeignEntries has
-	// done the same job for a directory with no manifest at all, so the
-	// directory cleared below is this commit's own debris and never a published
-	// one.
-	seg := segDirName(gen + 1)
-	// A crash after writing segment files but before the manifest flip leaves
-	// this directory half-written. It was never visible — no manifest names it
-	// — so replacing it wholesale is safe.
-	if err := root.RemoveAll(seg); err != nil {
-		return nil, false, fmt.Errorf("commit %s: clearing stale segment: %w", dir, err)
+	published := live
+	if writeSeg {
+		// readManifest has already established that no live segment is named for
+		// gen+1 and that gen+1 does not wrap, and refuseForeignEntries has done
+		// the same job for a directory with no manifest at all, so the directory
+		// cleared below is this commit's own debris and never a published one.
+		seg := segDirName(gen + 1)
+		// A crash after writing segment files but before the manifest flip leaves
+		// this directory half-written. It was never visible — no manifest names it
+		// — so replacing it wholesale is safe.
+		if err := root.RemoveAll(seg); err != nil {
+			return nil, 0, false, fmt.Errorf("commit %s: clearing stale segment: %w", dir, err)
+		}
+		if err := root.Mkdir(seg, 0o700); err != nil {
+			return nil, 0, false, fmt.Errorf("commit %s: %w", dir, err)
+		}
+		segRoot, err := root.OpenRoot(seg)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf("commit %s: %w", dir, err)
+		}
+		defer segRoot.Close()
+		if err := writeSegment(ctx, segRoot, &pendingSource{ix: ix}); err != nil {
+			return nil, 0, false, fmt.Errorf("commit %s: %w", seg, err)
+		}
+		// The segment directory's entries need to reach disk before the manifest
+		// claims they exist — and so does the segment directory's own entry in dir.
+		// Syncing only the inside leaves the rename free to land first, and a
+		// manifest naming a directory whose entry never made it is exactly the
+		// mixed state the rename exists to rule out.
+		syncDir(segRoot)
+		syncDir(root)
+		published = append(slices.Clone(live), segInfo{name: seg, base: ix.base, count: len(ix.docs)})
 	}
-	if err := root.Mkdir(seg, 0o700); err != nil {
-		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
+
+	// The tombstone set, written before the rename for the same reason the
+	// segment is: everything the manifest will claim has to be durable before the
+	// manifest claims it. It is republished whole rather than appended to, so the
+	// live generation's file is the whole set and a reader needs exactly one.
+	//
+	// ponytail: that is a rewrite of the entire set on every commit, about a byte
+	// a tombstone. The way out is for the manifest to name the file it inherits,
+	// which costs a name to validate; owed when a corpus is deleted from hard
+	// enough for the copy to show up beside the segment write.
+	if err := writeDead(root, gen+1, ix.dead.all()); err != nil {
+		return nil, 0, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
-	segRoot, err := root.OpenRoot(seg)
-	if err != nil {
-		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
-	}
-	defer segRoot.Close()
-	if err := writeSegment(ctx, segRoot, &pendingSource{ix: ix}); err != nil {
-		return nil, false, fmt.Errorf("commit %s: %w", seg, err)
-	}
-	// The segment directory's entries need to reach disk before the manifest
-	// claims they exist — and so does the segment directory's own entry in dir.
-	// Syncing only the inside leaves the rename free to land first, and a
-	// manifest naming a directory whose entry never made it is exactly the
-	// mixed state the rename exists to rule out.
-	syncDir(segRoot)
 	syncDir(root)
 
-	published := append(slices.Clone(live), segInfo{name: seg, base: ix.base, count: len(ix.docs)})
 	// The last chance to call the commit off, and the reason it is here rather
 	// than a line later: the rename is the commit point, so this is the boundary
 	// between "nothing happened" and "it is done". A cancellation that arrives
 	// after this poll is ignored for the rest of the call.
 	//
-	// Everything written so far stays as an unnamed seg-<gen+1>, which is the
-	// debris Open already documents and the next Commit already sweeps.
+	// Everything written so far stays as an unnamed seg-<gen+1> and an unnamed
+	// dead-<gen+1>, which is the debris Open already documents and the next
+	// Commit already sweeps.
 	if err := ctx.Err(); err != nil {
-		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
+		return nil, 0, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
-	if err := writeManifest(root, gen+1, published); err != nil {
-		return nil, false, fmt.Errorf("commit %s: %w", dir, err)
+	if err := writeManifest(root, gen+1, published, ix.dead.n); err != nil {
+		return nil, 0, false, fmt.Errorf("commit %s: %w", dir, err)
 	}
-	return published, true, nil
+	return published, gen + 1, writeSeg, nil
 }
 
 // adoptGeneration is Commit's second section: the swap, taken exclusively.
@@ -471,11 +591,11 @@ func Open(dir string) (*Index, error) {
 	// nothing can open is damage, and has to be reported as damage rather than
 	// spun on.
 	for attempt := 0; ; attempt++ {
-		_, segs, err := readManifest(root)
+		m, err := readManifest(root)
 		if err != nil {
 			return nil, fmt.Errorf("open %s: %w", dir, err)
 		}
-		ix, err := mapGeneration(root, dir, segs)
+		ix, err := mapGeneration(root, dir, m)
 		if err == nil {
 			return ix, nil
 		}
@@ -491,9 +611,9 @@ func Open(dir string) (*Index, error) {
 const openAttempts = 3
 
 // mapGeneration maps every segment one manifest names, in order.
-func mapGeneration(root *os.Root, dir string, segs []segInfo) (*Index, error) {
+func mapGeneration(root *os.Root, dir string, m manifest) (*Index, error) {
 	ix := New()
-	for _, info := range segs {
+	for _, info := range m.segs {
 		s, err := openSegment(root, info.name, info.base)
 		if err != nil {
 			ix.Close() //nolint:errcheck // already returning an error
@@ -527,6 +647,28 @@ func mapGeneration(root *os.Root, dir string, segs []segInfo) (*Index, error) {
 					info.name, s.vecDim, ix.vecDim, ErrCorrupt)
 			}
 			ix.vecDim = s.vecDim
+		}
+	}
+	// The tombstones last, because they are ranged against the corpus the
+	// segments just established and because reading a document's length is what
+	// restores the token total the statistics subtract.
+	//
+	// Read whenever the generation has the file, which is every version 4 one and
+	// no version 3 one — not whenever the count is positive. An empty set still has
+	// a file, and skipping it on a zero count is how a lost `dead-<gen>` would read
+	// as "nothing was deleted" here. See manifest.hasDead.
+	if m.hasDead {
+		ids, err := readDead(root, m.gen, m.deadN, int(ix.base))
+		if err != nil {
+			ix.Close() //nolint:errcheck // already returning an error
+			return nil, fmt.Errorf("open %s: %w", dir, err)
+		}
+		for _, id := range ids {
+			// The length before the mark, the order Delete uses and for the same
+			// reason: docLenAt answers 0 once an id is a tombstone, so marking
+			// first would restore a token total that has nothing subtracted from
+			// it and rescale every BM25 score in the reopened index.
+			ix.dead.mark(id, ix.docLenAt(id))
 		}
 	}
 	if err := ix.rememberDir(root, dir); err != nil {
@@ -572,11 +714,11 @@ func Scrub(dir string) error {
 	// Bounded the same way, and for the same reason: a merge finishes, and a
 	// manifest that keeps naming a segment nothing can open is damage.
 	for attempt := 0; ; attempt++ {
-		_, segs, err := readManifest(root)
+		m, err := readManifest(root)
 		if err != nil {
 			return fmt.Errorf("scrub %s: %w", dir, err)
 		}
-		err = scrubGeneration(root, segs)
+		err = scrubGeneration(root, m)
 		if err == nil {
 			return nil
 		}
@@ -587,7 +729,35 @@ func Scrub(dir string) error {
 }
 
 // scrubGeneration verifies every segment one manifest names.
-func scrubGeneration(root *os.Root, segs []segInfo) error {
+func scrubGeneration(root *os.Root, m manifest) error {
+	// The tombstone file first, and read in full: parseDead is the whole of its
+	// verification — count against the manifest, ids strictly ascending, every id
+	// inside the corpus — and the walk below needs the set anyway, because a key
+	// two segments both carry is damage only when both documents are live.
+	var total int
+	if n := len(m.segs); n > 0 {
+		total = int(m.segs[n-1].base) + m.segs[n-1].count
+	}
+	var dead deadSet
+	// On hasDead and not on a positive count, the same rule mapGeneration reads by.
+	// Scrub says it verifies every byte of the generation, and a file skipped
+	// because its count is zero is a frame checksum nobody checked.
+	if m.hasDead {
+		ids, err := readDead(root, m.gen, m.deadN, total)
+		if err != nil {
+			return fmt.Errorf("scrub %s: %w", deadFileName(m.gen), err)
+		}
+		for _, id := range ids {
+			// Length zero: nothing here computes a statistic, so the token total a
+			// live index maintains has no meaning for a scrub and asking for it
+			// would mean mapping docoff a second time.
+			dead.mark(id, 0)
+		}
+	}
+	return scrubSegments(root, m.segs, &dead)
+}
+
+func scrubSegments(root *os.Root, segs []segInfo, dead *deadSet) error {
 	// Keys are unique across the whole index and not merely inside a segment.
 	// Resolve rests on that — it is why the first segment to answer is treated
 	// as the only one that can — and Add enforces it against the segments, so a
@@ -601,7 +771,7 @@ func scrubGeneration(root *os.Root, segs []segInfo) error {
 	found := make(map[string]scrubbedKey)
 	vecDim := 0
 	for _, seg := range segs {
-		width, err := scrubSegment(root, seg, found)
+		width, err := scrubSegment(root, seg, found, dead)
 		if err != nil {
 			return fmt.Errorf("scrub %s: %w", seg.name, err)
 		}
@@ -624,6 +794,13 @@ func scrubGeneration(root *os.Root, segs []segInfo) error {
 type scrubbedKey struct {
 	seg string
 	id  DocID
+
+	// dead is whether that record is a tombstone, and it is what turns the
+	// uniqueness rule from "a key appears once" into "a key names at most one
+	// *live* document". Deleting a document and adding its key again leaves the
+	// old record exactly where it was — nothing renumbers or reclaims — so a
+	// directory that has been updated legitimately holds two records for one key.
+	dead bool
 }
 
 // scrubSegment verifies every byte of one segment without holding it, and
@@ -641,7 +818,7 @@ type scrubbedKey struct {
 // segment to the next, the lengths because the postings are checked against them
 // and the postings file is read after the documents. Both are the size of the
 // document count.
-func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (int, error) {
+func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey, dead *deadSet) (int, error) {
 	segRoot, err := root.OpenRoot(info.name)
 	if err != nil {
 		// Same reasoning as openSection: the manifest named it, so a segment
@@ -708,7 +885,7 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 	}
 	docsR, postR, termsR, docoffR, keysR := rs[1], rs[2], rs[3], rs[4], rs[5]
 
-	docCount, totalLen, vecDim, err := decodeMeta(metaR)
+	docCount, totalLen, vecDim, liveCount, err := decodeMeta(metaR)
 	if err != nil {
 		return 0, err
 	}
@@ -737,7 +914,7 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 		}
 	}
 
-	docLen, sumLen, width, err := scrubDocs(docsR, offs, info.name, found)
+	docLen, sumLen, width, err := scrubDocs(docsR, offs, info, found, dead)
 	if err != nil {
 		return 0, err
 	}
@@ -756,7 +933,11 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 		return 0, fmt.Errorf("meta says %d docs/%d tokens/%d dims, documents hold %d/%d/%d: %w",
 			docCount, totalLen, vecDim, len(docLen), sumLen, width, ErrCorrupt)
 	}
-	if err := verifyKeyTable(keysR, info.name, len(docLen), found); err != nil {
+	// Against meta's live count, not the document count: the keys section indexes
+	// the documents that had no tombstone when the segment was written. decodeMeta
+	// has already ranged that number against the document count, and the walk
+	// above has just confirmed the document count against the records themselves.
+	if err := verifyKeyTable(keysR, info.name, liveCount, found); err != nil {
 		return 0, err
 	}
 	if err := decodePostings(postR, termsR, docLen); err != nil {
@@ -775,7 +956,8 @@ func scrubSegment(root *os.Root, info segInfo, found map[string]scrubbedKey) (in
 // scorer/vector builds on ErrNonFiniteVector's promise by not re-checking
 // documents, and the decoder re-validating is what keeps that promise true for
 // restored corpora.
-func scrubDocs(docsR *segReader, offs docOffsets, seg string, found map[string]scrubbedKey) (docLen []int, totalLen, vecDim int, err error) {
+func scrubDocs(docsR *segReader, offs docOffsets, info segInfo, found map[string]scrubbedKey, dead *deadSet) (docLen []int, totalLen, vecDim int, err error) {
+	seg := info.name
 	n, err := docsR.intn("document count", maxDocCount)
 	if err != nil {
 		return nil, 0, 0, err
@@ -828,12 +1010,26 @@ func scrubDocs(docsR *segReader, offs docOffsets, seg string, found map[string]s
 			return nil, 0, 0, fmt.Errorf("%s: document %d is %d tokens, its record says %d: %w",
 				offs.name, i, got, dl, ErrCorrupt)
 		}
+		// Two records may carry one key; two *live* records may not. Resolve
+		// answers with the live one and Add refuses a key that already has one, so
+		// a second live holder is a state neither could have produced — while a
+		// dead holder beside a live one is what every update leaves behind.
+		//
+		// The live record wins the slot whichever order the two are walked in, and
+		// that is what verifyKeyTable then checks the keys table against: the table
+		// indexes the documents that were live when the segment was written.
+		self := scrubbedKey{seg: seg, id: DocID(i), dead: dead.has(info.base + DocID(i))}
 		if prev, dup := found[d.Key]; dup {
-			if prev.seg == seg {
-				return nil, 0, 0, fmt.Errorf("%s: documents %d and %d both hold key %q: %w",
-					docsR.name, prev.id, i, d.Key, ErrCorrupt)
+			if !prev.dead && !self.dead {
+				if prev.seg == seg {
+					return nil, 0, 0, fmt.Errorf("%s: live documents %d and %d both hold key %q: %w",
+						docsR.name, prev.id, i, d.Key, ErrCorrupt)
+				}
+				return nil, 0, 0, fmt.Errorf("key %q is also held by a live document in %s: %w", d.Key, prev.seg, ErrCorrupt)
 			}
-			return nil, 0, 0, fmt.Errorf("key %q is also held by %s: %w", d.Key, prev.seg, ErrCorrupt)
+			if self.dead {
+				self = prev
+			}
 		}
 		if dl > maxInt-totalLen {
 			return nil, 0, 0, fmt.Errorf("%s: document lengths overflow their sum: %w", docsR.name, ErrCorrupt)
@@ -845,7 +1041,7 @@ func scrubDocs(docsR *segReader, offs docOffsets, seg string, found map[string]s
 				return nil, 0, 0, fmt.Errorf("%s: document %d vector is %d wide, corpus is %d: %w", docsR.name, i, vn, vecDim, ErrCorrupt)
 			}
 		}
-		found[d.Key] = scrubbedKey{seg: seg, id: DocID(i)}
+		found[d.Key] = self
 		docLen[i] = dl
 		totalLen += dl
 	}
@@ -907,7 +1103,12 @@ func (ix *Index) rememberDir(root *os.Root, dir string) error {
 // write, so a manifest whose generation and segment name disagree can aim that
 // RemoveAll at the segment that is still published, destroying the live commit
 // before its replacement is durable.
-func readManifest(root *os.Root) (gen uint64, segs []segInfo, err error) {
+func readManifest(root *os.Root) (manifest, error) {
+	var (
+		gen   uint64
+		segs  []segInfo
+		deadN int
+	)
 	b, err := root.ReadFile(manifestName)
 	if err != nil {
 		// An entry of the wrong kind at the entry point is classified the way
@@ -920,20 +1121,20 @@ func readManifest(root *os.Root) (gen uint64, segs []segInfo, err error) {
 		// still fails the Lstat and still reports fs.ErrNotExist, which is what
 		// that branch is for.
 		if fi, lerr := root.Lstat(manifestName); lerr == nil && !fi.Mode().IsRegular() {
-			return 0, nil, fmt.Errorf("%s: not a regular file: %w", manifestName, ErrCorrupt)
+			return manifest{}, fmt.Errorf("%s: not a regular file: %w", manifestName, ErrCorrupt)
 		}
-		return 0, nil, err
+		return manifest{}, err
 	}
 	r, err := parseSection(manifestName, b, kindManifest)
 	if err != nil {
-		return 0, nil, err
+		return manifest{}, err
 	}
 	if gen, err = r.uvarint("generation"); err != nil {
-		return 0, nil, err
+		return manifest{}, err
 	}
 	n, err := r.intn("segment count", len(r.b))
 	if err != nil {
-		return 0, nil, err
+		return manifest{}, err
 	}
 	// Bases are checked as they are read rather than afterwards: a segment list
 	// that does not tile [0, total) contiguously and in order would give two
@@ -943,60 +1144,78 @@ func readManifest(root *os.Root) (gen uint64, segs []segInfo, err error) {
 	for range n {
 		name, err := r.str("segment name")
 		if err != nil {
-			return 0, nil, err
+			return manifest{}, err
 		}
 		if !strings.HasPrefix(name, segPrefix) || strings.ContainsAny(name, `/\`) || name != filepath.Base(name) {
-			return 0, nil, fmt.Errorf("%s: segment name %q: %w", manifestName, name, ErrCorrupt)
+			return manifest{}, fmt.Errorf("%s: segment name %q: %w", manifestName, name, ErrCorrupt)
 		}
 		base, err := r.uvarint("segment base")
 		if err != nil {
-			return 0, nil, err
+			return manifest{}, err
 		}
 		count, err := r.intn("segment document count", maxDocCount)
 		if err != nil {
-			return 0, nil, err
+			return manifest{}, err
 		}
 		if base != nextBase {
-			return 0, nil, fmt.Errorf("%s: segment %q starts at document %d, the one before it ended at %d: %w",
+			return manifest{}, fmt.Errorf("%s: segment %q starts at document %d, the one before it ended at %d: %w",
 				manifestName, name, base, nextBase, ErrCorrupt)
 		}
 		if base > uint64(maxDocCount)-uint64(count) {
-			return 0, nil, fmt.Errorf("%s: segment %q runs past the document ceiling: %w", manifestName, name, ErrCorrupt)
+			return manifest{}, fmt.Errorf("%s: segment %q runs past the document ceiling: %w", manifestName, name, ErrCorrupt)
 		}
 		nextBase = base + uint64(count)
 		segs = append(segs, segInfo{name: name, base: DocID(base), count: count})
 	}
+	// The tombstone count, which exists only from version 4. The version decides
+	// whether it is there rather than the payload's remaining length, for the
+	// reason FORMAT.md §7.1 gives about guessing: a v3 manifest with four stray
+	// bytes after its segment list is damage, and reading them as a count would
+	// turn that into a demand for a `dead-` file the directory never had.
+	if r.version >= 4 {
+		if deadN, err = r.intn("tombstone count", maxDocCount); err != nil {
+			return manifest{}, err
+		}
+	}
 	if err := r.done(); err != nil {
-		return 0, nil, err
+		return manifest{}, err
 	}
 	if len(segs) == 0 {
-		return 0, nil, fmt.Errorf("%s: generation %d names no segments; a commit always publishes one: %w", manifestName, gen, ErrCorrupt)
+		return manifest{}, fmt.Errorf("%s: generation %d names no segments; a commit always publishes one: %w", manifestName, gen, ErrCorrupt)
 	}
-	// Some published segment is named for the generation that published it, and
-	// none is named for the next one. That is what Commit and Merge both need:
-	// each clears seg-<gen+1> before writing it, so a manifest that already
-	// named it would have that RemoveAll aimed at live data.
+	// No segment is named for the next generation, and none is named past this
+	// one. The first half is what Commit and Merge both need: each clears
+	// seg-<gen+1> before writing it, so a manifest that already named it would
+	// have that RemoveAll aimed at live data.
 	//
-	// Milestone 2 could say something stronger — the *last* segment is named for
-	// gen — because a commit published exactly one. A merge publishes its result
-	// at the front of the list, since it replaces the oldest run, so the
-	// generation's own segment is no longer always last.
-	written, next := segDirName(gen), segDirName(gen+1)
-	found := false
+	// Milestone 2 asked for something narrower — *some* segment is named for gen —
+	// and version 4 cannot keep it. A commit that only deletes documents publishes
+	// a generation and no segment, because the tombstone set is what changed and
+	// that lives at the root; the segment list it republishes is the one it
+	// inherited, and none of those names carries the new number. What replaces the
+	// rule is strictly stronger on the axis that mattered: every name is one some
+	// commit produced, and no name is past the generation claiming to have written
+	// it. A doctored manifest can no longer smuggle in a segment named for a
+	// generation that has not happened.
+	next := segDirName(gen + 1)
 	for _, s := range segs {
 		if s.name == next {
-			return 0, nil, fmt.Errorf("%s: generation %d already names %s, which the next write clears: %w",
+			return manifest{}, fmt.Errorf("%s: generation %d already names %s, which the next write clears: %w",
 				manifestName, gen, next, ErrCorrupt)
 		}
-		found = found || s.name == written
-	}
-	if !found {
-		return 0, nil, fmt.Errorf("%s: generation %d names no segment called %s: %w", manifestName, gen, written, ErrCorrupt)
+		m, ok := segGen(s.name)
+		if !ok {
+			return manifest{}, fmt.Errorf("%s: segment %q is not a name any commit produced: %w", manifestName, s.name, ErrCorrupt)
+		}
+		if m > gen {
+			return manifest{}, fmt.Errorf("%s: generation %d names %s, which a later generation would have written: %w",
+				manifestName, gen, s.name, ErrCorrupt)
+		}
 	}
 	seen := make(map[string]struct{}, len(segs))
 	for _, s := range segs {
 		if _, dup := seen[s.name]; dup {
-			return 0, nil, fmt.Errorf("%s: segment %q listed twice: %w", manifestName, s.name, ErrCorrupt)
+			return manifest{}, fmt.Errorf("%s: segment %q listed twice: %w", manifestName, s.name, ErrCorrupt)
 		}
 		seen[s.name] = struct{}{}
 	}
@@ -1010,9 +1229,31 @@ func readManifest(root *os.Root) (gen uint64, segs []segInfo, err error) {
 	// a generation lower than the one it replaced, breaking the strictly
 	// increasing counter the format rests on.
 	if gen == 0 || gen == math.MaxUint64 {
-		return 0, nil, fmt.Errorf("%s: generation %d, which no sequence of commits could reach: %w", manifestName, gen, ErrCorrupt)
+		return manifest{}, fmt.Errorf("%s: generation %d, which no sequence of commits could reach: %w", manifestName, gen, ErrCorrupt)
 	}
-	return gen, segs, nil
+	// hasDead from the version rather than from deadN, for the reason the type
+	// states: the file is written for an empty set too, so a zero count is not
+	// permission to skip it.
+	return manifest{gen: gen, segs: segs, deadN: deadN, hasDead: r.version >= 4}, nil
+}
+
+// segGen is the generation a segment directory name carries, and false for a
+// name no writer produced.
+//
+// The round trip through segDirName is the check, not a numeric parse: uvarint
+// overlong encodings are refused elsewhere in this format for exactly this
+// reason, and "seg-0000001" and "seg-000001" naming one generation would be the
+// same defect one layer up — two byte strings meaning one index.
+func segGen(name string) (uint64, bool) {
+	digits, ok := strings.CutPrefix(name, segPrefix)
+	if !ok {
+		return 0, false
+	}
+	gen, err := strconv.ParseUint(digits, 10, 64)
+	if err != nil || segDirName(gen) != name {
+		return 0, false
+	}
+	return gen, true
 }
 
 // refuseForeignEntries establishes that a directory with no manifest is
@@ -1041,10 +1282,14 @@ func refuseForeignEntries(root *os.Root) error {
 	}
 	for _, e := range entries {
 		switch {
-		case e.Name() == manifestName+".tmp":
-			// A symlink is not a regular file here — ReadDir reports the link
-			// itself — so one planted at this name is somebody else's, which is
-			// also what stops the read below from following it.
+		// The two plain-file names Commit deletes on sight: the manifest's temp
+		// file, and a tombstone file — prune removes every generation's but the
+		// live one. Both owe the same proof of ownership, so they are one case.
+		//
+		// A symlink is not a regular file here — ReadDir reports the link itself —
+		// so one planted at either name is somebody else's, which is also what
+		// stops refuseForeignFile from following it.
+		case strings.HasPrefix(e.Name(), deadPrefix), e.Name() == manifestName+".tmp":
 			if !e.Type().IsRegular() {
 				return fmt.Errorf("%s is not a file and no manifest claims it, so weft will not delete it", e.Name())
 			}
@@ -1129,12 +1374,17 @@ func readDir(root *os.Root, name string) ([]fs.DirEntry, error) {
 // Commit and Merge call this, and only after their own rename: weft's single
 // writer is the one party that knows no other segment is being written right
 // now.
-func prune(root *os.Root, keep []segInfo) {
+// gen is the generation the manifest now publishes, and it is what says which
+// `dead-` file to keep. Exactly one is live — Commit and Merge both republish
+// the whole tombstone set under their own generation — so every other one is a
+// previous generation's, unreachable for the same reason an unnamed segment is.
+func prune(root *os.Root, keep []segInfo, gen uint64) {
 	root.Remove(manifestName + ".tmp") //nolint:errcheck,gosec // best-effort by design, see above
-	live := make(map[string]struct{}, len(keep))
+	live := make(map[string]struct{}, len(keep)+1)
 	for _, s := range keep {
 		live[s.name] = struct{}{}
 	}
+	live[deadFileName(gen)] = struct{}{}
 	entries, err := readDir(root, ".")
 	if err != nil {
 		return
@@ -1143,8 +1393,11 @@ func prune(root *os.Root, keep []segInfo) {
 		if _, ok := live[e.Name()]; ok {
 			continue
 		}
-		if e.IsDir() && strings.HasPrefix(e.Name(), segPrefix) {
+		switch {
+		case e.IsDir() && strings.HasPrefix(e.Name(), segPrefix):
 			root.RemoveAll(e.Name()) //nolint:errcheck,gosec // best-effort by design, see above
+		case !e.IsDir() && strings.HasPrefix(e.Name(), deadPrefix):
+			root.Remove(e.Name()) //nolint:errcheck,gosec // best-effort by design, see above
 		}
 	}
 }

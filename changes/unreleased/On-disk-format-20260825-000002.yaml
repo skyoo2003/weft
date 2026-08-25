@@ -1,0 +1,17 @@
+kind: On-disk format
+body: 'Version 4. One new file, `dead-<gen>`, holding the whole tombstone set of the
+  index as ascending DocID deltas, plus one uvarint on `MANIFEST` counting them and
+  one on `meta` recording how many of a segment''s documents were live when it was
+  written. The file sits beside `MANIFEST` rather than inside a generation because
+  a commit that only deletes documents publishes no segment; `Commit` and `Merge` both
+  republish it under their own generation and `prune` keeps exactly the live one. Version
+  3 and version 2 directories are read without conversion — no tombstone file means
+  nothing was deleted, and a `meta` with no live count means every document it held
+  was live — so a v3 segment beside a v4 one is the ordinary state of a directory committed
+  to since the upgrade. The version bump is the point rather than the price: nothing
+  names the new file, so a build that predates it would answer with every deleted document
+  still sitting in the segments, and a v4 `MANIFEST` makes such a build refuse the
+  whole directory at the first frame it parses. Version 1 is still refused.'
+time: 2026-08-25T00:00:02.000000000+09:00
+custom:
+  Issue: 17

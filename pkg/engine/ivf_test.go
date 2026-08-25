@@ -556,12 +556,163 @@ func downgradeToV2(t *testing.T, dir string) {
 		}
 		for _, s := range segSections {
 			p := filepath.Join(seg, s.name)
-			if _, err := os.Stat(p); err == nil {
-				patchVersion(t, p, 2)
+			if _, err := os.Stat(p); err != nil {
+				continue
 			}
+			// meta carries version 4's live document count and the others carry
+			// nothing new, so meta is the one section that shrinks rather than
+			// merely being restamped.
+			if s.name == metaFile {
+				downgradeSection(t, p, 2)
+				continue
+			}
+			patchVersion(t, p, 2)
 		}
 	}
-	patchVersion(t, filepath.Join(dir, manifestName), 2)
+	// The tombstone file and the manifest's count of it are version 4's, so a
+	// version 2 directory has neither. Removing the file and stripping the count
+	// is the same "produce the bytes rather than keep a fixture" argument the ivf
+	// section above gets.
+	deads, err := filepath.Glob(filepath.Join(dir, deadPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range deads {
+		if err := os.Remove(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory that actually holds tombstones has documents an older reader
+	// must not see, which is the whole reason version 4 exists — so this refuses
+	// to simulate that downgrade rather than producing bytes that lie.
+	if n := downgradeSection(t, filepath.Join(dir, manifestName), 2); n != 0 {
+		t.Fatalf("%s records %d tombstones; a version 2 reader could not express them", manifestName, n)
+	}
+}
+
+// downgradeToV3 turns a freshly committed generation into the bytes milestone 3b
+// wrote.
+//
+// v4 is v3 plus a `dead-<gen>` file at the index root and one uvarint each on
+// `meta` and `MANIFEST`, so removing those three things and stamping every frame
+// with 3 produces exactly a v3 directory — the same "produce the bytes rather
+// than keep a fixture" argument downgradeToV2 makes, and for the same reason:
+// a fixture is a second copy of the format that somebody has to keep in step.
+func downgradeToV3(t *testing.T, dir string) {
+	t.Helper()
+	deads, err := filepath.Glob(filepath.Join(dir, deadPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deads) == 0 {
+		t.Fatalf("no tombstone file under %s; a version 4 commit always writes one", dir)
+	}
+	for _, d := range deads {
+		if err := os.Remove(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	segs, err := filepath.Glob(filepath.Join(dir, segPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) == 0 {
+		t.Fatalf("no segment directories under %s", dir)
+	}
+	for _, seg := range segs {
+		for _, s := range segSections {
+			p := filepath.Join(seg, s.name)
+			if _, err := os.Stat(p); err != nil {
+				continue
+			}
+			if s.name == metaFile {
+				downgradeSection(t, p, 3)
+				continue
+			}
+			patchVersion(t, p, 3)
+		}
+	}
+	if n := downgradeSection(t, filepath.Join(dir, manifestName), 3); n != 0 {
+		t.Fatalf("%s records %d tombstones; a version 3 reader could not express them", manifestName, n)
+	}
+}
+
+// TestAV3GenerationOpensAndAnswers is milestone 11's half of the debt
+// [FORMAT.md](../../docs/FORMAT.md) §7.6 says every version past 2 owes: a
+// reader that understands both, rather than a converter.
+//
+// It was nearly free for the same reason v3's was. What version 4 added lives at
+// the index root, so a v3 segment is not a v4 segment missing a section — it is
+// byte-identical in shape, and the one field it lacks has an answer that needs no
+// branch of its own: no tombstone file means nothing was deleted, and meta with
+// no live count means every document it holds was live.
+func TestAV3GenerationOpensAndAnswers(t *testing.T) {
+	v4, dir := commitVectors(t, 64, 4, 2)
+	defer v4.Close() //nolint:errcheck // teardown
+
+	v3dir := t.TempDir()
+	copyIndexDir(t, dir, v3dir)
+	downgradeToV3(t, v3dir)
+
+	v3, err := Open(v3dir)
+	if err != nil {
+		t.Fatalf("Open a version 3 generation: %v — the v4 reader must read both", err)
+	}
+	defer v3.Close() //nolint:errcheck // teardown
+
+	// Every read API, against the index that wrote the v4 bytes these were made
+	// from. That is what says the two versions describe one corpus rather than
+	// merely that the older one parses.
+	assertReadAPIsAgree(t, v4, v3)
+	if err := Scrub(v3dir); err != nil {
+		t.Errorf("Scrub a version 3 generation: %v", err)
+	}
+	if n := v3.dead.n; n != 0 {
+		t.Errorf("a version 3 generation opened with %d tombstones, want 0", n)
+	}
+	// And it still takes writes, which is what makes it read rather than
+	// museum-piece: a commit on top of it publishes version 4 and the older
+	// segments stay where they are.
+	if _, err := v3.Add(Document{Key: "after-the-upgrade", Text: "x"}); err != nil {
+		t.Fatalf("Add to a version 3 index: %v", err)
+	}
+	if err := v3.Commit(t.Context(), v3dir); err != nil {
+		t.Fatalf("Commit onto a version 3 directory: %v", err)
+	}
+	if err := Scrub(v3dir); err != nil {
+		t.Errorf("Scrub a directory holding both versions: %v", err)
+	}
+}
+
+// TestAVersionFourDirectoryIsRefusedByAnOlderReader is the resurrection guard,
+// asserted where it can be.
+//
+// Nothing names the tombstone file, so a build that predates it would not look
+// for it and would answer with every deleted document still sitting in the
+// segments. What stops that is the manifest carrying version 4 — the first frame
+// any reader parses — and this is the check that it does. The refusal itself is
+// parseFrame's, which TestOtherVersionsAreRefusedNotMisread already covers from
+// the other side.
+func TestAVersionFourDirectoryIsRefusedByAnOlderReader(t *testing.T) {
+	ix, dir := commitVectors(t, 8, 4, 2)
+	defer ix.Close() //nolint:errcheck // teardown
+
+	b, err := os.ReadFile(filepath.Join(dir, manifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b[len(segMagic)]; got != formatVersion {
+		t.Fatalf("MANIFEST is stamped version %d, want %d — an older build would not refuse this directory", got, formatVersion)
+	}
+	// The same frame read by a build whose ceiling is one lower.
+	if _, err := parseFrame(manifestName, b, kindManifest); err != nil {
+		t.Fatalf("this build cannot read its own manifest: %v", err)
+	}
+	b[len(segMagic)] = formatVersion + 1
+	binary.LittleEndian.PutUint32(b[len(b)-crc32.Size:], crc32.Checksum(b[:len(b)-crc32.Size], segCRC))
+	if _, err := parseFrame(manifestName, b, kindManifest); !errors.Is(err, ErrBadVersion) {
+		t.Fatalf("a manifest one version ahead: got %v, want ErrBadVersion", err)
+	}
 }
 
 // TestAV2SegmentOpensAndAnswersExactly is the dual reader, and the reason the

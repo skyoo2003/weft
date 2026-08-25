@@ -78,13 +78,28 @@ func encodeDocOffsets(w *segWriter, offs, docLen []int) {
 // seeking backwards. That is not tidiness: milestone 3's merge cannot buffer
 // O(corpus) in order to patch, so a writer that needed to would have to be
 // rewritten one task later.
-func encodeKeys(w *segWriter, docKeys []string) {
+// dead reports whether a segment-local id is a tombstone, and those entries are
+// left out.
+//
+// That skip is what keeps this table the sorted, distinct, binary-searchable
+// thing every reader treats it as. Deleting a document and adding its key again
+// puts two records carrying one key in one segment — the ordinary spelling of an
+// update — and two equal keys in a sorted table do not fail a search, they
+// resolve to whichever of them it lands on. Writing only the live one removes
+// the case rather than teaching the search about it.
+//
+// It does not remove the need for the reader's own tombstone check: a document
+// deleted *after* its segment was written still has an entry here, because
+// nothing rewrites a sealed segment. What it removes is the duplicate.
+func encodeKeys(w *segWriter, docKeys []string, dead func(local int) bool) {
 	// Sorted by key, carrying the DocID each key belongs to. The keys arrive in
 	// DocID order from encodeDocs, which has already decoded every document —
 	// asking the index for them again would decode the corpus twice.
-	order := make([]int, len(docKeys))
-	for i := range order {
-		order[i] = i
+	order := make([]int, 0, len(docKeys))
+	for i := range docKeys {
+		if !dead(i) {
+			order = append(order, i)
+		}
 	}
 	slices.SortFunc(order, func(a, b int) int { return strings.Compare(docKeys[a], docKeys[b]) })
 
@@ -273,13 +288,17 @@ func (k keyTable) at(i int) (string, DocID, error) {
 // entry against where the record actually starts asks the same question as
 // following the entry and decoding that record a second time, at none of the
 // cost.
+// n is the count meta records as live at write time, not the segment's document
+// count. The two were one number until deletion existed; now the table indexes
+// the documents that had no tombstone when the segment was sealed, and meta's
+// live field is the only witness to how many that was.
 func verifyKeyTable(keysR *segReader, seg string, n int, found map[string]scrubbedKey) error {
 	kt, err := parseKeyTable(keysR)
 	if err != nil {
 		return err
 	}
 	if kt.n != n {
-		return fmt.Errorf("%s indexes %d keys, the segment holds %d documents: %w", kt.name, kt.n, n, ErrCorrupt)
+		return fmt.Errorf("%s indexes %d keys, the segment held %d live documents: %w", kt.name, kt.n, n, ErrCorrupt)
 	}
 	prev := ""
 	for i := range kt.n {

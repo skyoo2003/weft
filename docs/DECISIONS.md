@@ -1390,3 +1390,125 @@ that is the one thing the tests assert on both sides of the race rather than pic
 - **`Merge`'s stop turns out to be what callers actually hit.** It is longer than a commit and
   this round did not touch it beyond `wmu`, on the grounds that no arm measures it. Build the
   arm and the same restructuring applies.
+
+---
+
+## D-018 — Tombstones leave the statistics immediately, and `Len` stops counting documents
+
+**Date**: 2026-08-25 · **Milestone**: 11 · **Status**: accepted
+
+### The question
+
+`Stats` and `AvgDocLen` are what BM25 normalizes every score against. When a
+document is deleted, does it leave those numbers at once, or at the next commit,
+or not at all?
+
+The PRD asked it as a conflict: taking a tombstone out of the statistics
+immediately might fight the commit atomicity milestone 2 bought, and leaving it in
+makes **every score quietly wrong** — an IDF computed against a corpus larger than
+the one being searched, and a length normalization against an average that
+includes documents nobody can read.
+
+### The decision
+
+**Immediately, and exactly.** `deadSet` carries two running totals beside the
+bitmap — how many documents are tombstoned and how many tokens they held — and
+`Delete` maintains both in O(1) from the length the document actually had. `Stats`
+and `AvgDocLen` subtract them.
+
+There is no conflict with atomicity. The in-memory set is the authority and the
+`dead-<gen>` file is its durable copy, published by the same manifest rename that
+publishes a segment — which is exactly the arrangement `Add` already has with the
+pending segment. The conflict the question anticipated would only exist if the
+statistics were updated *at* commit boundaries; they are not.
+
+**And `Len` does not follow.** It counted documents and was also one past the
+highest `DocID`; a tombstone makes those different numbers. `Len` keeps the id
+bound and `Stats` takes the population.
+
+That split is forced, and by a scorer that never mentions deletion.
+`scorer/recency` walks `for i := range ix.Len()` and skips whatever `Doc`
+refuses. Narrowing `Len` to the live count would stop that walk short of the
+newest documents and return a wrong ranking rather than a slow one — so the one
+change that would have made `Len` "correct" is the one change that would have
+forced a scorer edit, which is the milestone's falsification condition.
+
+### What it costs, stated rather than argued away
+
+Two numbers on `Index` that must move together with every mutator, and an `Open`
+that walks the tombstone set to rebuild the token total — bounded by the set, not
+the corpus. And a corpus-walking scorer keeps visiting deleted ids: `recency` is
+O(id space) forever, because nothing reclaims an id.
+
+### The rejected alternative, and the signal that it was right
+
+**Leave tombstones in the statistics.** It costs nothing to implement and the
+error is small while the deleted fraction is small. It was rejected because the
+error is *invisible*: nothing reports it, no test fails, and a caller comparing
+weft's ranking against another engine's would find a discrepancy with no name.
+
+The signal that this decision was wrong: if an index with a high deleted fraction
+measures **higher** nDCG with tombstones left in, then leaving them in was acting
+as a length-normalization correction rather than as an error, and the exact
+answer is exactly the wrong one. Nothing has measured that. `docs/PERF.md` §5.5
+run B is where the number would come from.
+
+---
+
+## D-019 — DocIDs are never renumbered, so deletion reclaims nothing
+
+**Date**: 2026-08-25 · **Milestone**: 11 · **Status**: accepted
+
+### The question
+
+A tombstone hides a document. Something has to decide when — if ever — its bytes
+go away, and the honest options are two: compact during `Merge`, or never.
+
+### The decision
+
+**Never.** A deleted document keeps its `docs` record, its `keys` entry and its
+postings, and every `Merge` copies all of it forward. The only compaction weft
+has is a full re-index.
+
+Compaction means renumbering, and three separate things rest on `DocID` being
+what it is:
+
+1. `engine.TopK` breaks ties on `DocID`. Milestone 4 measured 241 reported slots
+   decided by that tiebreak alone, so renumbering moves rankings.
+2. Posting lists are ascending by `DocID`, which the block encoder's delta chain,
+   `Merge` and every reader take as given.
+3. `Merge` is a *concatenation* of adjacent segments precisely because ids do not
+   move. A compacting merge is a different algorithm with a different cost.
+
+Renumbering is therefore not a local change to `Merge`; it is the `DocID`
+namespacing problem [FINDINGS §3.4](FINDINGS.md) has carried since milestone 2,
+and doing it here would have meant doing that first.
+
+### What it costs, priced
+
+- **Disk grows monotonically with deletions and updates.** An update of a
+  committed document is a tombstone plus an append, so a workload that updates
+  hot documents repeatedly pays for every version it ever wrote.
+- **Ids are spent, not documents.** The ceiling `Add` enforces is 2³²−1 *ids*. A
+  corpus updated hot enough exhausts that before it exhausts documents. Nothing
+  has measured where.
+- **`Nearest` weakens.** It promised at least k candidates when the index holds k
+  vectors; a segment widens its own probe until it has them and then the
+  tombstones are filtered out afterwards, so fewer than k may survive. Recall
+  falls as the deleted fraction rises, and the widening loop would have to learn
+  about tombstones to fix it.
+
+All three are published in `docs/FORMAT.md` §8 and the README's limitations table
+rather than left in a comment.
+
+### The rejected alternative
+
+**Compact during `Merge`.** It is what every mature engine does and it is the
+right answer eventually. It was rejected for this round because it requires
+`DocID` namespacing first, and because milestone 11's question was whether
+deletion can be added *without* the scorers learning about it — a question that a
+renumbering merge does not answer any better, at several times the cost.
+
+The trigger for revisiting: a caller whose deleted fraction makes the disk or the
+`Nearest` recall a problem they can name. `docs/PERF.md` §5.5 run B is the first
+number on either.

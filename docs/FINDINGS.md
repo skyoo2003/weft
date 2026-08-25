@@ -2410,3 +2410,175 @@ check.
 5. **Three `ctx.Err()` polls have no test that lands on them deterministically** (the two
    `writeSegment` section boundaries and the Lloyd-pass poll). See
    [the TDD report](testing/weft-m9.tdd.md) for why pinning them was declined.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 11 — Deletion and update
+
+> In progress. The verdict sections are written as the round produces them; what
+> is here already is what has been paid for.
+
+## 1. The exported API cost, recorded before the golden moved
+
+`architecture_test.go` asks that a change to engine's surface be a deliberate
+edit rather than a passing one, and that the author write down what it bought
+before refreshing the golden. This is that entry.
+
+| Line added to `pkg/engine/testdata/engine_api.txt` | What a caller gets |
+| --- | --- |
+| `method Index.Delete(string) bool` | Removes the document with a Key and reports whether there was one |
+| `method Index.Update(Document) (DocID, error)` | Replaces the document holding a Key, returning the id it now has |
+| `var ErrNoSuchKey` | What `Update` reports for a Key no live document holds |
+
+**Three lines.** `Delete` is `bool` rather than `error` because the only way it
+fails is that the key was not there, and a segment too damaged to answer reads as
+absence everywhere else in this package ([D-006](DECISIONS.md)); it is the shape
+`Resolve` already has. `Update` can fail four ways that are not that — an empty
+key, a non-finite vector, a mismatched width, a key nobody holds — so it returns
+an error, and the `DocID` it returns is not decoration: an update of a
+*committed* document cannot rewrite the segment holding it, so it tombstones the
+old record and appends a new one under a new id.
+
+`Update` refuses an unknown key rather than inserting, which is
+`ErrDuplicateKey`'s rule read from the other side: a mistyped key must not
+silently become a second document, and it must not silently overwrite one either.
+
+`public_api.txt` is unchanged, `pkg/fusion` is unchanged, and no scorer
+implementation file changed — which is the milestone's actual claim and is
+judged in full below once the round closes.
+
+## 2. What `Len` stopped meaning
+
+`Len` counted documents and was also one past the highest `DocID`. A tombstone
+makes those two different numbers, and this round kept `Len` as the **id bound**
+and moved the population to `Stats`.
+
+The split is forced by a scorer that never mentions deletion. `scorer/recency`
+walks `for i := range ix.Len()` and skips whatever `Doc` refuses; narrowing `Len`
+to the live count would stop that walk short of the newest documents and return a
+wrong ranking rather than a slow one. `Stats` is what BM25 normalizes against, so
+leaving tombstones in *that* number is what would be quietly wrong. Each half now
+answers the caller that needs it.
+
+The cost is that a corpus with most of its documents deleted is still walked in
+full by a scorer shaped like `recency`, because nothing here reclaims an id.
+
+## 3. The falsification condition, judged
+
+The PRD fixed this before the round started: *does the index's account of which
+documents exist leak into the scorers' account?* If deletion had forced a wider
+`Scorer`, a wider `Query` or a line of `pkg/fusion`, then "fusion does not know
+what a signal is" would have been true only for a corpus that never changes.
+
+**It did not fire.** Measured the way milestone 1 measures it:
+
+| Clause | Result |
+| --- | --- |
+| `pkg/fusion` diff | **0 lines** |
+| `pkg/scorer/*` implementation diff (tests excluded) | **0 lines** |
+| `Scorer` interface | unchanged |
+| `Query`, `Document`, `Candidate`, `Fuser` | unchanged |
+| `pkg/engine/testdata/public_api.txt` | unchanged |
+| `pkg/engine/testdata/engine_api.txt` | **+3 lines**, §1 |
+| `go list -m all` | one line |
+
+What made it hold is one placement decision. The four scorers reach candidates
+through exactly seven methods — `text` through `LookupInto`, `vector` through
+`Nearest` and `Vector`, `graph` through `Doc` and `Resolve`, `recency` through
+`Len` and `Doc` — and the tombstone check went **inside** them rather than beside
+their callers. No scorer in this repository contains the word.
+
+That is a weaker result than it looks, and the weakness is worth writing down:
+these are *this repository's* four scorers, and the seven methods are the ones
+they happen to use. A scorer written outside the module reaching for a method
+that does not filter would find one — there is none today, because every read
+method filters, but "every read method" is a property maintained by hand and not
+by the type system. The check that would make it structural does not exist.
+
+### 3.1 What §3.4 was wrong about
+
+[Milestone 2 §4](#milestone-2--persistence) carried this forward: *"Two places
+depend on `DocID` increasing densely — the tiebreak in `engine.TopK`, and
+postings staying sorted because appends are monotonic. Deletion and segment merge
+break that invariant; design tombstones and generations first."*
+
+Deletion is built and neither place broke, because **the property those two need
+is monotonicity, not density.** `TopK` breaks ties on `DocID` and a sparse id
+space orders exactly as well as a dense one. Posting lists stay ascending because
+ids are still assigned in increasing order; the gaps a tombstone leaves change
+nothing about the comparison.
+
+What density is actually load-bearing for is the *docs* section, where a `DocID`
+is a position — and that is why nothing is reclaimed ([D-019](DECISIONS.md)).
+The note was right that ids and deletion are one problem. It named the wrong two
+places.
+
+## 4. Quality, judged — run C of the registered procedure
+
+`docs/PERF.md` §5.5 registered three runs before any of them was executed. This
+is run C. **Runs A and B have not been executed**, so the performance-invariance
+clauses of this milestone are unjudged; §5 says what that leaves open.
+
+```console
+$ make eval
+08:37:28 arm text                              nDCG@10 0.5826  (6.613s)
+08:37:39 arm text+vector                       nDCG@10 0.6211  (10.823s)
+```
+
+| Arm | Published | This round | Delta | Tolerance |
+| --- | --- | --- | --- | --- |
+| `text` | 0.5826 | **0.5826** | 0.0000 | −0.005 |
+| `text+vector` | 0.6211 | **0.6211** | 0.0000 | −0.005 |
+
+Identical to four decimals, which is **reading 1** of the four §5.5 fixed in
+advance. One observation, Apple M4 / go1.26.7, 2026-08-25 — not a median, per
+[D-013](DECISIONS.md).
+
+The argument this was checking is the one §5.5 named: every tombstone check takes
+an empty-set fast path, and the evaluation corpus has no deletions, so the
+scoring path should be the one that earned these numbers. An identical figure is
+consistent with that and does not prove it — what would have disproved it is any
+movement at all, since nothing else in this round touches scoring.
+
+### 4.1 It also read a version 3 index, on the real corpus
+
+`.eval-data/index/MANIFEST` is stamped version **3**, written before this round
+existed. `make eval` opened it, ran five arms over 171,332 documents and returned
+the published figures, with no conversion and no rebuild.
+
+That is the format metric — *existing v3 segments are read unconverted* —
+measured on a real corpus rather than only on the fixture
+`TestAV3GenerationOpensAndAnswers` builds. It was free, in the sense that nothing
+was done to obtain it: it is what running the quality suite at all now requires.
+
+## 5. Carried forward
+
+1. **The performance-invariance clauses are unjudged.** Shed 0 at 27.28 q/s,
+   p50 ≤ 40 ms, ladder peak RSS ≤ 120 MiB, worst read inside a commit window
+   ≤ 1 s — none measured, none failed, and nothing in this round should be read as
+   claiming them. Run A was attempted on 2026-08-25 and died during the index load
+   before the first rung reported, so there is not even a partial ladder; run B was
+   not attempted. The procedure, the four readings and the cut order are registered
+   at [PERF §5.5](PERF.md) and the run block is runnable as written — about 2.3
+   hours of machine time.
+
+   What that leaves resting on an argument rather than on a number: every tombstone
+   check takes an empty-set fast path, so an index with no deletions should be
+   running the code that earned those figures. §4 is one piece of evidence for it —
+   the quality suite reproduced its numbers exactly, and nothing else in this round
+   touches scoring — and a latency and memory figure is the piece that is missing.
+2. **The cost of a tombstone at query time has no instrument.** Run B needs a
+   `-deletefrac` flag `cmd/weft-eval` does not have. Until it exists,
+   [D-019](DECISIONS.md)'s question — *what deleted fraction forces a re-index* —
+   has no number on either the RSS or the recall side.
+3. **Nothing reclaims.** Deletion and update grow the directory monotonically and
+   spend `DocID`s that are never returned. [D-019](DECISIONS.md) prices it and
+   names the trigger for revisiting; `docs/FORMAT.md` §8 publishes it.
+4. **`Index.Nearest` weakened and it is unmeasured.** Tombstones are filtered
+   after a segment has widened its own probe, so its "at least k candidates"
+   contract no longer holds under deletion and recall falls as the deleted
+   fraction rises. No measurement exists.
+5. **The read-path filter is maintained by hand.** Every read method filters
+   today and nothing structural keeps a future one from forgetting — §3 states
+   this as the limit of the architecture result.

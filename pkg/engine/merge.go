@@ -41,6 +41,14 @@ type segSource interface {
 	totals() (totalLen, vecDim int)
 	doc(local int) Document
 	docLen(local int) int
+	// dead reports whether the document at this segment-local id is a tombstone.
+	//
+	// Every source answers yes for some of its documents eventually, and every
+	// one of them is still written: a DocID is a position in the docs section, so
+	// skipping a record would renumber the ones behind it and move rankings a
+	// deletion has no business moving. What this changes is the keys section
+	// alone — see encodeKeys.
+	dead(local int) bool
 	termList() []string // sorted
 	// postings hands term's postings to yield, ascending by segment-local
 	// DocID, and reports how many it handed over.
@@ -81,7 +89,10 @@ func (p *pendingSource) totals() (totalLen, vecDim int) {
 }
 func (p *pendingSource) doc(local int) Document { return p.ix.docs[local] }
 func (p *pendingSource) docLen(local int) int   { return p.ix.docLen[local] }
-func (p *pendingSource) termList() []string     { return slices.Sorted(maps.Keys(p.ix.postings)) }
+func (p *pendingSource) dead(local int) bool {
+	return p.ix.dead.has(p.ix.base + DocID(local))
+}
+func (p *pendingSource) termList() []string { return slices.Sorted(maps.Keys(p.ix.postings)) }
 
 // postings translates as it yields. The pending postings carry index-wide ids
 // and a segment records local ones, so every term needs its ids shifted — which
@@ -107,6 +118,12 @@ func (p *pendingSource) postings(t string, yield func(Posting)) int {
 type mergedSource struct {
 	segs []*segment
 	base DocID // segs[0].base, the id the merged segment starts at
+
+	// tombs is the index's tombstone set, read rather than owned. A merge does
+	// not change it — ids survive a concatenation untouched — but the keys
+	// section of the segment it writes is the live documents' alone, so the
+	// encoder has to be able to ask.
+	tombs *deadSet
 
 	// err holds the first thing this source could not read.
 	//
@@ -179,6 +196,10 @@ func (m *mergedSource) doc(local int) Document {
 		m.failf("merge: document %d does not read back", id)
 	}
 	return d
+}
+
+func (m *mergedSource) dead(local int) bool {
+	return m.tombs.has(m.base + DocID(local))
 }
 
 func (m *mergedSource) docLen(local int) int {
@@ -262,6 +283,48 @@ func (m *mergedSource) postings(t string, yield func(Posting)) int {
 // nothing measures it. `weft-eval bench -writes` times a commit and no arm times
 // a merge, and a reordering claimed as an improvement without a number is the
 // failure docs/FINDINGS.md exists to stop. Build the arm, then split the lock.
+// writeMergedSegment encodes the oldest k segments into seg-<gen> and fsyncs it,
+// returning what the manifest will say about it. Requires ix.wmu and ix.mu, and
+// publishes nothing — the manifest rename is still the commit point.
+//
+// Split out of Merge because Merge is the one function here whose statement
+// count the linter bounds, and because everything in it is one thing: producing
+// the bytes. What is left in Merge is the decisions.
+func (ix *Index) writeMergedSegment(root *os.Root, gen uint64, k int) (segInfo, error) {
+	seg := segDirName(gen)
+	if err := root.RemoveAll(seg); err != nil {
+		return segInfo{}, fmt.Errorf("merge %s: clearing stale segment: %w", ix.dir, err)
+	}
+	if err := root.Mkdir(seg, 0o700); err != nil {
+		return segInfo{}, fmt.Errorf("merge %s: %w", ix.dir, err)
+	}
+	segRoot, err := root.OpenRoot(seg)
+	if err != nil {
+		return segInfo{}, fmt.Errorf("merge %s: %w", ix.dir, err)
+	}
+	defer segRoot.Close()
+
+	src := &mergedSource{segs: ix.segs[:k], base: ix.segs[0].base, tombs: &ix.dead}
+	merged := segInfo{name: seg, base: src.base, count: src.count()}
+	// context.Background, and the note on Merge says why the signature does not
+	// carry one instead. A merge is uncancellable today exactly as it was before
+	// milestone 9, so this is the status quo written down rather than a decision
+	// made here.
+	if err := writeSegment(context.Background(), segRoot, src); err != nil {
+		return segInfo{}, fmt.Errorf("merge %s: %w", seg, err)
+	}
+	// A segment built out of something that would not read is not a segment to
+	// publish. writeSegment cannot report it — the source answers damage the way
+	// the read API does, with absence — so the failure comes off the source, and
+	// it is checked before anything on disk is named. See mergedSource.err.
+	if src.err != nil {
+		return segInfo{}, fmt.Errorf("merge %s: %w", seg, src.err)
+	}
+	syncDir(segRoot)
+	syncDir(root)
+	return merged, nil
+}
+
 func (ix *Index) Merge() error {
 	// wmu before mu, the order every mutator uses. Merge is one of the four
 	// places that takes mu exclusively, and a Merge queued in mu.Lock would stall
@@ -294,46 +357,24 @@ func (ix *Index) Merge() error {
 		return fmt.Errorf("merge %s: %w", ix.dir, err)
 	}
 
-	gen, live, err := readManifest(root)
+	// The tombstone count the directory publishes is not read back: this index's
+	// own set is the authority, sameDir has just established that the directory
+	// is the one these segments came from, and Merge holds the write lock so the
+	// set cannot move underneath it.
+	m, err := readManifest(root)
 	if err != nil {
 		return fmt.Errorf("merge %s: %w", ix.dir, err)
 	}
+	gen, live := m.gen, m.segs
 	if len(live) != len(ix.segs) {
 		return fmt.Errorf("merge %s: the directory holds %d segments, this index has %d: %w",
 			ix.dir, len(live), len(ix.segs), ErrCorrupt)
 	}
 
-	seg := segDirName(gen + 1)
-	if err := root.RemoveAll(seg); err != nil {
-		return fmt.Errorf("merge %s: clearing stale segment: %w", ix.dir, err)
-	}
-	if err := root.Mkdir(seg, 0o700); err != nil {
-		return fmt.Errorf("merge %s: %w", ix.dir, err)
-	}
-	segRoot, err := root.OpenRoot(seg)
+	merged, err := ix.writeMergedSegment(root, gen+1, k)
 	if err != nil {
-		return fmt.Errorf("merge %s: %w", ix.dir, err)
+		return err
 	}
-	defer segRoot.Close()
-
-	src := &mergedSource{segs: ix.segs[:k], base: ix.segs[0].base}
-	merged := segInfo{name: seg, base: src.base, count: src.count()}
-	// context.Background, and the note above this function says why the signature
-	// does not carry one instead. A merge is uncancellable today exactly as it was
-	// before milestone 9, so this is the status quo written down rather than a
-	// decision made here.
-	if err := writeSegment(context.Background(), segRoot, src); err != nil {
-		return fmt.Errorf("merge %s: %w", seg, err)
-	}
-	// A segment built out of something that would not read is not a segment to
-	// publish. writeSegment cannot report it — the source answers damage the way
-	// the read API does, with absence — so the failure comes off the source, and
-	// it is checked before anything on disk is named. See mergedSource.err.
-	if src.err != nil {
-		return fmt.Errorf("merge %s: %w", seg, src.err)
-	}
-	syncDir(segRoot)
-	syncDir(root)
 
 	// Mapped before it is published, not after. The files are durable and
 	// nothing names them yet, so a mapping that fails here leaves the directory
@@ -343,11 +384,24 @@ func (ix *Index) Merge() error {
 	// retried.
 	replacement, err := openSegment(root, merged.name, merged.base)
 	if err != nil {
-		return fmt.Errorf("merge %s: %w", seg, err)
+		return fmt.Errorf("merge %s: %w", merged.name, err)
 	}
 
+	// The tombstone set, republished under the new generation before the manifest
+	// names it. Its contents do not change: a merge concatenates adjacent
+	// segments and renumbers nothing, which is the same property that keeps every
+	// ranking — so every id in the set still names the document it named.
+	//
+	// It has to be rewritten all the same, because prune keeps exactly the live
+	// generation's file and this generation is about to be a different number.
+	if err := writeDead(root, gen+1, ix.dead.all()); err != nil {
+		replacement.close() //nolint:errcheck // already returning an error
+		return fmt.Errorf("merge %s: %w", ix.dir, err)
+	}
+	syncDir(root)
+
 	published := append([]segInfo{merged}, live[k:]...)
-	if err := writeManifest(root, gen+1, published); err != nil {
+	if err := writeManifest(root, gen+1, published, ix.dead.n); err != nil {
 		replacement.close() //nolint:errcheck // already returning an error
 		return fmt.Errorf("merge %s: %w", ix.dir, err)
 	}
@@ -360,6 +414,6 @@ func (ix *Index) Merge() error {
 		s.close() //nolint:errcheck // the merge is published; there is nothing to undo
 	}
 
-	prune(root, published)
+	prune(root, published, gen+1)
 	return nil
 }
