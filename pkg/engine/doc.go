@@ -83,8 +83,18 @@ type Candidate struct {
 // scorer too; prefer the constructor, because a missing context value is a
 // runtime surprise where a missing constructor argument will not compile.
 //
+// Two scorers needing the *same* per-query value are the same shape, not a new
+// one: construct both from that one value. And keep the half of a scorer's input
+// that does not change per query out of that path — a corpus-sized side store is
+// built once and handed to each scorer, so a per-query construction costs an
+// allocation instead of a rebuild.
+//
 // Do not reuse Seeds for this. The graph scorer reads it, and two scorers
-// sharing one field is how one of them silently stops working.
+// sharing one field is how one of them silently stops working — with no error,
+// because Seeds carries document Keys and a "more like this one" signal from
+// outside carries a document Key too, so each side reads a value that is
+// well-formed for the other. TestOneQueryTimeValueReachesTwoExternalScorers pins
+// both halves of that.
 type Query struct {
 	Text   string
 	Vector []float32

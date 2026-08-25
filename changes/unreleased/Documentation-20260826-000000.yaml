@@ -1,0 +1,25 @@
+kind: Documentation
+body: 'A constraint expressed as a scorer does not filter, and now the documentation says
+  so. Rank fusion is a union of votes: a document''s score sums over the streams it appears
+  in, so a scorer returning only the documents that satisfy a phrase, a field match or a
+  price ceiling expresses a preference rather than an exclusion, and everything it refused
+  comes back on another scorer''s vote — with no error and a plausible-looking ranking. What
+  excludes is a `Fuser` that reads one stream as a restriction, which `Search` has always
+  accepted as a parameter and which needs nothing exported that is not already there.
+  `engine.Fuser` now states this, `ExampleFuser` is it in a compiling program, and the README
+  carries it as a fourth thing that is not obvious from the skeleton. Three further silences
+  are closed: `engine.Posting` now says it carries no term positions, so no phrase can be
+  decided from the index and the shape that survives is a scorer wrapping another scorer
+  rather than one sweeping the corpus; `engine.Query` now says that two scorers needing one
+  per-query value construct from it together and that the corpus-sized half of an input is
+  built once; and the README''s limitations table gains phrase search, field restriction and
+  the constraint rule. `docs/ADOPTION.md` section 2.1 is corrected — it claimed `go doc`
+  renders Examples for two milestones and it does not, so the answer milestone 6 placed in
+  `ExampleScorer` has been invisible to terminal readers since it was written. All four
+  defects were found by two blind trial subjects who shared no context, wrote 84 and 86 lines
+  against a 100-line budget, opened no source file, and needed no new exported name: the
+  trials are `docs/ADOPTION.md` section 8 and the verdict is `docs/FINDINGS.md` milestone 12.
+  No exported API moved and both golden API files are byte-identical.'
+time: 2026-08-26T00:00:00.000000000+09:00
+custom:
+  Issue: 17

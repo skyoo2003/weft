@@ -75,8 +75,18 @@ what a real adopter would have, and records every point at which it was blocked.
 | In | Out |
 | --- | --- |
 | every `.md` in the repository except the two on the right | this file, and `docs/testing/*.tdd.md` |
-| `go doc` output for any package, including rendered Examples | every `.go` under `pkg/`, `internal/`, `cmd/`, `bench/`, and `pkg/engine/testdata/*` |
+| `go doc` output for any package, and what pkg.go.dev renders from it | every `.go` under `pkg/`, `internal/`, `cmd/`, `bench/`, and `pkg/engine/testdata/*` |
 | everything under `examples/` | the git history, the PRD, and `.claude/plans/` |
+
+**Corrected 2026-08-26.** This row said "`go doc` output for any package, including
+rendered Examples" from milestone 6 until the milestone 12 trials, and the second
+half of that was false. `go doc` renders no Examples at all: `go doc -all
+./pkg/engine` prints the word `ExampleScorer` only where a doc comment happens to
+mention it, and `go doc ./pkg/engine ExampleScorer` answers `no symbol
+ExampleScorer in package`. Only pkg.go.dev renders them. Task C's subject
+established this by trying three invocations and is the reason it is written down
+here; §8 carries what it costs, which is more than a wording fix, because
+milestone 6 repaid its worst defect with an Example.
 
 The two excluded documents are excluded for one reason: both record the answer.
 This file states the verdict on prediction A in §1.1, and the TDD evidence states
@@ -392,3 +402,102 @@ Readings 1 and 4 can both be true. Then both are published.
 what was attempted, which document was read before getting stuck, how it was
 resolved, and its class. The self-reported enforcement of §2.2 is inherited
 without improvement, and so is every limit in §4.
+
+## 8. Milestone 12 results
+
+Two trials, 2026-08-26, one session each, two agents with no prior sight of the
+tree and no sight of each other's task.
+
+```text
+weft adoption trial   task=C (per-query viewer, two scorers, corpus-sized stores)   subject=agent   2026-08-26
+  blockers    docs-closable 1   code-required 0   source-opened 0
+  size        impl 84 lines (budget 100)   call-site 8 lines   pkg/ diff 0 lines
+  time        one pass — first build and first run both succeeded
+  verdict     possible from documentation alone
+
+weft adoption trial   task=D (phrase and field restriction)   subject=agent   2026-08-26
+  blockers    docs-closable 3   code-required 0   source-opened 0
+  size        impl 86 lines (budget 100)   call-site 8 lines   pkg/ diff 0 lines
+  time        one pass to first correct ranking
+  verdict     D-i expressible, D-ii expressible — each needs a custom Fuser as well as a custom Scorer
+```
+
+**The §7.1 prediction holds: zero code-required blockers in both tasks.** Neither
+subject needed a new exported name, a new `Document` field or a new `Query`
+field, neither opened a `.go` file, and both came in under the 100-line budget.
+Under §7.5 this is **reading 1**, and the consequence is registered in advance:
+the PRD's *"milestone 6's defects 2 and 3 move from documentation repayment to
+code repayment"* is **wrong**, and `docs/FINDINGS.md` milestone 12 publishes it as
+wrong.
+
+**Reading 4 did not fire.** A field restriction is expressible without touching
+the on-disk format — a caller-held title table joined through `Index.Resolve` —
+so the outcome clause "a field restriction can be expressed" is **met**, not
+unmet. The format-change carry-forward this section was prepared to make is not
+needed.
+
+### 8.1 Four documentation defects, and the third is the one that matters
+
+| # | Defect | Found by | Class |
+| --- | --- | --- | --- |
+| 4 | `fusion.Fuse` is a union of votes, not an intersection. A constraint expressed as a `Scorer` is a ranking preference, and every document it refused returns to the fused result on another scorer's vote — silently, with no error. Nothing said so. | D | docs |
+| 5 | `Posting` has `Doc` and `Freq` and no position, so a phrase can only be decided by decoding document text. Nothing said so, and nothing said the cheap shape is to wrap another scorer rather than sweep every `DocID`. | D | docs |
+| 6 | The index has no field concept, so a field restriction is a caller-side convention. Nothing said so. | D | docs |
+| 7 | `go doc` renders no Examples, so the answer milestone 6 put in `ExampleScorer` is invisible to a terminal reader. §2.1 asserted the opposite. | C | docs |
+
+Defect 4 is the one worth the round. Both other trials in §6 and both tasks here
+produced signals that were *additive* — a view count, a distance, a topic match —
+and rank fusion is built for exactly that. The first constraint anyone writes is
+subtractive, and the architecture that makes an additive signal free makes a
+subtractive one silently wrong. The subject found it only because it was asked to
+run the arrangement it had not run: its own demonstration had each constraint as
+the sole scorer, where the trap cannot appear.
+
+**That is a limit of this instrument worth recording.** A task that says "make
+this work" is completed by the arrangement in which it works. Neither §6 nor this
+section would have found defect 4 without a follow-on asking for the composition
+an adopter would actually ship, and nothing in §2.3 required one.
+
+### 8.2 What the subjects had to establish by experiment
+
+- **D ran the fused arrangement and watched the exclusion fail.** Its report:
+  `REAPPEARED phrase-nearmiss-order`, and the same for the other two near-misses
+  and all three body-only documents. It then wrote a 22-line `Fuser` that reads
+  the last stream as a restriction, and the exclusion held. It classified this
+  docs-closable by the §3 rule — the exported API already permitted it — which is
+  the correct call and is why nothing was added to `Query`.
+- **C tried three `go doc` invocations** looking for the Example the README names,
+  and concluded it is not retrievable that way. It did not fall back to reading
+  source; the prose in `Document`'s and `Query`'s doc comments was sufficient on
+  its own, which is defect 7's silver lining and §8.3's subject.
+- **D's phrase scorer swept the whole corpus** — every `DocID`, decode, tokenize,
+  scan — because nothing told it the wrapping shape. It priced this itself:
+  *"O(documents × doc length), no caching, redone every query."*
+
+### 8.3 What milestone 6's repayment actually bought
+
+[D-010](DECISIONS.md) registered the signal that would show it was wrong: *the
+same question keeps being asked after `ExampleScorer` and three sentences are in
+place.* The signal is read here, and the answer is split.
+
+**The question did not come back.** Task C is the harder restatement of task B and
+it produced no blocker on the query-time input at all — the subject named the two
+doc comments and built from them first try. The three sentences milestone 6 wrote
+did their job.
+
+**The Example did not.** `go doc` never rendered it (defect 7), so for a terminal
+reader it has been dead since it was written, and the prose carried the whole
+load alone. D-010's judgment that answers belong where `go doc` renders them was
+right; the belief that an `Example` is such a place was wrong, and it took a
+milestone to notice.
+
+### 8.4 What this result is not
+
+Every limit in §4 stands unchanged, and §8.1's last paragraph adds one: **the
+instrument measures the arrangement the task names.** Both subjects were agents
+(§4's first limit), both knew they were measured, and the boundary was
+self-reported (§2.2). One session per task, so no variance is measured.
+
+Neither subject was asked to make its scorer fast, and D's corpus sweep would not
+survive contact with a real corpus. That the documentation now names the wrapping
+shape is a repayment of defect 5, not evidence that anyone would have found it.

@@ -49,6 +49,16 @@ var (
 )
 
 // Posting is one document's occurrence count for one term.
+//
+// A count, and not a position list: nothing here records *where* in the document
+// the term occurred. So a constraint that depends on position — an exact phrase,
+// a proximity window — cannot be decided from postings at all, and the only
+// route left is the document text itself, through Doc. That costs one record
+// decode per document considered, which docs/FINDINGS.md milestone 5 section 3.2
+// measured as the throughput wall, so the shape that survives is a scorer
+// wrapping another scorer and filtering its candidates; sweeping every DocID
+// pays that decode across the whole corpus on every query. A position index is a
+// format change and is not planned (docs/FORMAT.md section 8).
 type Posting struct {
 	Doc  DocID
 	Freq int
