@@ -2773,3 +2773,90 @@ Both identical to the published figures, well inside the −0.005 tolerance.
    is the cost of that, and no future task is required to include the composition
    an adopter would ship. A next round should fix the protocol, not just this
    round's finding.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 13 — The tokenizing seam
+
+## 1. The budget, registered before the code
+
+Milestone 12's answer was zero implementation lines, and that is not available
+here: `engine.Tokenize` is a function, and a function is not made replaceable by
+a sentence. So the one place this round can be honest is the one milestone 12 did
+not need — **write the line count down first, then spend it, then publish the
+two side by side.** That is [D-015](DECISIONS.md)'s order, and everything in this
+section was committed before the first line of implementation.
+
+### 1.1 The golden budget — 5 to 7 lines
+
+The seam attaches to the constructor. Four rungs were priced and three rejected
+before anything was written; [D-022](DECISIONS.md) carries the ladder. Rung 1 —
+`New(opts ...Option)` / `Open(dir, opts ...Option)` plus `WithTokenizer` — is
+what the budget below is for.
+
+| Item | `engine_api.txt` | Note |
+| --- | --- | --- |
+| `type Tokenizer func(string) []string` | +1 | |
+| `type Option` and whatever members it renders | +1 to +2 | The rendered shape is not known yet; it is recorded when it is spent |
+| `func WithTokenizer(Tokenizer) Option` | +1 | |
+| `method Index.Tokenize(string) []string` | +1 | The query side's way in |
+| `func New(...Option) *Index` | 1 changed | |
+| `func Open(string, ...Option) (*Index, error)` | 1 changed | |
+| `var ErrTokenizerMismatch` | +1 | [§1.4](#14-the-guard-is-a-recomputation-not-a-stored-name) |
+| **Total** | **5 to 7** | `public_api.txt` holds only what is outside `pkg/engine`, so **0 expected** |
+
+Overspending is allowed and silence is not: the overspend and what demanded it
+go here **before** `WEFT_UPDATE_GOLDEN=1` runs.
+
+### 1.2 The invariants, fixed in advance
+
+| Subject | Budget |
+| --- | --- |
+| `pkg/fusion` | **0 lines** |
+| `Scorer`, `Fuser`, `Candidate`, `Document`, `Query` | **unchanged** |
+| `pkg/scorer/text` | **1 line** (`engine.Tokenize` → `s.ix.Tokenize`) plus comment |
+| `pkg/scorer/{graph,recency,vector}` | **0 lines** |
+| `go list -m all` | one line |
+| On-disk format | **v4 unchanged.** v3 and v4 segments still read with nothing converted |
+| nDCG@10 | 0.5826 (`text`) / 0.6211 (`text+vector`), tolerance −0.005 |
+
+If `pkg/fusion` moves or `Scorer` has to widen, the round stops there and the
+falsification condition is judged rather than the plan repaired.
+
+### 1.3 Where the falsification condition is read
+
+One line: `pkg/scorer/text/text.go`, the call that today reads
+`engine.Tokenize(q.Text)`.
+
+- **`s.ix.Tokenize(q.Text)`** — the scorer *asked* the index, the same shape as
+  `ix.Lookup` and `ix.Stats`, and signal-neutrality holds.
+- **A tokenizer reaching the scorer through `Query` or `Scorer`** — the index's
+  account leaked into the scorers', which is stage 1 of the PRD's falsification
+  condition. It is then published with the hypothesis narrowed, not reverted.
+
+### 1.4 The guard is a recomputation, not a stored name
+
+Open Question 5 asks whether an index-time/query-time tokenizer split can be
+caught mechanically instead of failing as a silent zero-hit query. The answer
+registered here is **yes, from the bytes already on disk**, and it does not
+touch the format. `Open` recomputes one live non-empty document's tokens and
+compares them against what was stored: the count against `docoff`'s token count,
+and each recomputed term against the segment's terms index. Disagreement is
+`ErrTokenizerMismatch`. Storing a tokenizer *name* was rejected — a label can
+lie and bytes cannot; [D-023](DECISIONS.md) carries both sides.
+
+### 1.5 The Korean trial's decision rule
+
+Open Question 6 says ">0 hits" is a weak predicate. The rule registered here is
+stronger and costs two decoy documents:
+
+| Tokenizer | Assertion |
+| --- | --- |
+| Default | **0 candidates.** `strings.FieldsFunc` cuts only at non-letters, so `"검색엔진을" ≠ "검색엔진"` |
+| Replaced | **at least 1 candidate, the top one is the target, and no decoy is present** |
+
+The replacement tokenizer does not ship. A character bigram over Hangul
+syllable runs lives in the test file and in `ExampleWithTokenizer`, which is
+what an adopter's own tokenizer looks like plugged in; weft shipping a second
+one would make the seam a menu instead of a seam.
