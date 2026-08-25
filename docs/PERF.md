@@ -833,12 +833,19 @@ passes on one observation. The run also opened a format **version 3** index, the
 `make eval-data` built before this round, so it doubles as the unconverted-read metric
 on the real 171,332-document corpus rather than on a fixture.
 
-Runs A and B were not run, so **the performance-invariance clauses are unjudged** —
-not passed, and not failed. That is the first entry of the cut order above taken,
-plus the `-writes` half of the second; the ladder rung this file said would not be
-cut has also not been run, which is a departure from the order and is recorded here
-rather than in a commit message. [FINDINGS milestone 11 §5](FINDINGS.md) carries it
-forward.
+**Run A was attempted and produced nothing.** Started 2026-08-25 19:25:25 KST and
+terminated during the index load, before the first rung reported: the log holds one
+`date` line and no measurement. There is no partial ladder to read and none is
+published. Run B was not attempted; its instrument does not exist.
+
+So **the performance-invariance clauses are unjudged — not passed, and not failed.**
+That is a departure from the cut order above, which said the ladder is not cut, and
+it is recorded here rather than in a commit message. What the order got right is the
+priority: `make eval` holds this round's quality denominator and it ran.
+
+Whoever picks this up runs the run A block unchanged. Nothing about the tree has to
+change first and the four readings above still stand as written.
+[FINDINGS milestone 11 §5](FINDINGS.md) carries it forward.
 
 ### Machine
 

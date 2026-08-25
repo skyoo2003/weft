@@ -2554,11 +2554,20 @@ was done to obtain it: it is what running the quality suite at all now requires.
 
 ## 5. Carried forward
 
-1. **Runs A and B have not happened.** The performance-invariance clauses —
-   shed 0 at 27.28 q/s, p50 ≤ 40 ms, ladder peak RSS ≤ 120 MiB, worst read inside
-   a commit window ≤ 1 s — are **unjudged**, and nothing in this round should be
-   read as claiming them. The procedure and the four readings are registered at
-   [PERF §5.5](PERF.md); about 1.25 hours of machine time.
+1. **The performance-invariance clauses are unjudged.** Shed 0 at 27.28 q/s,
+   p50 ≤ 40 ms, ladder peak RSS ≤ 120 MiB, worst read inside a commit window
+   ≤ 1 s — none measured, none failed, and nothing in this round should be read as
+   claiming them. Run A was attempted on 2026-08-25 and died during the index load
+   before the first rung reported, so there is not even a partial ladder; run B was
+   not attempted. The procedure, the four readings and the cut order are registered
+   at [PERF §5.5](PERF.md) and the run block is runnable as written — about 2.3
+   hours of machine time.
+
+   What that leaves resting on an argument rather than on a number: every tombstone
+   check takes an empty-set fast path, so an index with no deletions should be
+   running the code that earned those figures. §4 is one piece of evidence for it —
+   the quality suite reproduced its numbers exactly, and nothing else in this round
+   touches scoring — and a latency and memory figure is the piece that is missing.
 2. **The cost of a tombstone at query time has no instrument.** Run B needs a
    `-deletefrac` flag `cmd/weft-eval` does not have. Until it exists,
    [D-019](DECISIONS.md)'s question — *what deleted fraction forces a re-index* —
