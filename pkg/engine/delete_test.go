@@ -13,6 +13,7 @@ package engine_test
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -127,6 +128,88 @@ func TestUpdateOfACommittedDocumentSpendsAnID(t *testing.T) {
 		t.Errorf("Len() = %d, want %d — an update of a committed document spends an id", got, deletionCorpusSize+1)
 	}
 	assertReadsBack(t, ix, 5)
+}
+
+// TestARefusedUpdateLeavesTheDocumentItCouldNotReplace is the rule the two update
+// paths have to keep in common, and only one of them used to.
+//
+// The committed path is delete-then-append, and a mark is the one thing this
+// package cannot undo: if the append is refused after it — a mismatched vector
+// width, or the document ceiling — the caller gets an error and the document is
+// gone. That is data loss reported as a refusal, which is worse than either.
+func TestARefusedUpdateLeavesTheDocumentItCouldNotReplace(t *testing.T) {
+	dir := t.TempDir()
+	ix := engine.New()
+	deletionCorpus(t, ix)
+	if err := ix.Commit(t.Context(), dir); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	defer ix.Close() //nolint:errcheck // teardown
+
+	key := deletionKey(5)
+	before, ok := ix.Resolve(key)
+	if !ok {
+		t.Fatal("Resolve before updating: not found")
+	}
+	wide := updatedDoc(5)
+	wide.Vector = append(wide.Vector, 1) //nolint:gocritic // a width the corpus does not have, on purpose
+
+	if _, err := ix.Update(wide); !errors.Is(err, engine.ErrDimMismatch) {
+		t.Fatalf("Update with a mismatched vector width: got %v, want ErrDimMismatch", err)
+	}
+	after, ok := ix.Resolve(key)
+	if !ok {
+		t.Fatalf("Resolve(%q) after a refused update: not found — the update deleted what it could not replace", key)
+	}
+	if after != before {
+		t.Errorf("Resolve(%q) = %d after a refused update, was %d", key, after, before)
+	}
+	if _, ok := ix.Doc(before); !ok {
+		t.Errorf("Doc(%d) after a refused update: not found", before)
+	}
+	docs, _ := ix.Stats()
+	if docs != deletionCorpusSize {
+		t.Errorf("Stats() counts %d documents after a refused update, want %d", docs, deletionCorpusSize)
+	}
+}
+
+// TestUpdateDoesNotWriteThroughASliceLookupHandedOut. Lookup's pending fast path
+// returns ix.postings[term] itself, and the caller reads it after the lock is
+// released — so a mutator that edits that list where it lies reaches a scorer
+// mid-walk. Add never could: it only appends, which writes past the end. An
+// update can, in both directions, and what it leaves behind is not a stale
+// posting but a wrong one.
+func TestUpdateDoesNotWriteThroughASliceLookupHandedOut(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		text string
+	}{
+		// A term the replacement drops: the delete shifts the tail down over the
+		// slice the caller is holding.
+		{"a dropped term", "b", "dog"},
+		// A term it keeps at a different frequency: the write lands on a posting
+		// in place.
+		{"a changed frequency", "b", "cat"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ix := engine.New()
+			for _, k := range []string{"a", "b", "c"} {
+				if _, err := ix.Add(engine.Document{Key: k, Text: "cat cat"}); err != nil {
+					t.Fatalf("Add(%q): %v", k, err)
+				}
+			}
+			held := ix.Lookup("cat")
+			want := slices.Clone(held)
+
+			if _, err := ix.Update(engine.Document{Key: tc.key, Text: tc.text}); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+			if !slices.Equal(held, want) {
+				t.Errorf("the postings Lookup handed out are now %v, were %v — Update wrote through them", held, want)
+			}
+		})
+	}
 }
 
 // TestUpdateOfAnUnknownKeyIsRefused. An update that quietly inserted would make a

@@ -97,7 +97,11 @@ func main() {
 	// scorer.
 	weighted := fusion.FuseWeighted(1, 1, 0.1, 1)
 
-	fmt.Printf("weft — %d documents, %d scorers. Query syntax: TEXT [@ v1,v2,v3]. Ctrl-D to quit.\n\n", ix.Len(), len(scorers))
+	// Stats, not Len: since deletion exists Len is one past the highest DocID and
+	// counts the tombstones with it, so a corpus that has been deleted from would
+	// be announced larger than it is. Stats is the live population.
+	docs, _ := ix.Stats()
+	fmt.Printf("weft — %d documents, %d scorers. Query syntax: TEXT [@ v1,v2,v3]. Ctrl-D to quit.\n\n", docs, len(scorers))
 
 	in := bufio.NewScanner(os.Stdin)
 	for {

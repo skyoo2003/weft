@@ -1245,20 +1245,14 @@ func refuseForeignEntries(root *os.Root) error {
 	}
 	for _, e := range entries {
 		switch {
-		// A tombstone file is the third name Commit deletes on sight — prune
-		// removes every generation's but the live one — so it owes the same proof
-		// of ownership the other two do.
-		case strings.HasPrefix(e.Name(), deadPrefix):
-			if !e.Type().IsRegular() {
-				return fmt.Errorf("%s is not a file and no manifest claims it, so weft will not delete it", e.Name())
-			}
-			if err := refuseForeignFile(root, e.Name()); err != nil {
-				return err
-			}
-		case e.Name() == manifestName+".tmp":
-			// A symlink is not a regular file here — ReadDir reports the link
-			// itself — so one planted at this name is somebody else's, which is
-			// also what stops the read below from following it.
+		// The two plain-file names Commit deletes on sight: the manifest's temp
+		// file, and a tombstone file — prune removes every generation's but the
+		// live one. Both owe the same proof of ownership, so they are one case.
+		//
+		// A symlink is not a regular file here — ReadDir reports the link itself —
+		// so one planted at either name is somebody else's, which is also what
+		// stops refuseForeignFile from following it.
+		case strings.HasPrefix(e.Name(), deadPrefix), e.Name() == manifestName+".tmp":
 			if !e.Type().IsRegular() {
 				return fmt.Errorf("%s is not a file and no manifest claims it, so weft will not delete it", e.Name())
 			}
