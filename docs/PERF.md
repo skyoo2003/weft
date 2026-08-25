@@ -772,9 +772,18 @@ that has never had a document deleted pays one branch per lookup rather than one
 and the evaluation corpus has no deletions at all. If that argument holds, run A and run C
 reproduce their published figures. If it does not, they will not.
 
+**Correction, made before run A was executed rather than after.** This section first
+wrote run A as `-rates 27.28`, a single rung, while its own pass line says *ladder* peak
+RSS. Those are not the same reading. `peakrss` is `ru_maxrss`, a high-water mark the
+kernel never lowers (§2.7), so a lone rung starts from a lower baseline than the same
+rung reached at the end of a four-rung climb — comparing one against milestone 8's
+100.7 MiB is the cross-cohort comparison §5.4 exists to refuse. [D-014](DECISIONS.md)
+fixed the reading as the ladder's peak, so run A is milestone 8's ladder, unchanged:
+
 ```bash
-# Run A — the published operating point, no deletions.
-date; caffeinate -dimsu make bench BENCHFLAGS='-rates 27.28'; date
+# Run A — the published operating point, no deletions. The same four rungs milestone 8
+# climbed, because the memory reading is the ladder's peak and not a rung's.
+date; caffeinate -dimsu make bench BENCHFLAGS='-rates 3.41,6.82,13.64,27.28'; date
 date; caffeinate -dimsu make bench BENCHFLAGS='-writes -writedocs 20000'; date
 
 # Run C — quality, no deletions.
@@ -807,8 +816,9 @@ than as an omission.
    it. Publish it as the opening figure on "when does a deleted fraction force a re-index",
    which [D-019](DECISIONS.md) leaves open.
 
-**Budget and the cut order, fixed now.** A is about 1.25 h (one ladder rung plus the
-`-writes` arm), B about 0.75 h plus the flag that does not exist, C is minutes. Cut in this
+**Budget and the cut order, fixed now.** A is about 2.3 h — the four-rung ladder took
+milestone 8 91 minutes 46 seconds, plus the `-writes` arm's 45 — B about 0.75 h plus the
+flag that does not exist, C is minutes. Cut in this
 order: **B first** — the open question stays open and is published as still open; then the
 `-writes` half of A — which loses only the milestone 9 clause; **the ladder rung and `make
 eval` are not cut.** They are the two that hold this round's denominators.
