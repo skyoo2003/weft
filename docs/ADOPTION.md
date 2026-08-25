@@ -280,3 +280,115 @@ milestone.
 
 Both subjects also reported honestly under a boundary that was self-reported
 (§2.2), which is the outcome this design hoped for and cannot verify.
+
+## 7. Milestone 12 — the same instrument, a harder question
+
+Milestone 12's outcome is also a claim rather than a feature:
+
+> An external scorer receives its own query-time input without modifying weft,
+> and a text-side constraint — a phrase, a field restriction — can be expressed.
+
+The PRD puts a third sentence on top of those two: *milestone 6's defects 2 and 3
+move from documentation repayment to code repayment.* That third sentence is a
+**prediction, not an outcome**, and this section registers the opposite
+prediction before either trial runs.
+
+### 7.1 The prediction registered before the trials
+
+**Prediction C/D — both tasks complete with zero code-required blockers.** Three
+grounds, all of them already in the repository:
+
+1. **The precedent has already passed.** Task B in §6 was exactly a "query-time
+   input" task, and it came in at 76 implementation lines, a one-line call site
+   and a `pkg/` diff of 0.
+2. **The prose repayment is already in three places.** `engine.Query`'s doc
+   comment names constructor binding and prices the context alternative,
+   `Search`'s names the `k` duality, and the README repeats both under *Adding a
+   scorer*. Defect 2 was "nothing says how", so the defect as stated is gone.
+3. **Scorer-wrapping composition already exists.** `graph.New(ix, txt)` is a
+   scorer that takes a scorer. A constraint can be expressed by wrapping the
+   text stream, and the wrapper picks its own inner depth, so it does not run
+   into the `k` duality either.
+
+If this prediction holds, **the PRD's third sentence is wrong**, and the
+milestone publishes it as wrong. If it fails, the blocker that failed it is what
+gets repaid. Either way the result is the blocker list, as in §3.
+
+**This is why this file remains outside the boundary in §2.1.** It now records a
+prediction as well as an answer, so a subject reading it would be reading the
+hypothesis it exists to test.
+
+### 7.2 Zero blockers here would not be a pass, so the tasks are harder
+
+§3's *"zero blockers is a result, not a pass"* binds hardest in a round that
+predicts zero. Re-running task B would measure a documentation edit, not a new
+question, so both tasks below are deliberately past the shape §6 already cleared.
+
+**Task C — query-time input, made harder along two axes.**
+
+- **The scorer is expensive to construct.** Task B's geo scorer was small enough
+  that "build one per query" cost an allocation. Task C's scorer must hold a side
+  store the size of the corpus, so per-query reconstruction is not the answer.
+  The question is whether the store (once) and the query input (every time) can
+  be separated.
+- **Two external scorers share one query-time input.** `engine.Query`'s doc
+  comment warns that two scorers sharing `Seeds` is how one of them silently
+  stops working. This is the arrangement where that warning would actually fire.
+
+**Task D — the text-side constraint, in two parts.**
+
+- **D-i, phrase.** Exactly these two words, in this order, adjacent.
+- **D-ii, field restriction.** Match in the title only.
+
+### 7.3 Two facts fixed here that the subjects are not told
+
+Written down before the trials so that the record shows they were known in
+advance, and so that "the subject discovered it" is distinguishable from "the
+subject was told".
+
+- **`engine.Posting` carries `Doc` and `Freq` and no position.** An exact phrase
+  cannot be decided from postings. The only remaining route is the document text
+  itself, which means one record decode per candidate — and that decode is what
+  [FINDINGS milestone 5 §3.2](FINDINGS.md) named as the throughput wall.
+- **The index has no concept of a field.** `engine.Document` has one `Text`, and
+  `Tokenize` puts all of it into one term space. Any field restriction has to be
+  a convention on the adopter's side — a side store, a second index, a term
+  prefix — and which of those actually stands up is what the trial answers.
+
+Whether a subject finds either fact is half of task D.
+
+Both tasks keep §2.3's limits: **under 100 implementation lines, zero source
+files opened**, and the boundary of §2.1 unchanged.
+
+### 7.4 Two judgment rules added to §3
+
+§3's blocker classification is inherited exactly — docs-closable versus
+code-required, decided by *attempting the API arrangement*. Two rules are added.
+
+- **Added rule 1 — code-required blockers are fixed in this milestone.** This
+  reverses §3's pass line 2, which milestone 6 wrote and [D-010](DECISIONS.md)
+  defended. The grounds for reversing it: milestone 6 did not know whether an
+  extension point was needed, and milestone 12 would be fixing one the trial has
+  named. The reversal is recorded in [D-021](DECISIONS.md), not decided here.
+- **Added rule 2 — a blocker that requires an on-disk format change is not
+  fixed.** A position index and a field index are both of that kind. They are
+  named, costed and carried forward, the same treatment §3 pass line 2 gives
+  every code-required blocker in milestone 6.
+
+### 7.5 The four readings, fixed before the numbers exist
+
+| # | Condition | Reading |
+| --- | --- | --- |
+| 1 | C and D both produce zero code-required blockers | Defects 2 and 3 were documentation defects. **The PRD's "moves to code repayment" is published as wrong**, and the trial output is pinned as tests and an Example |
+| 2 | C produces a code-required blocker | Repay at the rung the subject was actually blocked at. Any golden-file spend is recorded in FINDINGS **first** |
+| 3 | D produces a code-required blocker that does not need a format change | Repay it |
+| 4 | D needs a format change | Carry forward. **The outcome clause "a field restriction can be expressed" is judged unmet**, with what forced it |
+
+Readings 1 and 4 can both be true. Then both are published.
+
+### 7.6 What is recorded
+
+§2.4's block, unchanged, with `task=C` and `task=D`. Every blocker still carries
+what was attempted, which document was read before getting stuck, how it was
+resolved, and its class. The self-reported enforcement of §2.2 is inherited
+without improvement, and so is every limit in §4.
