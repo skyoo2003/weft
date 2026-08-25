@@ -22,4 +22,4 @@ body: 'A constraint expressed as a scorer does not filter, and now the documenta
   No exported API moved and both golden API files are byte-identical.'
 time: 2026-08-26T00:00:00.000000000+09:00
 custom:
-  Issue: 17
+  Issue: 18

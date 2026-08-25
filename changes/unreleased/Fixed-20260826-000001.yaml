@@ -1,0 +1,17 @@
+kind: Fixed
+body: '`Scrub` no longer calls a re-added-then-deleted key damage. A key can only be
+  re-added once its previous holder is dead, so within a segment every record for that key
+  but the last is a tombstone at seal time and the keys entry — if there is one — names the
+  last; `scrubDocs` kept the *first* of them, leaving the slot naming a record no entry
+  points at, and the cross-check between the keys table and the documents then reported
+  `ErrCorrupt` on a healthy index. `Add`, `Delete`, `Add`, `Commit`, `Delete`, `Commit`,
+  `Scrub` was enough, and so was any second `Update` of a committed document. A live record
+  still wins the slot over a tombstone, so the check that catches two live holders of one key
+  is unchanged. Also fixed on the same read path: the running total of deleted tokens was an
+  `int` where the collection total it is subtracted from is a `uint64`, so on a 32-bit build
+  a corpus with more than 2^31 tokens deleted overflowed, widened to about 1.8e19, clamped
+  the collection total to zero and turned BM25''s length normalization off for every posting
+  — no error, and every score different.'
+time: 2026-08-26T00:00:01.000000000+09:00
+custom:
+  Issue: 18
