@@ -193,6 +193,70 @@ func TestALostTombstoneFileIsCorruptionRatherThanAnEmptySet(t *testing.T) {
 	}
 }
 
+// TestAnEmptyTombstoneFileIsStillRequired is the same resurrection argument at
+// the one size that reads as innocent.
+//
+// A commit with nothing deleted still writes the file and still counts zero, and
+// a reader that took the zero as permission not to look would put "nothing was
+// deleted" and "the file is gone" back into one state — the ambiguity the file
+// was written to remove. Every version 4 generation has one, so the manifest's
+// version is what decides whether to read it and never the count.
+func TestAnEmptyTombstoneFileIsStillRequired(t *testing.T) {
+	build := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		ix := New()
+		addAll(t, ix, []Document{{Key: "a", Text: "x"}, {Key: "b", Text: "y"}})
+		if err := ix.Commit(t.Context(), dir); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if err := ix.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		deads, err := filepath.Glob(filepath.Join(dir, deadPrefix+"*"))
+		if err != nil || len(deads) != 1 {
+			t.Fatalf("Glob(%s*) = %v, %v; want one tombstone file even with nothing deleted", deadPrefix, deads, err)
+		}
+		return deads[0]
+	}
+	check := func(t *testing.T, dir, how string) {
+		t.Helper()
+		if ix, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+			if err == nil {
+				ix.Close() //nolint:errcheck // cleaning up after a failure
+			}
+			t.Errorf("Open with the empty tombstone file %s: got %v, want ErrCorrupt", how, err)
+		}
+		if err := Scrub(dir); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("Scrub with the empty tombstone file %s: got %v, want ErrCorrupt", how, err)
+		}
+	}
+
+	t.Run("removed", func(t *testing.T) {
+		name := build(t)
+		if err := os.Remove(name); err != nil {
+			t.Fatal(err)
+		}
+		check(t, filepath.Dir(name), "removed")
+	})
+
+	t.Run("damaged", func(t *testing.T) {
+		name := build(t)
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The last byte is inside the frame checksum — the part of an empty file
+		// there is nothing else to catch, and precisely what a reader that skipped
+		// the file on a zero count would never look at.
+		b[len(b)-1] ^= 0x01
+		if err := os.WriteFile(name, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		check(t, filepath.Dir(name), "damaged")
+	})
+}
+
 // TestAFlippedTombstoneByteIsCaught. The frame checksum is verified eagerly for
 // this section, unlike the ones inside a segment, so damage anywhere in it is
 // refused rather than surfacing as a wrong candidate set.

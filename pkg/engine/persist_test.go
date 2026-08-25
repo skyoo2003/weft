@@ -981,14 +981,14 @@ func publishedGen(t *testing.T, dir string) uint64 {
 		t.Fatalf("OpenRoot: %v", err)
 	}
 	defer root.Close() //nolint:errcheck // teardown
-	gen, _, _, err := readManifest(root)
+	m, err := readManifest(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0
 	}
 	if err != nil {
 		t.Fatalf("readManifest: %v", err)
 	}
-	return gen
+	return m.gen
 }
 
 // TestCommitRefusesACancelledContext is the cheap half of the contract, and the
@@ -1580,7 +1580,7 @@ func TestOpenRereadsAManifestAMergeReplaced(t *testing.T) {
 	}
 	defer root.Close()
 	// What a reader that got here before the merge is holding.
-	staleGen, stale, staleDead, err := readManifest(root)
+	stale, err := readManifest(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1589,7 +1589,7 @@ func TestOpenRereadsAManifestAMergeReplaced(t *testing.T) {
 		t.Fatalf("Merge: %v", err)
 	}
 
-	if _, err := mapGeneration(root, dir, stale, staleGen, staleDead); !errors.Is(err, errSegmentGone) {
+	if _, err := mapGeneration(root, dir, stale); !errors.Is(err, errSegmentGone) {
 		t.Fatalf("mapping the manifest a merge replaced: got %v, want errSegmentGone", err)
 	}
 	// And it is still ErrCorrupt to every caller that only asks what kind of
@@ -1866,7 +1866,7 @@ func TestScrubRereadsAManifestAMergeReplaced(t *testing.T) {
 	}
 	defer root.Close()
 	// What a scrub that got here before the merge is holding.
-	staleGen, stale, staleDead, err := readManifest(root)
+	stale, err := readManifest(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1874,7 +1874,7 @@ func TestScrubRereadsAManifestAMergeReplaced(t *testing.T) {
 		t.Fatalf("Merge: %v", err)
 	}
 
-	if err := scrubGeneration(root, stale, staleGen, staleDead); !errors.Is(err, errSegmentGone) {
+	if err := scrubGeneration(root, stale); !errors.Is(err, errSegmentGone) {
 		t.Fatalf("scrubbing the manifest a merge replaced: got %v, want errSegmentGone", err)
 	}
 	// The directory was sound throughout, which is the whole complaint.

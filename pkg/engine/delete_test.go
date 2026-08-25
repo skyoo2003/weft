@@ -212,6 +212,31 @@ func TestUpdateDoesNotWriteThroughASliceLookupHandedOut(t *testing.T) {
 	}
 }
 
+// TestATermEveryHolderOfWhichIsDeletedLooksUpAsAbsent. Lookup documents nil for a
+// term no document contains, and deletion is a way for a term to get there that
+// did not exist before this milestone. The filter that removes the tombstones
+// builds a slice, and an empty one is the shape a `== nil` caller reads as the
+// opposite of what happened.
+func TestATermEveryHolderOfWhichIsDeletedLooksUpAsAbsent(t *testing.T) {
+	ix := engine.New()
+	for _, k := range []string{"a", "b"} {
+		if _, err := ix.Add(engine.Document{Key: k, Text: "cat"}); err != nil {
+			t.Fatalf("Add(%q): %v", k, err)
+		}
+	}
+	if !ix.Delete("a") || !ix.Delete("b") {
+		t.Fatal("Delete: false")
+	}
+	if pl := ix.Lookup("cat"); pl != nil {
+		t.Errorf(`Lookup("cat") = %v after both holders were deleted, want nil`, pl)
+	}
+	// And through the buffer path, which reports the same absence by handing the
+	// caller's buffer back empty rather than by returning nil.
+	if pl := ix.LookupInto("cat", make([]engine.Posting, 0, 4)); len(pl) != 0 {
+		t.Errorf(`LookupInto("cat") = %v, want empty`, pl)
+	}
+}
+
 // TestUpdateOfAnUnknownKeyIsRefused. An update that quietly inserted would make a
 // typo in a key indistinguishable from a new document, which is the same
 // argument ErrDuplicateKey rests on from the other side.

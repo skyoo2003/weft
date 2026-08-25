@@ -361,10 +361,11 @@ func (ix *Index) Merge() error {
 	// own set is the authority, sameDir has just established that the directory
 	// is the one these segments came from, and Merge holds the write lock so the
 	// set cannot move underneath it.
-	gen, live, _, err := readManifest(root)
+	m, err := readManifest(root)
 	if err != nil {
 		return fmt.Errorf("merge %s: %w", ix.dir, err)
 	}
+	gen, live := m.gen, m.segs
 	if len(live) != len(ix.segs) {
 		return fmt.Errorf("merge %s: the directory holds %d segments, this index has %d: %w",
 			ix.dir, len(live), len(ix.segs), ErrCorrupt)

@@ -379,7 +379,20 @@ func recordExtents(ix *engine.Index, path string) (extents, error) {
 			"that reads low", path, segs)
 	}
 
+	// Deletion breaks this measurement the way a second segment does, and gets the
+	// same answer. The deleted records' bytes are still in the docs section — a
+	// delete marks, it does not rewrite a segment — but Index.Doc will not hand them
+	// back, so the walk below cannot size them and the witness cannot balance. The
+	// recall figure would be wrong even if it could: measureRecall grades Nearest
+	// against an exact scan over ids 0..Len-1, and Nearest has already dropped the
+	// tombstones that list still carries.
 	n := ix.Len()
+	if live, _ := ix.Stats(); live != n {
+		return extents{}, fmt.Errorf("%s holds %d documents under %d ids, so it has been deleted from: the working "+
+			"set below is derived from records this tool can no longer read, and the exact scan it grades against "+
+			"would score ids the partition has already dropped. Rebuild with `weft-eval build`", path, live, n)
+	}
+
 	e := extents{off: make([]int64, n), size: make([]int64, n)}
 	// Record 0 does not start at zero: the frame header comes first, and then the
 	// document count the docs section opens with.

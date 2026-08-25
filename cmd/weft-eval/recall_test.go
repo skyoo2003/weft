@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -97,6 +98,59 @@ func TestWorkingSetCountsDistinctPages(t *testing.T) {
 				t.Errorf("pages = %d, want %d", gotPages, tc.wantPages)
 			}
 		})
+	}
+}
+
+// TestRecordExtentsRefusesAnIndexThatHasBeenDeletedFrom is the Len-is-not-a-count
+// case, reached through the tool that publishes a figure from it.
+//
+// The working set under every recall figure is derived by walking ids 0..Len-1
+// and sizing each document, and since deletion exists Len is one past the highest
+// id rather than a population. A tombstoned id reads back as absent while its
+// bytes are still in the docs section, so the walk cannot size it and the witness
+// that every byte is accounted for cannot balance — and the recall figure would be
+// wrong anyway, because the exact scan it grades Nearest against scores ids
+// Nearest has already dropped. Refused, the way a second segment is.
+func TestRecordExtentsRefusesAnIndexThatHasBeenDeletedFrom(t *testing.T) {
+	build := func(t *testing.T, deleted string) (*engine.Index, string) {
+		t.Helper()
+		dir := t.TempDir()
+		ix := engine.New()
+		for _, k := range []string{"a", "b", "c"} {
+			if _, err := ix.Add(engine.Document{Key: k, Text: "cat " + k, Vector: []float32{1, 0}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := ix.Commit(t.Context(), dir); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if deleted != "" {
+			if !ix.Delete(deleted) {
+				t.Fatalf("Delete(%q): false", deleted)
+			}
+			// A delete-only commit publishes a generation and no segment, so the
+			// one-segment precondition still holds and this reaches the new refusal
+			// rather than that one.
+			if err := ix.Commit(t.Context(), dir); err != nil {
+				t.Fatalf("Commit after Delete: %v", err)
+			}
+		}
+		t.Cleanup(func() { ix.Close() }) //nolint:errcheck // teardown
+		return ix, dir
+	}
+
+	// The control, so the refusal below is refusing something rather than
+	// everything: an index nobody deleted from derives its extents.
+	if _, err := recordExtents(build(t, "")); err != nil {
+		t.Fatalf("recordExtents on an index with nothing deleted: %v", err)
+	}
+
+	_, err := recordExtents(build(t, "b"))
+	if err == nil {
+		t.Fatal("recordExtents on an index with a tombstone succeeded; the working set it derived is missing a record")
+	}
+	if !strings.Contains(err.Error(), "deleted from") {
+		t.Errorf("recordExtents: %v\nwant a message saying the index has been deleted from", err)
 	}
 }
 

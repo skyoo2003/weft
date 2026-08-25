@@ -500,7 +500,7 @@ plausible wrong answer rather than a crash:
 
 | Rejected | Why it matters |
 | --- | --- |
-| `dead-<gen>` missing while `MANIFEST` counts tombstones | Nothing names this file, so absence would otherwise read as "nothing was deleted" and every deleted document would come back |
+| `dead-<gen>` missing from a v4 generation, whatever the count | Nothing names this file, so absence would otherwise read as "nothing was deleted" and every deleted document would come back. The version decides whether to read it, never the count — a zero count is the case where skipping it looks harmless and is not |
 | its count disagreeing with `MANIFEST`'s | The two are written by one commit and read by different paths; a disagreement means one is not describing this index |
 | a repeated id | Counted twice, the live document count is one too low for the life of the index |
 | an id at or past the corpus size | Damage, or a tombstone file copied in from a larger index — where it hides whichever documents land on those ids here |

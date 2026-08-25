@@ -237,6 +237,13 @@ func (ix *Index) lookupAt(term string) []Posting {
 				out = append(out, p)
 			}
 		}
+		if len(out) == 0 {
+			// A term every holder of which has been deleted is a term no document
+			// contains, and Lookup says that with nil. The empty slice this filter
+			// would otherwise produce is the one shape a `== nil` caller reads as
+			// the opposite of what happened.
+			return nil
+		}
 		return out
 	}
 	return pl
@@ -610,8 +617,11 @@ func (ix *Index) Update(d Document) (DocID, error) {
 	defer ix.wmu.Unlock()
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	ix.initMaps()
 
+	// No initMaps, unlike Add: the only index whose maps are nil is a zero-value
+	// one, Open builds its own, and a zero-value index holds no document for this
+	// to resolve — the refusal below is reached before anything could write to a
+	// map. Reading a nil map is legal, so resolveLive needs nothing either.
 	id, ok := ix.resolveLive(d.Key)
 	if !ok {
 		return 0, fmt.Errorf("update %q: %w", d.Key, ErrNoSuchKey)
