@@ -155,43 +155,81 @@ func TestOneQueryTimeValueReachesTwoExternalScorers(t *testing.T) {
 	// scorers need.
 	const pivot = "survey"
 
-	// What the graph scorer does when no outsider has touched Seeds. Every
-	// arrangement below has to leave this stream exactly as it is.
+	// What the graph scorer does when no outsider has touched Seeds. The
+	// arrangement that works has to leave this stream exactly as it is.
 	wantGraph, err := graph.New(ix, txt).Candidates(t.Context(), q, 4)
 	if err != nil {
 		t.Fatalf("graph baseline: %v", err)
 	}
+	if len(wantGraph) == 0 {
+		t.Fatal("the graph baseline is empty, so this test could not detect it moving")
+	}
 
-	// The arrangement an outsider reaches for first: put the per-query value in
-	// the one Query field that takes caller-supplied document keys.
-	shared := q
-	shared.Seeds = []string{pivot}
+	// The arrangement an outsider reaches for first, pinned here as the trap it
+	// is: put the per-query value in the one Query field that takes
+	// caller-supplied document keys. It works for the external scorers and
+	// breaks the in-tree scorer nobody was thinking about.
+	seeded := q
+	seeded.Seeds = []string{pivot}
 
-	got, err := engine.Search(t.Context(), shared, 4, fusion.Fuse,
+	viaSeeds, err := engine.Search(t.Context(), seeded, 4, fusion.Fuse,
 		txt, graph.New(ix, txt), &affinity{store: store}, &promoted{store: store})
 	if err != nil {
-		t.Fatalf("Search: %v", err)
+		t.Fatalf("Search via Seeds: %v", err)
 	}
-	if !contains(got, cafe) {
-		t.Fatalf("the two external scorers did not reach the ranking: %+v", got)
+	if !contains(viaSeeds, cafe) {
+		t.Fatalf("Query.Seeds did not carry the value to the external scorers: %+v", viaSeeds)
 	}
-
-	gotGraph, err := graph.New(ix, txt).Candidates(t.Context(), shared, 4)
+	seededGraph, err := graph.New(ix, txt).Candidates(t.Context(), seeded, 4)
 	if err != nil {
-		t.Fatalf("graph under the shared arrangement: %v", err)
+		t.Fatalf("graph under the Seeds arrangement: %v", err)
 	}
-	if len(gotGraph) != len(wantGraph) {
-		t.Fatalf("routing an external scorer's input through Query.Seeds moved the graph stream: got %+v, want %+v", gotGraph, wantGraph)
-	}
-	for i := range gotGraph {
-		if gotGraph[i].Doc != wantGraph[i].Doc {
-			t.Fatalf("routing an external scorer's input through Query.Seeds moved the graph stream: got %+v, want %+v", gotGraph, wantGraph)
-		}
+	if sameStream(seededGraph, wantGraph) {
+		t.Fatal("Query.Seeds no longer collides with the graph scorer — the warning in engine.Query's doc comment, and the reason to bind at construction, would both be stale")
 	}
 
+	// The arrangement engine.Query's doc comment prescribes: bind the value when
+	// you construct the scorer, and construct one per search. Query is untouched,
+	// so no other scorer can observe that an outsider needed an input at all.
+	bound, err := engine.Search(t.Context(), q, 4, fusion.Fuse,
+		txt, graph.New(ix, txt),
+		&affinity{store: store, pivot: pivot}, &promoted{store: store, pivot: pivot})
+	if err != nil {
+		t.Fatalf("Search with the value bound at construction: %v", err)
+	}
+	if !contains(bound, cafe) {
+		t.Fatalf("binding at construction did not carry the value to both external scorers: %+v", bound)
+	}
+	boundGraph, err := graph.New(ix, txt).Candidates(t.Context(), q, 4)
+	if err != nil {
+		t.Fatalf("graph under the bound arrangement: %v", err)
+	}
+	if !sameStream(boundGraph, wantGraph) {
+		t.Fatalf("binding at construction moved the graph stream: got %+v, want %+v", boundGraph, wantGraph)
+	}
+
+	// The half of the input that is not per-query. Two scorers and three Search
+	// calls later it must still have been built once: a corpus-sized store
+	// rebuilt per query is the cost this task existed to make visible.
 	if store.built != 1 {
 		t.Fatalf("the corpus-sized store was built %d times, not once", store.built)
 	}
+}
+
+// sameStream compares two candidate streams by document and order. Score is
+// deliberately not compared: the graph scorer's proximity score is a function of
+// which seed it started from, so two streams naming the same documents in the
+// same order is the strongest claim this comparison can make.
+func sameStream(got, want []engine.Candidate) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i].Doc != want[i].Doc {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -276,16 +314,66 @@ func TestAConstraintExcludesThroughFusion(t *testing.T) {
 		t.Fatalf("the phrase constraint does not discriminate on its own: %+v", only)
 	}
 
-	// The arrangement the documentation leads to: a custom Scorer, fused with
-	// the built-in one the adopter actually wants ranking from.
-	got, err := engine.Search(t.Context(), q, 4, fusion.Fuse, txt, ph)
+	// The arrangement the documentation leads to, pinned here as the trap it is:
+	// a custom Scorer, fused with the built-in one the adopter wants ranking
+	// from. RRF is a union of votes, so absence from the constraint stream costs
+	// "tools" nothing in the text stream and the refused document comes back.
+	//
+	// This is the assertion that a constraint expressed as a Scorer is a ranking
+	// preference and not a filter. It fails loudly if fusion.Fuse ever starts
+	// intersecting, which would be a change of contract worth failing on.
+	leaked, err := engine.Search(t.Context(), q, 4, fusion.Fuse, txt, ph)
 	if err != nil {
-		t.Fatalf("Search: %v", err)
+		t.Fatalf("Search with Fuse: %v", err)
+	}
+	if !contains(leaked, tools) {
+		t.Fatal("fusion.Fuse excluded a document the constraint refused — it is no longer a union of votes, and the custom Fuser below is no longer the reason an exclusion holds")
+	}
+
+	// What actually holds an exclusion, and it needs no new exported name:
+	// Search takes a Fuser, so the caller supplies one that reads the last
+	// stream as a restriction. The value attaches to the position, which is the
+	// same answer FuseWeighted gave in milestone 4.
+	got, err := engine.Search(t.Context(), q, 4, restrictFuse, txt, ph)
+	if err != nil {
+		t.Fatalf("Search with restrictFuse: %v", err)
 	}
 	if !contains(got, survey) {
-		t.Fatalf("the phrase match is missing from the fused result: %+v", got)
+		t.Fatalf("the phrase match is missing from the restricted result: %+v", got)
 	}
 	if contains(got, tools) {
-		t.Fatalf("a document the constraint refused is in the fused result: %+v", got)
+		t.Fatalf("a document the constraint refused survived the restricting Fuser: %+v", got)
 	}
+}
+
+// restrictFuse fuses with RRF, treating the last stream as a restriction rather
+// than as a vote: a document absent from it is dropped from every other stream
+// before fusion.
+//
+// It is an ordinary engine.Fuser, which is the point. Search takes the fuser as
+// a parameter precisely so that the fusion strategy is the caller's, and an
+// adopter needing an intersection writes one instead of asking for a Query field
+// or a wider Scorer. The convention is positional — the restriction goes last —
+// and it is the caller's own, invisible to every scorer.
+func restrictFuse(streams [][]engine.Candidate, k int) []engine.Candidate {
+	if len(streams) == 0 {
+		return fusion.Fuse(streams, k)
+	}
+	restrict := streams[len(streams)-1]
+	allow := make(map[engine.DocID]bool, len(restrict))
+	for _, c := range restrict {
+		allow[c.Doc] = true
+	}
+	filtered := make([][]engine.Candidate, len(streams))
+	for i, s := range streams[:len(streams)-1] {
+		keep := make([]engine.Candidate, 0, len(s))
+		for _, c := range s {
+			if allow[c.Doc] {
+				keep = append(keep, c)
+			}
+		}
+		filtered[i] = keep
+	}
+	filtered[len(streams)-1] = restrict
+	return fusion.Fuse(filtered, k)
 }
