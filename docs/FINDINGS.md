@@ -2582,3 +2582,194 @@ was done to obtain it: it is what running the quality suite at all now requires.
 5. **The read-path filter is maintained by hand.** Every read method filters
    today and nothing structural keeps a future one from forgetting — §3 states
    this as the limit of the architecture result.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 12 — Query expressiveness
+
+## 1. The prediction, and what happened to it
+
+The PRD's milestone 12 row carried three clauses. Two were outcomes; the third
+was a prediction:
+
+> **Milestone 6's defects 2 and 3 move from documentation repayment to code
+> repayment.**
+
+[ADOPTION §7.1](ADOPTION.md) registered the opposite prediction before either
+trial ran — **zero code-required blockers in both tasks** — on three grounds that
+were already in the repository: milestone 6's task B had passed the same shape of
+question at a `pkg/` diff of 0, the prose repayment was already in three places,
+and `graph.New(ix, txt)` proved a scorer can take a scorer.
+
+**The registered prediction holds.**
+
+| | task C | task D |
+| --- | --- | --- |
+| docs-closable blockers | 1 | 3 |
+| **code-required blockers** | **0** | **0** |
+| source files opened | 0 | 0 |
+| implementation lines (budget 100) | 84 | 86 |
+| `pkg/` diff | 0 | 0 |
+
+Two agents, neither able to see the other's task, both under budget, neither
+needing a new exported name, a new `Document` field or a new `Query` field.
+Under [ADOPTION §7.5](ADOPTION.md) this is **reading 1**, chosen explicitly and
+not after the fact.
+
+**So the PRD's third clause is wrong, and this is where that is published.** The
+extension point milestone 12 was expected to build does not exist, because
+nothing asked for it. What the round produced instead is four documentation
+defects, one of them worth more than the API would have been.
+
+**Reading 4 did not fire either.** A field restriction is expressible without an
+on-disk format change, so the outcome clause *"a text-side constraint can be
+expressed"* is **met** on both halves — phrase and field. The plan rated that
+clause's failure High and prepared a carry-forward for it; it was not needed.
+
+## 2. The blockers
+
+| # | Task | Blocker | Class | How it was resolved |
+| --- | --- | --- | --- | --- |
+| 4 | D | `fusion.Fuse` is a union of votes, so a constraint scorer ranks rather than filters and every refused document returns on another stream's vote — silently | docs | A 22-line `Fuser` reading the last stream as a restriction. Exported API only |
+| 5 | D | `Posting` has no positions, so a phrase can only be decided by decoding document text; nothing named the cheap shape | docs | A scorer reading `Document.Text`. The subject swept the whole corpus, at `O(documents × doc length)` per query |
+| 6 | D | The index has no field concept, so a field restriction is a caller-side convention | docs | A title table keyed by `Document.Key`, joined with `Index.Resolve` |
+| 7 | C | `go doc` renders no Examples, so the answer milestone 6 put in `ExampleScorer` is invisible from a terminal | docs | Not resolved by the subject — it built from the doc-comment prose instead, which was sufficient |
+
+All four are documentation defects by the [§3 rule](ADOPTION.md): the exported
+API already permitted every one, and the subjects established that by attempting
+the arrangements rather than by judging difficulty.
+
+### 2.1 Defect 4 is what the round bought
+
+Every signal weft's adoption trials have produced until now was **additive** — a
+view count, a distance, a topic match — and rank fusion is built for exactly
+that. Milestone 1's claim is that fusion need not know what a scorer is, and for
+an additive signal that holds without qualification.
+
+The first constraint anybody writes is **subtractive**, and there the same
+architecture is silently wrong. A scorer returning only the documents that
+satisfy a phrase does not exclude anything: RRF sums over the streams a document
+appears in, so absence from the constraint stream costs a document nothing in the
+text stream, and what the constraint refused comes back. No error, no empty
+result — a plausible ranking containing exactly the documents the caller asked to
+be rid of.
+
+**The architecture answers this without changing**, and that is the finding rather
+than a rescue. `Search` already takes the `Fuser` as a parameter, so an
+intersection is 22 lines the caller writes, and `pkg/fusion` does not move. The
+defect was never that it was impossible; it was that nothing said it was
+necessary, and the failure mode is silence.
+
+### 2.2 How defect 4 was nearly missed, which is a limit of the instrument
+
+Trial D's own demonstration ran each constraint as the **sole** scorer in the
+`Search` call, where the trap cannot appear, and reported PASS. The defect
+surfaced only when the subject was asked to run the composition an adopter would
+actually ship — the constraint alongside `text.New(ix)`. It then produced
+`REAPPEARED phrase-nearmiss-order` and five more like it.
+
+Nothing in [ADOPTION §2.3](ADOPTION.md) required that composition. A task phrased
+as *"make this work"* is discharged by the arrangement in which it works, and
+both milestone 6 tasks and both milestone 12 tasks were phrased that way. This is
+recorded as an instrument limit in [§8.1](ADOPTION.md) rather than as a lucky
+catch.
+
+## 3. Milestone 6's repayment, judged
+
+[D-010](DECISIONS.md) registered the signal that would show it was wrong: *the
+same question keeps being asked after `ExampleScorer` and three sentences are in
+place.* Read here, the answer splits in two.
+
+**The prose worked.** Task C is task B made harder along two axes — a
+corpus-sized store that cannot be rebuilt per query, and two scorers contending
+for one input — and it produced **no blocker at all** on the query-time input.
+The subject named `Document`'s and `Query`'s doc comments as its source and built
+from them in one pass, first build and first run. The three sentences milestone 6
+wrote are the reason this round found nothing to repay on the `Query` side.
+
+**The Example did not.** `go doc` renders no Examples — `go doc ./pkg/engine
+ExampleScorer` answers `no symbol ExampleScorer in package` — so for anyone
+reading from a terminal, the artifact D-010 chose as its repayment vehicle has
+been dead since it was written. Only pkg.go.dev renders it. [ADOPTION
+§2.1](ADOPTION.md) asserted the opposite for two milestones, and the trial
+protocol was therefore wrong about what it was handing its own subjects.
+
+D-010's judgment — *put the answer where `go doc` renders it* — was right. Its
+belief that an `Example` is such a place was false, and only a subject that went
+looking for one found out.
+
+## 4. What this milestone cost
+
+**Golden API: zero lines, against a budget of zero.** `engine_api.txt` and
+`public_api.txt` are byte-identical. No exported name, type, field or signature
+changed.
+
+`pkg/engine`'s non-test diff is **38 lines added and 1 removed, and every one of
+them is a comment**:
+
+```console
+$ git diff --stat -- 'pkg/engine/*.go' ':!*_test.go'
+ pkg/engine/doc.go    | 12 +++++++++++-
+ pkg/engine/index.go  | 10 ++++++++++
+ pkg/engine/search.go | 17 +++++++++++++++++
+ 3 files changed, 38 insertions(+), 1 deletion(-)
+```
+
+`pkg/fusion` and `pkg/scorer/*` are untouched, `go list -m all` still prints one
+module, and `Scorer`, `Fuser`, `Candidate` and `Document` are unchanged. The
+PRD's first-stage falsification condition did not fire and was never close to
+firing.
+
+The three comments are the repayment: `Fuser` now states that fusion is a union
+and that a restriction lives in a fuser, `Posting` now states that it carries no
+positions and what that forecloses, and `Query` now states that two scorers
+needing one value construct from it together.
+
+## 5. Performance, argued rather than measured
+
+No performance run was bought, and the argument is the diff above: **not one
+executable line changed.** Every altered line in `pkg/engine` is a comment, and
+`pkg/fusion` and every scorer are byte-identical, so the binary that produced
+milestone 8's and milestone 9's figures is the binary this milestone ships. There
+is no scoring-path change for a run to detect.
+
+That argument was fixed in the plan before the round began, together with the
+condition that would void it — *if the `pkg/` implementation diff is not zero, buy
+the run.* It is zero in the sense the condition meant: zero statements.
+
+**The quality suite was run anyway**, because it is minutes rather than hours and
+it is the one measurement that would catch a scoring change nobody intended:
+
+```text
+text                0.5826
+text+vector         0.6211
+```
+
+Both identical to the published figures, well inside the −0.005 tolerance.
+
+## 6. Carried forward
+
+1. **Milestone 11's performance clauses are still unjudged.** Shed 0 at
+   27.28 q/s, p50 ≤ 40 ms, ladder peak RSS ≤ 120 MiB, worst read inside a commit
+   window ≤ 1 s. Run A, run B and the `-deletefrac` instrument are all still owed;
+   [milestone 11 §5](#milestone-11--deletion-and-update) holds the detail, and
+   nothing in this round changes or discharges any of it.
+2. **A position index and per-field term spaces are format v5**, and neither is
+   planned. `FORMAT.md` §8 carries them with what they would cost. This is not a
+   blocker — both constraints are expressible today — it is the price of the
+   expressible version being a per-candidate decode.
+3. **The wrapping shape is documented but unmeasured.** `Posting`'s comment now
+   says to wrap a scorer rather than sweep the corpus, and nothing measures the
+   difference. Trial D's sweep — every document decoded and tokenized per query —
+   is what an adopter writes without that sentence, and how much the sentence
+   saves has no number.
+4. **A restriction expressed as a `Fuser` is a positional convention.** The
+   caller decides which stream restricts, and nothing checks that they and their
+   own scorer list agree. Getting the order wrong restricts by the wrong stream
+   and returns a plausible ranking, which is the same silent failure class as
+   defect 4 itself, one level up.
+5. **Trial tasks are still phrased as "make this work".** [§2.2](#22-how-defect-4-was-nearly-missed-which-is-a-limit-of-the-instrument)
+   is the cost of that, and no future task is required to include the composition
+   an adopter would ship. A next round should fix the protocol, not just this
+   round's finding.

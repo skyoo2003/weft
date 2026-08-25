@@ -195,6 +195,58 @@ func ExampleScorer() {
 	// from 11: harbour
 }
 
+// ExampleFuser expresses a constraint weft has no field for — match only
+// documents whose text holds two words adjacent and in order — and shows why a
+// scorer alone does not express it.
+//
+// The first search is the arrangement that looks right: a constraint scorer
+// fused with the text scorer. "tools" holds both query words without holding the
+// phrase, the constraint refuses it, and it is in the result anyway — rank fusion
+// sums over the streams a document appears in, so absence from one costs it
+// nothing in the other. The second search swaps the fuser for one that reads the
+// last stream as a restriction, and the same query answers correctly.
+func ExampleFuser() {
+	ix := engine.New()
+	for _, d := range []engine.Document{
+		{Key: "survey", Text: "machine learning models rank search results"},
+		{Key: "tools", Text: "learning about machine tools and workshop practice"},
+	} {
+		if _, err := ix.Add(d); err != nil {
+			fmt.Println("add:", err)
+			return
+		}
+	}
+
+	txt := text.New(ix)
+	// The constraint wraps the text stream rather than sweeping the corpus:
+	// engine.Posting carries no positions, so deciding a phrase means decoding a
+	// document, and wrapping bounds that to the candidates the inner scorer
+	// already found.
+	ph := &phrase{inner: txt, ix: ix, depth: 8}
+	q := engine.Query{Text: "machine learning"}
+
+	for _, f := range []struct {
+		name string
+		fuse engine.Fuser
+	}{{"Fuse", fusion.Fuse}, {"restricting", restrictFuse}} {
+		results, err := engine.Search(context.Background(), q, 4, f.fuse, txt, ph)
+		if err != nil {
+			fmt.Println("search:", err)
+			return
+		}
+		fmt.Printf("%-12s", f.name)
+		for _, c := range results {
+			d, _ := ix.Doc(c.Doc)
+			fmt.Printf(" %s", d.Key)
+		}
+		fmt.Println()
+	}
+
+	// Output:
+	// Fuse         survey tools
+	// restricting  survey
+}
+
 // ExampleIndex_Commit is the persistence round trip: commit, restart, search.
 // Open returns an ordinary Index — scorers built on it neither know nor care
 // that it came from disk.

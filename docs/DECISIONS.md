@@ -1512,3 +1512,119 @@ renumbering merge does not answer any better, at several times the cost.
 The trigger for revisiting: a caller whose deleted fraction makes the disk or the
 `Nearest` recall a problem they can name. `docs/PERF.md` §5.5 run B is the first
 number on either.
+
+---
+
+## D-020 — `k` stays one number, because the sentence that explained it worked
+
+**Date**: 2026-08-26 · **Milestone**: 12 · **Status**: accepted
+
+### The question
+
+`Search`'s `k` is both the per-scorer request size and the size of the fused
+result. Milestone 6 recorded that as defect 3 and repaid it with prose rather
+than with an API change. The PRD's open question asked whether milestone 12
+should now repay it with code.
+
+### The decision
+
+**No. `k` remains dual, and callers pass a `k` above their display size and
+slice.** This was fixed before the milestone 12 trials ran, together with the
+condition that would overturn it, so that the trials could decide it rather than
+confirm it.
+
+The registered resume condition: *if a subject repeats what §6.2 recorded — that
+it had to reshape its program to discover that fusing at the display depth
+outvotes a new orthogonal signal — the sentence failed and the API repays it.*
+
+**The condition did not fire.** Task C's subject fused at 50 and displayed 10,
+cited `Search`'s doc comment as its source, and listed the point among the things
+it did *not* have to establish by experiment. Task D's subject never hit it. One
+trial subject met this by experiment in milestone 6; none did in milestone 12,
+with the sentence in place. That is the whole evidence for keeping the API as it
+is, and it is the reason the decision is recorded rather than assumed.
+
+### The rejected alternatives
+
+- **`SearchDeep(ctx, q, depth, k, fuse, scorers...)`.** One golden line, two entry
+  points. What it buys is the `cands[:display]` the caller already writes; what it
+  costs is that every adopter must now decide which function they are calling.
+- **A `depth` parameter on `Search`.** One golden line changed and every call site
+  in the README, `examples/`, `internal/eval`, `bench` and the tests. Permitted
+  before `v0.1.0`, and it buys the same one line.
+
+### What would reopen it
+
+A subject who meets the truncation by experiment *after* reading `Search`'s doc
+comment. That is the same signal, read the same way, and the next adoption trial
+is where it would appear.
+
+---
+
+## D-021 — A value attaches to a position, so the extension point is the constructor and the `Fuser`
+
+**Date**: 2026-08-26 · **Milestone**: 12 · **Status**: accepted
+
+### The question
+
+`engine.Query` has three fields, no map and no `any`. An external scorer needing
+an input that changes per query, or a caller needing a constraint the query type
+cannot express, has nowhere in the type to put it. The PRD asked what shape the
+extension point should take: a map, an `any`, or a type parameter.
+
+### The decision
+
+**None of the three. Nothing is added.** Milestone 4 answered this question once
+already, with `FuseWeighted`: a value attaches to a *position* rather than to a
+name. The positions already exist and the milestone 12 trials used both.
+
+1. **A per-query input attaches to the scorer's constructor.** The caller builds
+   one scorer per search, binding the value. The corpus-sized half of the input is
+   built once and handed in, so a per-query construction is an allocation.
+2. **A constraint attaches to the `Fuser`.** `Search` takes the fuser as a
+   parameter, so a caller needing an intersection rather than a union of votes
+   writes one that reads a chosen stream as a restriction. The convention is
+   positional and is the caller's own; no scorer can observe it.
+
+Two blind subjects reached both arrangements from the public API with **zero
+code-required blockers** ([ADOPTION §8](ADOPTION.md)), which is what makes this a
+decision to add nothing rather than a decision to defer.
+
+### The rejected alternatives, all three priced
+
+- **`Query.Extra any`.** One slot. Task C required *two* external scorers sharing
+  one input, so two consumers contend for one field, and a failed type assertion
+  is not an error but an abstention — the exact failure mode `Seeds` already has,
+  which `TestOneQueryTimeValueReachesTwoExternalScorers` now pins.
+- **`Query.Extra map[string]any`, keyed by import path.** Namespacing solves the
+  contention. It pays for it with compile-time checking, and `Query`'s own doc
+  comment already argues the other way: a missing map entry is a runtime surprise
+  where a missing constructor argument does not compile. **This is what the rung
+  above would have been** had a trial demanded one, and the reason it would be a
+  map rather than a bare `any` is task C's multiplicity.
+- **A type parameter, `Query[T]`.** `Scorer` becomes `Scorer[T]` and all four
+  in-tree scorers become generic. That widens the `Scorer` interface, which is the
+  PRD's first-stage falsification condition, so buying type safety this way would
+  cost the hypothesis the round exists to test. The most expensive option on the
+  list.
+
+### What this reverses, and what it did not have to
+
+[ADOPTION §7.4](ADOPTION.md) reversed milestone 6's pass line 2 — *code-required
+blockers are not fixed in this milestone* — on the grounds that milestone 6 did
+not know whether an extension point was needed and milestone 12 would be fixing
+one a trial had named. **The reversal was authorized and never fired**, because
+both trials produced zero code-required blockers. It stands for the next round on
+the same terms: a named blocker, not an anticipated one.
+
+[D-010](#d-010--adoption-is-decided-by-a-trial-and-the-extension-point-is-not-designed-before-it)'s
+rule survives a second application intact. The extension point was not designed
+before the trial, the trial did not ask for one, and none was built.
+
+### What would show this is wrong
+
+A signal that needs its per-query input *inside* a scorer the caller does not
+construct — a weft-supplied scorer, or one buried in a third-party wrapper — where
+there is no constructor to bind to and the `Fuser` is too late. Nothing has
+produced one. If one appears, the map above is the shape, and its cost is already
+priced here.

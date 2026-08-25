@@ -40,6 +40,23 @@ var (
 // one: it makes engine ignorant of the fusion strategy the same way fusion is
 // ignorant of the scorers. Swapping RRF for something else touches no code in
 // here.
+//
+// This is also the only place a *restriction* can live, and that is worth
+// stating because the obvious guess is wrong. Rank fusion is a union of votes:
+// fusion.Fuse scores a document by summing over the streams it appears in, so
+// being absent from one stream costs it nothing in the streams where it is
+// present. A scorer that returns only the documents satisfying some constraint —
+// an exact phrase, a field match, a price ceiling — therefore expresses a
+// ranking preference and not a filter, and the documents it refused come back in
+// the fused result on any other scorer's vote. Nothing errors; the answer is
+// just wrong.
+//
+// An adopter who needs an intersection writes a Fuser that reads one stream as a
+// restriction and drops documents missing from it before fusing the rest. That
+// needs nothing exported which is not already here, which is why neither Query
+// nor Scorer grew a field for it. ExampleFuser is that, in a compiling program,
+// and docs/ADOPTION.md section 8 is the trial that found the trap by running
+// into it.
 type Fuser func(streams [][]Candidate, k int) []Candidate
 
 // Search runs every scorer over q and fuses the results.

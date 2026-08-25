@@ -49,6 +49,16 @@ var (
 )
 
 // Posting is one document's occurrence count for one term.
+//
+// A count, and not a position list: nothing here records *where* in the document
+// the term occurred. So a constraint that depends on position — an exact phrase,
+// a proximity window — cannot be decided from postings at all, and the only
+// route left is the document text itself, through Doc. That costs one record
+// decode per document considered, which docs/FINDINGS.md milestone 5 section 3.2
+// measured as the throughput wall, so the shape that survives is a scorer
+// wrapping another scorer and filtering its candidates; sweeping every DocID
+// pays that decode across the whole corpus on every query. A position index is a
+// format change and is not planned (docs/FORMAT.md section 8).
 type Posting struct {
 	Doc  DocID
 	Freq int
@@ -466,36 +476,9 @@ func (ix *Index) Add(d Document) (DocID, error) {
 		return 0, fmt.Errorf("add %q: %w", d.Key, ErrDuplicateKey)
 	}
 
-	// DocID is uint32, so this conversion truncates silently past 2^32
-	// documents: the id wraps to 0 and every posting, key and link written
-	// afterwards addresses document 0 instead. Doc and DocLen already compare
-	// their bounds in uint64 to avoid the mirror image of this; refusing the Add
-	// is the same choice on the write side, and Add already returns an error.
-	//
-	// Widened to uint64 before comparing, not after. len returns int, so an
-	// untyped MaxUint32 on the other side of the operator becomes an int, which
-	// does not fit on a 32-bit target: the package stops compiling entirely
-	// under GOARCH=386. Widened, the comparison is simply never true there,
-	// which is the right answer — an int that narrow cannot reach the limit.
-	//
-	// The comparison is >=, not >, so the ceiling is 2^32-1 documents rather
-	// than 2^32: one lower than DocID alone would allow, and the number
-	// FORMAT.md publishes. The doc count on disk is a uvarint the reader ranges
-	// against MaxUint32, so accepting one more here would build an index that
-	// commits and then cannot be reopened.
-	//
-	// Checked before the vector width below, not after: that branch is the one
-	// place Add mutates the index before it can still fail, and a rejected Add
-	// leaving ix.vecDim set to the width of a document that was never stored
-	// would make Commit write a meta the docs file cannot back — a segment that
-	// commits and then refuses to reopen.
-	// Against maxDocCount, which is the narrower of DocID's width and this
-	// platform's int, and the number every decoder ranges a count against. On a
-	// 64-bit build the two are the same. On a 32-bit one they are not, and
-	// comparing against DocID's width alone let an index of maxInt documents
-	// take another: Len and Stats overflowed, and the Commit after it published
-	// a manifest readManifest refuses — a writer call that succeeds and leaves
-	// an index that cannot be reopened.
+	// The id ceiling and the vector width are admit's, which appendPending asks
+	// before it appends. They used to be spelled out here; the reasoning moved
+	// with the code rather than being left behind as a second copy of it.
 	return ix.appendPending(d, toks, freq, "add")
 }
 
@@ -548,6 +531,32 @@ func (ix *Index) appendPending(d Document, toks []string, freq map[string]int, w
 // other path by validating before it writes.
 //
 // The ceiling stands in front of the width for the reason adoptVecDim gives.
+//
+// DocID is uint32, so the conversion appendPending makes below this truncates
+// silently past 2^32 documents: the id wraps to 0 and every posting, key and
+// link written afterwards addresses document 0 instead. Doc and DocLen already
+// compare their bounds in uint64 to avoid the mirror image of this; refusing the
+// write is the same choice on the write side, and both callers return an error.
+//
+// Widened to uint64 before comparing, not after. len returns int, so an untyped
+// MaxUint32 on the other side of the operator becomes an int, which does not fit
+// on a 32-bit target: the package stops compiling entirely under GOARCH=386.
+// Widened, the comparison is simply never true there, which is the right answer —
+// an int that narrow cannot reach the limit.
+//
+// The comparison is >=, not >, so the ceiling is 2^32-1 documents rather than
+// 2^32: one lower than DocID alone would allow, and the number FORMAT.md
+// publishes. The doc count on disk is a uvarint the reader ranges against
+// MaxUint32, so accepting one more here would build an index that commits and
+// then cannot be reopened.
+//
+// Against maxDocCount, which is the narrower of DocID's width and this
+// platform's int, and the number every decoder ranges a count against. On a
+// 64-bit build the two are the same. On a 32-bit one they are not, and comparing
+// against DocID's width alone let an index of maxInt documents take another: Len
+// and Stats overflowed, and the Commit after it published a manifest
+// readManifest refuses — a writer call that succeeds and leaves an index that
+// cannot be reopened.
 func (ix *Index) admit(d Document, what string) error {
 	if uint64(ix.base)+uint64(len(ix.docs)) >= uint64(maxDocCount) {
 		return fmt.Errorf("%s %q: index is full at %d documents", what, d.Key, maxDocCount)
@@ -676,7 +685,12 @@ func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[st
 	// go, or the document keeps answering a query for words it no longer
 	// contains — and a stale posting is invisible to any check that reads the
 	// record, because the record is right.
-	for t := range tokenSet(old.Text) {
+	//
+	// Walked as tokens rather than reduced to a set first: dropPosting is a no-op
+	// for an id it does not find, so the second occurrence of a dropped term costs
+	// one binary search against the map insert and the hash a set would have cost
+	// it anyway.
+	for _, t := range Tokenize(old.Text) {
 		if _, kept := freq[t]; !kept {
 			ix.dropPosting(t, id)
 		}
@@ -693,17 +707,6 @@ func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[st
 	ix.docLen[i] = len(toks)
 	ix.docs[i] = d
 	return nil
-}
-
-// tokenSet is the distinct terms of s. Only the set is wanted — the frequencies
-// of the document being replaced are about to be overwritten by the new one's.
-func tokenSet(s string) map[string]struct{} {
-	toks := Tokenize(s)
-	out := make(map[string]struct{}, len(toks))
-	for _, t := range toks {
-		out[t] = struct{}{}
-	}
-	return out
 }
 
 // setPosting records id's frequency for term, keeping the list ascending by
@@ -1185,7 +1188,7 @@ func (ix *Index) avgDocLen() float64 {
 	// which is the plausible wrong answer this package refuses to produce. Scrub
 	// is what names the damage.
 	n -= ix.dead.n
-	total -= min(total, uint64(ix.dead.tokens))
+	total -= min(total, ix.dead.tokens)
 	if n == 0 {
 		return 0
 	}

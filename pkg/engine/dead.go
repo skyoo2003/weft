@@ -37,8 +37,15 @@ type deadSet struct {
 	// n and tokens are what Stats and AvgDocLen subtract. Maintained here rather
 	// than derived on demand because BM25 asks for both once per query and the
 	// derivation is a walk of the set with a docoff lookup per member.
+	//
+	// tokens is uint64 and not int, the same widening avgDocLen does to the sum it
+	// is subtracted from and for the same reason: a segment's own total is ranged
+	// against maxInt where it is decoded, so on a 32-bit build the tokens of a
+	// deleted-from corpus spanning several segments overflow an int. Wrapped
+	// negative it would widen to about 1.8e19, clamp the collection total to zero,
+	// and turn BM25's length normalization off without saying so.
 	n      int
-	tokens int
+	tokens uint64
 }
 
 // empty reports whether anything has been deleted. Callers that would otherwise
@@ -87,7 +94,9 @@ func (d *deadSet) mark(id DocID, docLen int) bool {
 	}
 	d.bits[w] |= bit
 	d.n++
-	d.tokens += docLen
+	// Non-negative: every caller reads it out of ix.docLen or a segment's docoff,
+	// both of which a decoder has already ranged against maxInt.
+	d.tokens += uint64(docLen) //nolint:gosec // non-negative, see above
 	return true
 }
 
