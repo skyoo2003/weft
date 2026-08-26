@@ -3024,3 +3024,92 @@ default path gained **exactly one branch**, the `ix.tok == nil` test in
 that had moved would have meant the branch was not the only change, which is why
 [§1.2](#12-the-invariants-fixed-in-advance) registered "find what moved before
 publishing" rather than a tolerance to hide inside.
+
+## 7. Performance: the run was bought, and it came back void
+
+[D6 of the plan](../.claude/plans/weft-m13.plan.md) bought a performance run on an explicit
+argument: milestone 12 spent zero implementation lines and used that as its reason not to
+measure, and this round cannot — the diff is not zero and it crosses both the index path and
+the query path. **So the run was made, and this section publishes what it produced, which is
+not a verdict.**
+
+The registered clauses, and where each landed:
+
+| clause | denominator | result |
+| --- | --- | --- |
+| nDCG@10 unchanged | 0.5826 / 0.6211 | **met**, identical to four decimals ([§6](#6-quality-unmoved)) |
+| shed 0 at 27.28 q/s | 0 | **void** — 4,857 of 10,000 |
+| p50 ≤ 40 ms | 33.470 ms | **void** — 2.675 s |
+| ladder peak RSS ≤ 120 MiB | 100.7 MiB | **void** — 654.1 MiB |
+| worst read in a commit window ≤ 1 s | 61 ms | **not attempted** |
+
+**Void, not missed.** The A/B that decides it is in [PERF §5.6](PERF.md): the same top rung
+on the commit *before* this milestone gives p50 2.321 s, 664.2 MiB and a served fraction of
+57.6% against this build's 52.3%. The pre-M13 baseline misses the same three clauses by the
+same one-to-two orders of magnitude, so the ladder is measuring the machine rather than the
+change.
+
+**What made it void is on the record, because the run was mine.** The ladder followed, in one
+session and on one machine, a `make eval` over the 626 MiB corpus, a `go test -race ./...`,
+two `golangci-lint` passes and an `npx markdownlint`. [PERF §2](PERF.md) already says why CI
+must never gate on these figures — a tail latency on a busy machine is a function of whatever
+else is on it — and that applies to a developer machine in the middle of a working session
+just as squarely.
+
+**Three things point the other way, and none of them substitutes for the run.**
+
+1. **Allocation per query is flat and matches the published figure on both arms.** 10,928.9
+   KiB on the baseline and 10,943.5 on this build, against 10,869.0 published. [Milestone 8
+   §11](#11-the-memory-clause-judged--and-the-excursion-went-with-it) established that this
+   number is a property of the query set rather than of the load, which is what makes it
+   readable at all here.
+2. **The unloaded sequential path is where it was.** 33.186 ms on the baseline, 34.072 ms on
+   this build, against 32.231 ms published — inside the 8.8% machine-state band milestone 8
+   §11 documented for itself.
+3. **The default path gained exactly one branch.** `ix.tok == nil` in `Index.Tokenize`, and
+   §6's unmoved nDCG is the empirical half of that argument: a scoring path that had changed
+   would not reproduce four decimal places.
+
+**What is deliberately not claimed.** Not "milestone 13 did not regress performance" — the
+residual gap between the two arms is a single observation apiece on an instrument off by 70×,
+and the baseline arm was truncated at 89% of its schedule, so it cannot be read in either
+direction. And not "the invariant held" — nothing here measured that. The honest statement is
+the narrow one: **the clauses are unjudged, and this round did not earn the right to say
+otherwise.**
+
+**Run B was not attempted, and that was a choice rather than an omission.** Forty-five more
+minutes on an instrument whose companion arm had just come back void produces a second
+unusable number. [PERF §5.6](PERF.md) registers what a valid attempt needs so the next one is
+not a third void run.
+
+## 8. Carried forward
+
+1. **Milestone 13's own performance clauses are unjudged**, for the first time in this
+   repository on a round that *bought* the run. Shed 0 at 27.28 q/s, p50 ≤ 40 ms, ladder peak
+   RSS ≤ 120 MiB, and milestone 9's read clause. [§7](#7-performance-the-run-was-bought-and-it-came-back-void)
+   is the attempt and [PERF §5.6](PERF.md) is what a valid one needs — a quiet machine, no
+   preceding index load in the same session, and the pre-milestone commit measured on the same
+   ladder in the same sitting.
+2. **A quiet-machine requirement is now a load-bearing part of the procedure and nothing
+   enforces it.** [PERF §2](PERF.md) said it about CI; this round is the first time it
+   invalidated a run of the author's own, and there is no check — no preflight, no recorded
+   machine state beyond `date` — that would have caught it before 97 minutes were spent. The
+   A/B is what caught it, after the fact.
+3. **Milestone 11's performance clauses are still unjudged**, unchanged by this round. Run A,
+   run B and the `-deletefrac` instrument are all still owed;
+   [milestone 11 §5](#milestone-11--deletion-and-update) holds the detail.
+4. **The guard cannot see a count-preserving tokenizer.** A stemmer maps one token to one
+   token, so it changes every term and no count and passes.
+   [§4](#4-the-guard-lost-a-check-under-test-and-the-ceiling-widened) is why the check that
+   would have caught it cannot be asked at `Open`, and closing it needs the tokenizer's
+   identity — which [D-023](DECISIONS.md) shows cannot be stored honestly. This is a ceiling,
+   not a defect.
+5. **The seam's four call sites are held by one test and nothing structural.**
+   `TestTokenizeSeamIsSharedByIndexAndQuery` records the strings that reached
+   `Index.Tokenize`, so a fifth call site added later that called `engine.Tokenize` directly
+   would not fail it — the test asserts what did arrive, not that nothing bypassed the seam.
+   This is the same shape as milestone 11's carried-forward item about the read-path filter
+   being maintained by hand.
+6. **A position index and per-field term spaces are still format v5**, and a replaceable
+   tokenizer does not change that: one tokenizer serves the whole `Text` and there is nothing
+   to scope a term to. `FORMAT.md` §8 carries both with what they would cost.

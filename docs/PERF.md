@@ -897,3 +897,67 @@ in opposite directions.
 is the finding rather than a footnote. Whether it survives at the tail, under
 load, is what the ladder answers, and the answer is in
 [FINDINGS.md](FINDINGS.md) milestone 5.
+
+### 5.6 Milestone 13's invariance clauses — attempted, and the instrument had nothing to say
+
+Milestone 13 has no performance target of its own either. Like
+[§5.5](#55-milestone-11s-invariance-clauses-judged--registered-before-they-are-measured)
+it has **invariance** clauses whose denominators are milestone 8's and milestone 9's
+published figures: shed 0 at 27.28 q/s, p50 ≤ 40 ms, ladder peak RSS ≤ 120 MiB, and worst
+read inside a commit window ≤ 1 s.
+
+The argument under test, stated so the run can falsify it: **the default path gained exactly
+one branch** — the `ix.tok == nil` test in `Index.Tokenize` — and is otherwise the same code
+doing the same work, so run A reproduces milestone 8's ladder.
+
+```bash
+# Run A — milestone 8's ladder, unchanged, because the memory reading is the ladder's peak.
+date; caffeinate -dimsu make bench BENCHFLAGS='-rates 3.41,6.82,13.64,27.28'; date
+# Run B — milestone 9's write arm.
+date; caffeinate -dimsu make bench BENCHFLAGS='-writes -writedocs 20000'; date
+# Run C — quality.
+make eval
+```
+
+**Outcome, 2026-08-26/27: run C passed, run A is void, run B was not attempted.**
+
+Run C reproduced nDCG@10 0.5826 and 0.6211 exactly. Run A missed every clause by one to two
+orders of magnitude, and **that result is void rather than a verdict**, because the same
+ladder's top rung misses them the same way on the commit *before* this milestone:
+
+| top rung, 27.28 q/s, single rung | pre-M13 (`1eb2a44`) | M13 (`9d05c16`) |
+| --- | --- | --- |
+| unloaded p50 | 33.186 ms | 34.072 ms |
+| p50 under load | 2.320762 s | 2.616899 s |
+| served / sent | 5,109 / 8,875 | 5,233 / 10,000 |
+| process peak RSS | 664.2 MiB | 671.7 MiB |
+| allocation per query | 10,928.9 KiB | 10,943.5 KiB |
+
+Both arms are single rungs and are compared **only against each other** — §5.5's correction
+forbids reading a lone rung's `peakrss` against milestone 8's ladder peak, and that rule is
+kept here. The full ladder, which *is* the comparable reading, peaked at **654.1 MiB against
+100.7** and shed **4,857 of 10,000** at the top rung against 0.
+
+**What this licenses, and what it does not.**
+
+1. **The clauses are unjudged and carried forward.** Not met, not missed — unmeasured, on an
+   instrument that was not in a state to measure. This file's own §2 note that a shared or
+   busy machine makes a tail latency a function of whatever else is running is the reason CI
+   never gates on these numbers, and it applies to a developer machine mid-session too: this
+   run followed a `make eval` over a 626 MiB index, a `go test -race ./...` and two lint
+   passes in the same session.
+2. **No regression is attributable to milestone 13, and invariance is not demonstrated
+   either.** The residual gap between the two arms — p50 +12.8%, served fraction 57.6% to
+   52.3% — is a single observation apiece, on a machine that is demonstrably off by 70×, and
+   the baseline arm was cut short at 5 m 25 s of a 6 m 06 s schedule so its `shed` is not
+   comparable in absolute terms. It cannot be read in either direction and is recorded rather
+   than resolved.
+3. **Run B was deliberately not attempted.** Spending 45 more minutes on an instrument whose
+   companion arm had just come back void would have produced a second unusable number, not a
+   second data point.
+
+**What a valid attempt needs**, registered here so the next one is not a third void run: a
+machine with no other work on it and no preceding index load in the same session, `date`
+either side, and the pre-M13 commit measured on the same ladder in the same sitting — because
+the A/B above is what turned this from a reported regression into a void run, and it is
+cheaper than the argument it settles.
