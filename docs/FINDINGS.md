@@ -2959,3 +2959,68 @@ does the `ponytail:` comment on `checkTokenizer`.
 
 The two steps that shipped are enough for the failure the milestone is about: a
 bigram index opened with the default reads 7 tokens on disk against 2 recomputed.
+
+## 5. The Korean trial, judged
+
+**Both halves pass, and the pass line is the strong one registered in
+[§1.5](#15-the-korean-trials-decision-rule).**
+
+| Tokenizer | Registered assertion | Result |
+| --- | --- | --- |
+| Default | 0 candidates for `"검색엔진"` | **0** |
+| Hangul bigram | ≥1 candidate, top is the target, no decoy present | **1 candidate, the target, no decoy** |
+
+The corpus is one target and two decoys. The target holds the query string with a
+particle attached — `"검색엔진을 만들었다"` against a query of `"검색엔진"` — and
+that is the whole of the problem: `engine.Tokenize` cuts only where a rune is
+neither a letter nor a digit, a Korean particle is letters, so the corpus term and
+the query term are two different strings and no posting list is consulted.
+
+**What the decoys bought.** `">0 hits"` passes for a tokenizer that matches every
+Korean document in the corpus; `"the top hit is the target and no decoy is
+present"` does not. The decoys share **no character bigram** with the target, and
+that property is itself asserted — `TestKoreanDecoysShareNoBigramWithTheTarget`
+fails if a future edit to any of the three strings gives a decoy a bigram the
+target holds, which is what keeps the pass line measuring the seam rather than the
+corpus. The same test checks the query's bigrams are all reachable from the
+target, so the trial cannot pass for the opposite wrong reason either.
+
+**What it does not say.** This is an existence proof that the seam is used, not a
+quality claim — and that is a statement about the milestone's scope rather than
+about the strength of the predicate. A character bigram index over-matches; no
+Korean relevance judgements exist here to measure that with, and building a
+labelled Korean dataset is out of scope by the PRD.
+
+**The replacement does not ship.** The bigram tokenizer is eleven lines and lives
+in `pkg/engine/tokenizer_test.go` and, inline, in `ExampleWithTokenizer`. Shipping
+it in `pkg/` would turn the seam into a menu; [D-022](DECISIONS.md) carries that.
+
+**The second trial is the one that holds outcome clause 1 down.** A directory
+committed with the bigram tokenizer and opened with the default is refused with
+`ErrTokenizerMismatch`, and reopened with the bigram tokenizer answers the query
+— so index time and query time are not merely *documented* to share the seam, a
+disagreement between them is a reported error.
+`TestTokenizeSeamIsSharedByIndexAndQuery` is the direct form of the same claim:
+it records the strings handed to the tokenizer and asserts that `Add`, `Update`,
+`Update`'s re-tokenization of the replaced text, and `Index.Tokenize` all appear.
+
+## 6. Quality, unmoved
+
+`make eval`, the registered procedure, on the 171,332-document evaluation corpus:
+
+```text
+text                0.5826
+text+vector         0.6211
+```
+
+**Identical to four decimals to the published figures**, against a −0.005
+tolerance. The paired bootstrap deltas and the graph arm's numbers are unchanged
+too, which is what a scoring path nobody touched should produce.
+
+That is the empirical half of [D3](DECISIONS.md#d-022--the-tokenizer-is-a-seam-on-the-constructor-and-the-scorer-asks-rather-than-receives)'s
+argument, and the argument is worth stating because it predicted the result: the
+default path gained **exactly one branch**, the `ix.tok == nil` test in
+`Index.Tokenize`, and is otherwise the same code doing the same work. A figure
+that had moved would have meant the branch was not the only change, which is why
+[§1.2](#12-the-invariants-fixed-in-advance) registered "find what moved before
+publishing" rather than a tolerance to hide inside.

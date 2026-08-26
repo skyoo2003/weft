@@ -1628,3 +1628,190 @@ construct — a weft-supplied scorer, or one buried in a third-party wrapper —
 there is no constructor to bind to and the `Fuser` is too late. Nothing has
 produced one. If one appears, the map above is the shape, and its cost is already
 priced here.
+
+## D-022 — The tokenizer is a seam on the constructor, and the scorer asks rather than receives
+
+**Date**: 2026-08-26 · **Milestone**: 13 · **Status**: accepted
+
+### The question
+
+`engine.Tokenize` is a package-level function called from four places — three
+inside `Index` and one in `scorer/text`. A caller whose language the default
+splits wrongly has no way to replace it. Where does the replacement point attach,
+and what does it cost?
+
+### The decision
+
+**A variadic `Option` on the two constructors that already exist, and the index
+owns it.** `New(opts ...Option)`, `Open(dir string, opts ...Option)`,
+`WithTokenizer(Tokenizer) Option`, and `Index.Tokenize` as the one way in.
+
+`scorer/text` calls `s.ix.Tokenize(q.Text)`. It **asks** the index, the same
+shape as the `s.ix.Stats` and `s.ix.LookupInto` calls beside it, and does not
+**receive** a tokenizer through `Query` or through the `Scorer` interface. That
+distinction is the milestone's falsification condition and
+[FINDINGS milestone 13 §3](FINDINGS.md) judges it.
+
+This is [D-021](#d-021--a-value-attaches-to-a-position-so-the-extension-point-is-the-constructor-and-the-fuser)
+applied a second time and from the other side. A value attaches to a *position*;
+milestone 12 found the position for a per-query value was the scorer's
+constructor, and the position for an index-wide one is the index's.
+
+### The ladder, priced before anything was written
+
+| rung | shape | golden | call sites | verdict |
+| --- | --- | --- | --- | --- |
+| 0 | `var Tokenize = func(...)`, a package variable | 1 changed | 0 | **rejected** |
+| 1 | `New(opts ...Option)` / `Open(dir, opts ...Option)` + `WithTokenizer` | **5 to 7** | **0** | **accepted** |
+| 2 | `NewWithTokenizer` / `OpenWithTokenizer` | 4 to 5 | 0 | **rejected** |
+| 3 | `New(tok Tokenizer)`, required | 1 changed | **77** | **rejected** |
+
+- **Rung 0** is the cheapest and is unusable. Two indexes in one process cannot
+  have different tokenizers, and writing it while an `Add` runs is a data race —
+  one that a batch job setting it at startup and reading it forever would not even
+  trip `-race` on, so the failure ships silently.
+- **Rung 2** costs one to two golden lines *less* than rung 1. What those lines
+  buy is the entry-point count: two rather than four.
+  [D-020](#d-020--k-stays-one-number-because-the-sentence-that-explained-it-worked)
+  rejected `SearchDeep` on the ground that an adopter would have to decide which
+  of two entry points to call before knowing whether they cared about the
+  difference, and this is the same shape. Variadic options also compose: a second
+  option later is zero new entry points, where rung 2 would double them again.
+- **Rung 3** buys exactly what rung 1 buys and breaks all 77 `New`/`Open` call
+  sites in this module to do it. Variadic is source-compatible; every existing
+  `New()` and `Open(dir)` keeps compiling and keeps meaning what it meant.
+
+### Bound at construction, and no `SetTokenizer`
+
+Three things come out of that one rule, and `Index.tok`'s field comment carries
+all three:
+
+1. **No lock on the query path.** Nothing writes the field after the constructor
+   returns, so `Index.Tokenize` takes no `ix.mu`. A read lock there would be one
+   index-wide acquisition per `Add` and per query, protecting a value that cannot
+   change.
+2. **A `SetTokenizer` would be a time coupling whose violation is not an error.**
+   Called after the first `Add`, it leaves an index half of whose documents live
+   in a different term space: every query against the other half answers zero
+   hits, forever, with nothing to report. That is the class of silent failure
+   `ErrDimMismatch` exists to refuse, refused the same way — at the write side,
+   once.
+3. **The open-time guard becomes a statement about the whole lifetime** of the
+   index rather than about one instant of it. See
+   [D-023](#d-023--the-mismatch-guard-recomputes-one-document-because-a-stored-name-can-lie).
+
+**`engine.Tokenize` stays.** It is the default, `internal/eval/bm25_test.go` uses
+it as the reference implementation the published nDCG figures were measured
+under, and `Index.Tokenize` falls back to it when no option was given — which is
+what keeps a zero-value `Index` usable, the promise that type's own doc comment
+makes.
+
+### What weft does not ship
+
+**A second tokenizer.** The Hangul bigram tokenizer that demonstrates the seam
+lives in `pkg/engine/tokenizer_test.go` and in `ExampleWithTokenizer`, not in
+`pkg/`. Shipping it would turn a seam into a menu — an adopter would have to
+choose between weft's two rather than plug in the one their language needs — and
+morphological analysis is out of scope for the reason it has always been: it
+collides head-on with the zero-external-dependency constraint that
+[milestone 5](FINDINGS.md) tested and kept.
+
+### What would show this is wrong
+
+A signal that needs a *different* tokenizer for one field or one query while the
+corpus keeps its own — per-field term spaces, which is a format v5 question
+(`FORMAT.md` §8) and not an options question. Or an adopter who has to reach the
+tokenizer from inside a scorer they did not construct, which is the same gap
+[D-021](#d-021--a-value-attaches-to-a-position-so-the-extension-point-is-the-constructor-and-the-fuser)
+names for per-query values.
+
+## D-023 — The mismatch guard recomputes one document, because a stored name can lie
+
+**Date**: 2026-08-26 · **Milestone**: 13 · **Status**: accepted
+
+### The question
+
+A directory indexed with one tokenizer and queried with another does not fail. It
+answers **zero hits**, on every query, forever — the query's terms and the
+corpus's terms are different strings, so no posting list is ever consulted and
+there is nothing in the result to say which of the two happened. The PRD's open
+question 5 asked whether that can be caught mechanically.
+
+### The decision
+
+**Yes, from bytes that were already on disk, and the format does not change.**
+`Open` picks the first live document whose stored token count is non-zero,
+recomputes its tokens with the configured tokenizer, and compares the count
+against the number `docoff` already holds. Disagreement is
+`ErrTokenizerMismatch`. A bigram index opened with the default reads 7 tokens on
+disk against 2 recomputed.
+
+`FORMAT.md` §4 forbids recomputing a token count from a document's text, and the
+reason it gives is this round: *"recomputing would let a future tokenizer
+replacement disagree silently with postings that already exist."* The ban is on
+recomputing in order to **use** the answer. This recomputes once in order to
+**compare** it, which is that predicted disagreement being caught rather than
+committed.
+
+It is the same trade `ErrDimMismatch` makes one layer down: caught at open time it
+is one refused directory, not caught it is every query failing for the life of the
+index. And it is a genuinely new failure mode — a directory that opened yesterday
+can be refused today — traded against a query that used to answer nothing.
+
+### The rejected alternative: store the tokenizer's name
+
+A `v5` segment field naming the tokenizer, compared at open.
+
+- **A label can lie and bytes cannot.** A Go function value has no stable name, so
+  what would be stored is a string the caller supplied. A caller who swaps
+  tokenizers without editing the string makes the guard confidently wrong, which
+  is worse than no guard: it certifies the mismatch it exists to catch.
+- **It buys a format version.** The PRD used *only deletion touches the disk
+  format* as the ground for milestone ordering, and
+  [milestone 12's D8](FINDINGS.md) carried position and field indexes to v5 on the
+  same rule. `FORMAT.md` §7.8's lesson — a root file is cheaper than a section —
+  holds, but a version bump still has a cost and there is no need to pay it here.
+
+### The third check, written and taken back out
+
+The registered design had a third step: every recomputed term against the
+segment's terms index, which would have caught a tokenizer producing the right
+*number* of different terms. **It shipped nothing.** It failed
+`TestALyingTermOffsetIsNeverFollowed`, `TestAnImpossibleFrequencyIsRefused` and
+`TestALyingBlockMinimumIsRefused`, each of which doctors a segment's whole `terms`
+section and then asserts `Open` **succeeds** with the damage surfacing as absence.
+
+Those tests are right. A terms section that does not claim a live document's terms
+is what a replaced tokenizer looks like *and* what a damaged one looks like, and
+the two are the same bytes — so the check reported corruption as a tokenizer
+mismatch, sending a caller to look for a tokenizer they never changed. It also put
+verification back into `Open` for one section, which milestone 3 removed and
+[D-006](#d-006--map-the-segments-so-the-read-api-does-not-grow-an-error)
+already settled the direction of.
+
+### The ceilings, published rather than discovered
+
+1. **A tokenizer that preserves token count passes**, whatever it does to the
+   terms. A stemmer is exactly that shape — one token in, one token out — so the
+   guard catches the large failure and not the small one. Catching the small one
+   needs the tokenizer's identity, which is the thing that cannot be stored
+   honestly.
+2. **The sample is one document.** Re-tokenizing the corpus would make `Open` cost
+   the size of the index, which is the whole of what mapping it instead of loading
+   it bought.
+3. **A corpus with no text to judge passes.** It answers nothing under every
+   tokenizer, so there is nothing to protect.
+4. **A non-deterministic tokenizer disagrees with itself.** `Tokenizer`'s doc
+   comment makes determinism the contract rather than leaving it to be discovered
+   here.
+
+All four are in the `ponytail:` comment on `checkTokenizer` and in `FORMAT.md` §8.
+
+### What would show this is wrong
+
+A real corpus refused by the guard while its tokenizer is in fact the one it was
+written with — which for a deterministic tokenizer cannot happen, so an occurrence
+would mean the determinism contract is being broken in the field and the doc
+comment is not enough. Or a caller who wants the count check off because a
+one-document sample is too weak a signal to justify the refusal, which is the
+opposite complaint and would argue for widening the sample rather than removing it.
