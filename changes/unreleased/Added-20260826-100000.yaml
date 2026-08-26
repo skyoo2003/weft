@@ -1,0 +1,18 @@
+kind: Added
+body: '`engine.WithTokenizer(tok)` replaces the tokenizer an index uses, and it replaces
+  it at index time and query time together — `Add`, `Update`, `Update`''s re-tokenization
+  of a replaced document''s old text, and `scorer/text` all reach it through the new
+  `Index.Tokenize`, so there is one function value per index and no way to configure
+  the two sides apart. Pass it to `New` or to `Open`; both now take `...Option`, and
+  every existing `New()` and `Open(dir)` keeps compiling and keeps meaning what it
+  meant. What it buys a caller whose language the default splits wrongly: a Korean
+  query for `검색엔진` finds nothing in a corpus holding `검색엔진을`, because the
+  default cuts only at non-letters, and a ten-line character-bigram tokenizer fixes
+  it — `ExampleWithTokenizer` is that program. weft ships no second tokenizer and no
+  morphological analysis. The tokenizer is bound at construction and there is
+  deliberately no `SetTokenizer`: calling one after the first `Add` would leave half
+  a corpus in a different term space and report nothing (docs/DECISIONS.md D-022).
+  `engine.Tokenize` is unchanged and is still the default.'
+time: 2026-08-26T10:00:00.000000000+09:00
+custom:
+  Issue: 19

@@ -231,6 +231,14 @@ Four decisions here are load-bearing:
 - **Token count is stored, not recomputed** from the text at load. Recomputing
   would let a future change of tokenizer silently disagree with the postings the
   segment already holds.
+
+  Milestone 13 made that change of tokenizer possible, and the predicted
+  disagreement is now **caught rather than committed**: `Open` recomputes one live
+  document's tokens against this number and refuses the directory with
+  `ErrTokenizerMismatch` when they differ. The ban above is on recomputing in
+  order to *use* the answer, and it stands — no reader anywhere derives a length
+  from text. This is one recomputation, once, in order to *compare*. Its four
+  ceilings are in §8.
 - **Links are keys, not DocIDs** ([FINDINGS §4.2](FINDINGS.md)). Lazy resolution
   is what makes forward references and dangling edges free, and milestone 4's
   evaluation joins an external citation graph by key.
@@ -655,3 +663,7 @@ Two things that follows from, and one it does not:
 | A vector query's working set | 210 MiB per query of a 626 MiB `docs` section | The partition cut the arithmetic 5.6× and the bytes 3.0×. Why the second number is so much worse than the first, and what would actually fix it, is [FINDINGS milestone 3b](FINDINGS.md) |
 | Build cost | +68 s on the 171,332-document evaluation corpus, for the partition | Constant per commit and per merge, not per query. Below 16,384 documents it is not paid at all — the floor is `4·nprobe²`, the size at which a partition first narrows a query to half the segment |
 | `nlist` ceiling | 1024 | The assignment pass is linear in it |
+| The tokenizer's identity is not stored | Nothing on disk says which tokenizer split these documents | Deliberate, not an omission. A Go function value has no stable name, so anything stored would be a caller-supplied label, and a caller who swaps tokenizers without editing the label makes the check confidently wrong. Bytes cannot lie about what split them ([D-023](DECISIONS.md)) |
+| The mismatch check compares a count, not the terms | `Open` recomputes one live document's tokens and compares the count against the number `docoff` already holds. Disagreement is `ErrTokenizerMismatch` | So it catches the large failure — a bigram index opened with the default, 7 tokens against 2 — and **not** a tokenizer that preserves token count. A stemmer is exactly that shape: one token in, one token out, every term changed and no count changed. Catching that needs the identity above |
+| The mismatch check samples one document | The first live document whose stored token count is non-zero | Re-tokenizing the corpus would make `Open` cost the size of the index, which is the whole of what mapping it rather than loading it bought. A corpus with no text to judge is admitted — it answers nothing under every tokenizer |
+| A non-deterministic tokenizer disagrees with itself | Both the postings and the check assume the same string yields the same terms | `Tokenizer`'s doc comment makes determinism the contract; nothing enforces it, and violating it makes `Open` refuse the directory it just wrote |

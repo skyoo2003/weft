@@ -361,9 +361,16 @@ subject was told".
   itself, which means one record decode per candidate — and that decode is what
   [FINDINGS milestone 5 §3.2](FINDINGS.md) named as the throughput wall.
 - **The index has no concept of a field.** `engine.Document` has one `Text`, and
-  `Tokenize` puts all of it into one term space. Any field restriction has to be
-  a convention on the adopter's side — a side store, a second index, a term
+  the tokenizer puts all of it into one term space. Any field restriction has to
+  be a convention on the adopter's side — a side store, a second index, a term
   prefix — and which of those actually stands up is what the trial answers.
+
+  *Which* term space it is has been the adopter's since milestone 13:
+  `engine.WithTokenizer` replaces the split at index time and query time together
+  ([D-022](DECISIONS.md)). That does not give the index a field concept — one
+  tokenizer serves the whole `Text`, and there is still nothing to scope a term
+  to — so the sentence above stands as written. Per-field term spaces are format
+  v5 (`FORMAT.md` §8).
 
 Whether a subject finds either fact is half of task D.
 

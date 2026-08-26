@@ -59,6 +59,14 @@ at query time, and the two effects push in opposite directions. Neither is
 plausibly worth an order of magnitude, which is the only claim being made — but
 the comparison is not analyzer-matched and no reading of it should assume so.
 
+Milestone 13 made weft's side replaceable — `engine.WithTokenizer` takes a
+tokenizer of the caller's — so the mismatch is now a choice rather than a
+constraint. **This benchmark keeps the default and stays unmatched**, deliberately:
+matching bleve would mean a stop-word list and a Porter stemmer written into the
+harness, which is new code inside the measurement, and what this file publishes is
+an order-of-magnitude claim that neither effect is plausibly worth. Closing the gap
+is worth doing when the claim being made is a close one.
+
 ## Running it
 
 ```bash
