@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"time"
+	"unicode"
 
 	"github.com/skyoo2003/weft/pkg/engine"
 	"github.com/skyoo2003/weft/pkg/fusion"
@@ -245,6 +246,79 @@ func ExampleFuser() {
 	// Output:
 	// Fuse         survey tools
 	// restricting  survey
+}
+
+// ExampleWithTokenizer replaces the tokenizer, which is what a caller whose
+// language the default splits wrongly has to do.
+//
+// engine.Tokenize cuts only where a rune is neither a letter nor a digit, so
+// Korean is split at spaces and nowhere else: the document holds "검색엔진을"
+// and the query is "검색엔진", and those are two different terms — the query
+// finds nothing, with nothing to report. The replacement below indexes character
+// bigrams over Hangul runs. It is ten lines and it is not morphological
+// analysis; weft ships no second tokenizer, because a seam with a menu in it is
+// not a seam.
+//
+// One function value serves both sides. Index.Add and scorer/text each reach it
+// through Index.Tokenize, so there is no way to configure index time and query
+// time apart — and a directory committed with one tokenizer and opened with
+// another is refused rather than answering nothing (ErrTokenizerMismatch).
+func ExampleWithTokenizer() {
+	// Character bigrams for a token that starts with a Hangul syllable, and the
+	// default's own answer for everything else.
+	bigrams := func(s string) []string {
+		var out []string
+		for _, tok := range engine.Tokenize(s) {
+			r := []rune(tok)
+			if len(r) < 2 || !unicode.Is(unicode.Hangul, r[0]) {
+				out = append(out, tok)
+				continue
+			}
+			for i := 0; i+1 < len(r); i++ {
+				out = append(out, string(r[i:i+2]))
+			}
+		}
+		return out
+	}
+
+	// The decoy shares no bigram with the target, so a hit on the target is the
+	// query being answered rather than the tokenizer matching anything Korean.
+	docs := []engine.Document{
+		{Key: "target", Text: "검색엔진을 만들었다"},
+		{Key: "decoy", Text: "고양이가 창밖을 바라본다"},
+	}
+	q := engine.Query{Text: "검색엔진"}
+
+	for _, tc := range []struct {
+		name string
+		opts []engine.Option
+	}{
+		{"default", nil},
+		{"replaced", []engine.Option{engine.WithTokenizer(bigrams)}},
+	} {
+		ix := engine.New(tc.opts...)
+		for _, d := range docs {
+			if _, err := ix.Add(d); err != nil {
+				fmt.Println("add:", err)
+				return
+			}
+		}
+		results, err := engine.Search(context.Background(), q, 2, fusion.Fuse, text.New(ix))
+		if err != nil {
+			fmt.Println("search:", err)
+			return
+		}
+		if len(results) == 0 {
+			fmt.Printf("%s: no results\n", tc.name)
+			continue
+		}
+		d, _ := ix.Doc(results[0].Doc)
+		fmt.Printf("%s: %s\n", tc.name, d.Key)
+	}
+
+	// Output:
+	// default: no results
+	// replaced: target
 }
 
 // ExampleIndex_Commit is the persistence round trip: commit, restart, search.

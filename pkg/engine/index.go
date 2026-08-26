@@ -151,6 +151,34 @@ type Index struct {
 	// deletion. A filter that had to live in a scorer would mean the index's
 	// account of which documents exist had leaked into the scorers'.
 	dead deadSet
+
+	// tok is the tokenizer this index was built with, or nil for the package
+	// default. It is bound by New or Open and nothing writes it afterwards, and
+	// three things follow from that one rule.
+	//
+	// **No lock.** Tokenize reads this without ix.mu, because there is nothing to
+	// exclude. Taking the read lock there would add one index-wide acquisition
+	// per Add and one per query — the same class of cost the ponytail note on
+	// DocLen in scorer/text already prices — to protect a value that cannot
+	// change.
+	//
+	// **No SetTokenizer.** It would create a time coupling ("call it before the
+	// first Add") whose violation is not an error but an index half of whose
+	// documents live in a different term space: every query against the other
+	// half answers zero hits, forever, with nothing to report. That is precisely
+	// the class of silent failure ErrDimMismatch exists to refuse, and this
+	// package refuses it the same way — at the write side, once.
+	//
+	// **The open-time guard means something.** Because the value cannot change
+	// after construction, the comparison Open makes when it maps a directory is a
+	// statement about the whole lifetime of the index rather than about one
+	// instant of it.
+	//
+	// Nil rather than a default filled in by New, because the zero value of an
+	// Index has to work — this type's own doc comment promises it — and a struct
+	// literal cannot run a constructor. Tokenize is where the nil is answered,
+	// which is the same shape initMaps keeps for the nil maps above.
+	tok Tokenizer
 }
 
 // The four methods below are the read path with the locking taken out. The
@@ -385,20 +413,107 @@ func (ix *Index) segFor(id DocID) *segment {
 }
 
 // New returns an empty index.
-func New() *Index {
-	return &Index{
+//
+// Options are applied before it returns and nothing changes them afterwards —
+// see Index.tok for why that is the contract rather than a convenience.
+func New(opts ...Option) *Index {
+	ix := &Index{
 		byKey:    make(map[string]DocID),
 		postings: make(map[string][]Posting),
 	}
+	for _, o := range opts {
+		o(ix)
+	}
+	return ix
+}
+
+// Option configures an index at construction. New and Open take them; nothing
+// else does.
+//
+// It is a variadic parameter on the two constructors that already exist rather
+// than either of the two alternatives, and both were priced before this was
+// written (D-022). A NewWithTokenizer/OpenWithTokenizer pair costs one golden
+// line less and makes four entry points where there are two, so an adopter has
+// to decide which to call before knowing whether they care — the ground D-020
+// rejected SearchDeep on. A required tokenizer argument costs the same as this
+// and breaks all 77 call sites of New and Open inside this module alone.
+//
+// Variadic is source-compatible: every existing New() and Open(dir) keeps
+// compiling and keeps meaning what it meant.
+type Option func(*Index)
+
+// Tokenizer splits a document's text, or a query's, into terms.
+//
+// **It must be deterministic**: the same string has to produce the same terms,
+// in the same order, every time. Two things rest on that and neither is
+// negotiable. The terms a document was indexed under are not stored — a posting
+// list is what remains of them — so a tokenizer that answered differently on a
+// second call would leave the index holding terms nothing can look up. And the
+// mismatch check Open runs is a recomputation compared against what was stored,
+// so a non-deterministic tokenizer disagrees with itself and Open refuses the
+// directory it just wrote.
+//
+// It must not retain or modify the string it is handed. The slice it returns
+// becomes the index's.
+type Tokenizer func(string) []string
+
+// WithTokenizer gives an index a tokenizer of its own, used at index time and at
+// query time both.
+//
+// That "both" is the whole point. Add, Update and the query side all reach the
+// tokenizer through Index.Tokenize, so there is one function value per index and
+// no way to configure the two sides apart — which is the failure this seam
+// exists to make unavailable rather than merely discouraged. A directory
+// committed with one tokenizer and opened with another is refused; see
+// ErrTokenizerMismatch.
+//
+// A nil Tokenizer selects the default, which is what an index with no option
+// already has.
+//
+// The tokenizer is not recorded on disk. A Go function value has no stable name,
+// so anything stored would be a label the caller supplied — and a caller who
+// changes tokenizers without changing the label would make the guard lie.
+// D-023 carries the rejected alternative; docs/FORMAT.md section 8 publishes
+// what that leaves uncaught.
+func WithTokenizer(t Tokenizer) Option {
+	return func(ix *Index) { ix.tok = t }
+}
+
+// Tokenize splits s with this index's tokenizer: the one given to New or Open,
+// or the package-level Tokenize when there was none.
+//
+// It is how the query side reaches the seam. scorer/text calls it rather than
+// holding a tokenizer of its own, which keeps the arrangement the same shape as
+// Lookup and Stats — the scorer asks the index a question and the index answers
+// from state it owns. A tokenizer passed through Query or through the Scorer
+// interface would have moved the index's account of its own term space into the
+// scorers', and every scorer would then have to be trusted to use the right one.
+//
+// No lock, and a zero-value Index is fine. See Index.tok for both.
+func (ix *Index) Tokenize(s string) []string {
+	if ix.tok == nil {
+		return Tokenize(s)
+	}
+	return ix.tok(s)
 }
 
 // Tokenize lowercases and splits on everything that is not a letter or digit.
 //
 // It lives in engine rather than in scorer/text because Add has to tokenize to
 // build the postings, and engine importing scorer/text would wreck the whole
-// dependency story. Morphological analysis is out of scope, and CJK runs
-// stay glued into one token here — a known wrong answer that milestone 1 does
-// not need to be right about.
+// dependency story.
+//
+// It is the default and no longer the only choice: CJK runs stay glued into one
+// token here, which for Korean means a word carrying a particle is a different
+// term from the word alone and a query for the word finds nothing. That is a
+// wrong answer this function is not going to be right about — morphological
+// analysis is out of scope and would not fit weft's zero-dependency
+// constraint — so what milestone 13 bought instead is WithTokenizer, and the
+// caller whose language needs better than this supplies it.
+//
+// It stays exported and stays unchanged. internal/eval/bm25_test.go uses it as
+// the reference implementation the published nDCG figures were measured under,
+// and Index.Tokenize falls back to it.
 func Tokenize(s string) []string {
 	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
@@ -440,7 +555,11 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// copy of the caller's value, so holding the exclusive lock across it just
 	// stalls every reader for the duration. A duplicate key wastes the work,
 	// which is the error path.
-	toks := Tokenize(d.Text)
+	//
+	// Through ix.Tokenize, which is the same call the query side makes. Index
+	// time and query time sharing one function value is what makes a replaced
+	// tokenizer usable at all; see WithTokenizer.
+	toks := ix.Tokenize(d.Text)
 	freq := make(map[string]int, len(toks))
 	for _, t := range toks {
 		freq[t]++
@@ -615,7 +734,7 @@ func (ix *Index) Update(d Document) (DocID, error) {
 			return 0, fmt.Errorf("update %q: vector component %d is %v: %w", d.Key, i, c, ErrNonFiniteVector)
 		}
 	}
-	toks := Tokenize(d.Text)
+	toks := ix.Tokenize(d.Text)
 	freq := make(map[string]int, len(toks))
 	for _, t := range toks {
 		freq[t]++
@@ -690,7 +809,10 @@ func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[st
 	// for an id it does not find, so the second occurrence of a dropped term costs
 	// one binary search against the map insert and the hash a set would have cost
 	// it anyway.
-	for _, t := range Tokenize(old.Text) {
+	// ix.Tokenize, not the package function: the old text has to be split the
+	// same way it was split when it was indexed, or the posting lists this drops
+	// from are not the ones that were written.
+	for _, t := range ix.Tokenize(old.Text) {
 		if _, kept := freq[t]; !kept {
 			ix.dropPosting(t, id)
 		}

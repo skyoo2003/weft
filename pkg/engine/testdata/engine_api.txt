@@ -1,9 +1,10 @@
-func New() *Index
-func Open(string) (*Index, error)
+func New(...Option) *Index
+func Open(string, ...Option) (*Index, error)
 func Scrub(string) error
 func Search(context.Context, Query, int, Fuser, ...Scorer) ([]Candidate, error)
 func Tokenize(string) []string
 func TopK([]Candidate, int) []Candidate
+func WithTokenizer(Tokenizer) Option
 method Index.Add(Document) (DocID, error)
 method Index.AvgDocLen() float64
 method Index.Close() error
@@ -18,6 +19,7 @@ method Index.Merge() error
 method Index.Nearest([]float32, int) []DocID
 method Index.Resolve(string) (DocID, bool)
 method Index.Stats() (int, float64)
+method Index.Tokenize(string) []string
 method Index.Update(Document) (DocID, error)
 method Index.Vector(DocID) ([]float32, bool)
 package engine
@@ -34,6 +36,7 @@ field Document.Time time.Time
 type Fuser func([][]Candidate, int) []Candidate
 type Index struct
 Index has unexported fields
+type Option func(*Index)
 type Posting struct
 field Posting.Doc DocID
 field Posting.Freq int
@@ -44,6 +47,7 @@ field Query.Seeds []string
 type Scorer interface
 method Scorer.Name() string
 method Scorer.Candidates(context.Context, Query, int) ([]Candidate, error)
+type Tokenizer func(string) []string
 var ErrBadVersion = errors.New("engine: unsupported index format version")
 var ErrCorrupt = errors.New("engine: index file is corrupt")
 var ErrDimMismatch = errors.New("engine: vector width differs from the corpus")
@@ -53,3 +57,4 @@ var ErrNilScorer = errors.New("engine: nil Scorer")
 var ErrNoFuser = errors.New("engine: nil Fuser")
 var ErrNoSuchKey = errors.New("engine: no document with this key")
 var ErrNonFiniteVector = errors.New("engine: vector has a non-finite component")
+var ErrTokenizerMismatch = errors.New("engine: documents were indexed by a different tokenizer")

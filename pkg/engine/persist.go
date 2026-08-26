@@ -18,7 +18,8 @@ import (
 )
 
 // Sentinel errors from Open, and from Commit when an existing directory is
-// unreadable. Both are properties of bytes on disk, not of the index.
+// unreadable. The first two are properties of bytes on disk, not of the index;
+// the third is the one disagreement between the two that can be checked.
 var (
 	// ErrCorrupt reports a file that failed its checksum, ended mid-value, or
 	// decoded into a state the write path could never have produced. Callers
@@ -31,6 +32,23 @@ var (
 	// the bytes mean something different, and "probably compatible" is how a
 	// wrong index gets loaded silently.
 	ErrBadVersion = errors.New("engine: unsupported index format version")
+
+	// ErrTokenizerMismatch reports a directory whose documents were indexed by a
+	// tokenizer other than the one this Open was given.
+	//
+	// It is the same trade ErrDimMismatch makes, one layer over: caught here it
+	// is one refused Open, and not caught it is every query answering zero hits
+	// for the life of the index — because the query's terms and the corpus's
+	// terms are then different strings and no posting list is ever consulted.
+	// There is nothing in a zero-hit result to tell a caller which of the two
+	// happened, which is what makes the silence worth an error.
+	//
+	// The check reads bytes that were already on disk rather than a recorded
+	// tokenizer name, and what it can and cannot catch is published: see
+	// checkTokenizer and docs/FORMAT.md section 8. It is a new way for a
+	// directory that opened yesterday to fail today, and the thing traded for
+	// that is the query that used to answer nothing.
+	ErrTokenizerMismatch = errors.New("engine: documents were indexed by a different tokenizer")
 )
 
 const (
@@ -575,7 +593,11 @@ func (ix *Index) adopt(root *os.Root, info segInfo) error {
 // delete a live writer's work and leave the directory naming a segment that no
 // longer exists. Until the next Commit, unnamed debris costs disk and nothing
 // else.
-func Open(dir string) (*Index, error) {
+// A directory committed with one tokenizer and opened with another is refused
+// with ErrTokenizerMismatch rather than answering every query with nothing. Pass
+// the same WithTokenizer the commit was made with, or none if it was made with
+// none.
+func Open(dir string, opts ...Option) (*Index, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
@@ -595,7 +617,7 @@ func Open(dir string) (*Index, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open %s: %w", dir, err)
 		}
-		ix, err := mapGeneration(root, dir, m)
+		ix, err := mapGeneration(root, dir, m, opts...)
 		if err == nil {
 			return ix, nil
 		}
@@ -611,8 +633,11 @@ func Open(dir string) (*Index, error) {
 const openAttempts = 3
 
 // mapGeneration maps every segment one manifest names, in order.
-func mapGeneration(root *os.Root, dir string, m manifest) (*Index, error) {
-	ix := New()
+//
+// Variadic rather than a slice parameter so that a caller with no options — the
+// tests reaching in from inside the package — writes the call it already wrote.
+func mapGeneration(root *os.Root, dir string, m manifest, opts ...Option) (*Index, error) {
+	ix := New(opts...)
 	for _, info := range m.segs {
 		s, err := openSegment(root, info.name, info.base)
 		if err != nil {
@@ -671,11 +696,100 @@ func mapGeneration(root *os.Root, dir string, m manifest) (*Index, error) {
 			ix.dead.mark(id, ix.docLenAt(id))
 		}
 	}
+	// The tokenizer last of all, because the sample it needs is a *live*
+	// document, and until the tombstones are in place "live" does not mean
+	// anything.
+	if err := ix.checkTokenizer(); err != nil {
+		ix.Close() //nolint:errcheck // already returning an error
+		return nil, fmt.Errorf("open %s: %w", dir, err)
+	}
 	if err := ix.rememberDir(root, dir); err != nil {
 		ix.Close() //nolint:errcheck // already returning an error
 		return nil, err
 	}
 	return ix, nil
+}
+
+// checkTokenizer refuses a directory whose documents were split by a tokenizer
+// other than this index's, and it does so from bytes that were already on disk.
+//
+// docs/FORMAT.md section 4 forbids recomputing a token count from a document's
+// text, and gives this round's reason for the ban: *"recomputing would let a
+// future tokenizer replacement disagree silently with postings that already
+// exist."* The ban is on recomputing in order to *use* the answer. This
+// recomputes exactly once, in order to *compare* it, which is the disagreement
+// that sentence predicted being caught rather than committed.
+//
+// Two questions of one live document, cheapest first:
+//
+//  1. Its stored token count, which is arithmetic on the mapped docoff table
+//     rather than a decode. Zero means there is nothing to judge — an empty text,
+//     or one that tokenizes to nothing — so the walk moves on.
+//  2. The count against the recomputation. This is persist.go's own
+//     record-versus-table comparison read one layer out: a number written by the
+//     commit against a number computed now.
+//
+// A third question was designed, written, and taken back out: every recomputed
+// term against the segment's terms index, which would have caught a tokenizer
+// that produced the right *number* of different terms. It cannot be asked here.
+// A doctored or damaged terms section makes a live document's terms unclaimed
+// too, and those bytes are indistinguishable from a replaced tokenizer's — so
+// the check reported corruption as a tokenizer mismatch, which is the wrong
+// diagnosis, and it made Open verify a section milestone 3 deliberately stopped
+// reading. D-006 already settled that direction: damage on a lazy path surfaces
+// as absence at query time and Scrub is what names it. docs/FINDINGS.md
+// milestone 13 records the widened ceiling this leaves.
+//
+// The alternative — recording a tokenizer's name in the segment and comparing
+// names — was rejected, and D-023 carries it. A Go function value has no stable
+// name, so what would be stored is a string the caller supplied, and a caller
+// who swaps tokenizers without editing the string makes the guard lie. Bytes
+// cannot lie about what split them.
+//
+// ponytail: four ceilings, all of them deliberate and all of them published in
+// docs/FORMAT.md section 8.
+//
+//   - **A different tokenizer producing the same token count passes**, whatever
+//     the terms are. The guard catches the large failure — a bigram index opened
+//     with the default — and not the small one: a stemmer maps one token to one
+//     token, so it changes every term and no count. Catching that needs the
+//     tokenizer's identity, which is the thing that cannot be stored honestly.
+//   - **The sample is one document.** Re-tokenizing the corpus would make Open
+//     cost the size of the index, which is the whole of what mapping it instead
+//     of loading it bought.
+//   - **A corpus with no text to judge passes.** It answers nothing under every
+//     tokenizer, so there is nothing to protect.
+//   - **A non-deterministic tokenizer disagrees with itself.** Tokenizer's doc
+//     comment makes determinism the contract rather than leaving it to be
+//     discovered here.
+func (ix *Index) checkTokenizer() error {
+	for _, s := range ix.segs {
+		for i := range s.count {
+			id := s.base + DocID(i)
+			// The table before the record: docLen is arithmetic and doc is a
+			// decode, so a corpus of deleted or empty documents is walked without
+			// decoding any of them.
+			stored := s.docLen(id)
+			if stored == 0 || ix.dead.has(id) {
+				continue
+			}
+			d, ok := s.doc(id)
+			if !ok {
+				// A record that will not decode is damage, and Scrub is what names
+				// damage. Reporting it here would answer "is this the right
+				// tokenizer" with "this file is broken", which is a different
+				// question and a different sentinel.
+				continue
+			}
+			if got := len(ix.Tokenize(d.Text)); got != stored {
+				return fmt.Errorf("document %q holds %d tokens on disk and %d under this tokenizer: %w",
+					d.Key, stored, got, ErrTokenizerMismatch)
+			}
+			// One sample, by design. See the ceiling above.
+			return nil
+		}
+	}
+	return nil
 }
 
 // Scrub verifies every byte of the last committed generation in dir and reports

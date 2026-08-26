@@ -54,15 +54,18 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 	// and a text of pure punctuation tokenizes to nothing, so the early return
 	// below would otherwise report success on a context that was already dead.
 	//
-	// This bounds the wait at one tokenization, not inside it: Tokenize is shared
-	// with Index.Add, which has no context, so polling within it would mean
+	// This bounds the wait at one tokenization, not inside it: the tokenizer is
+	// shared with Index.Add, which has no context, so polling within it would mean
 	// either widening engine's API or keeping a second tokenizer here — and one
 	// tokenizer, living in engine, is what keeps engine from importing a scorer
 	// (docs/FINDINGS.md section 2.2).
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	terms := engine.Tokenize(q.Text)
+	// Asked of the index rather than held here or received through Query: index
+	// time and query time have to split text the same way, and the index is what
+	// knows which way. Same shape as the ix.Stats and ix.LookupInto calls below.
+	terms := s.ix.Tokenize(q.Text)
 	if len(terms) == 0 {
 		return nil, nil
 	}
