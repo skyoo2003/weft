@@ -3135,16 +3135,16 @@ order, four readings and the cut order. It was committed **before** anything ran
 checkable:
 
 ```console
-$ git log --oneline -- docs/PERF.md | head -3
-aee06ca docs: correct 5.7's baseline probe, before the baseline arm ran
-d32bade docs: register milestone 14's readings and preflight before the run
+$ git log --format='%h %cd %s' --date=format:'%H:%M:%S' -- docs/PERF.md | head -2
+aee06ca 23:28:12 docs: correct 5.7's baseline probe, before the baseline arm ran
+d32bade 23:26:34 docs: register milestone 14's readings and preflight before the run
 ```
 
-`d32bade` precedes the first probe (23:26:41 KST) and `aee06ca` precedes the second (23:28:20
-KST). The ordering is the point: a pass line chosen after seeing the numbers is how a
-performance claim is made to say whatever its author wants, which is [§3](PERF.md)'s standing
-rule and the reason §5.3 through §5.7 all carry *registered before it is measured* in their
-titles.
+`d32bade` at 23:26:34 precedes the first probe at **23:26:41** by seven seconds, and `aee06ca`
+at 23:28:12 precedes the second at **23:28:20** by eight. The ordering is the point: a pass
+line chosen after seeing the numbers is how a performance claim is made to say whatever its
+author wants, which is [§3](PERF.md)'s standing rule and the reason §5.3 through §5.7 all carry
+*registered before it is measured* in their titles.
 
 **One correction was made mid-round and published rather than edited in.** §5.7's first draft
 spelled the baseline probe `make -C ../weft-m12-baseline bench-preflight`, and **that target

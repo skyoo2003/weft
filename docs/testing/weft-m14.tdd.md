@@ -68,15 +68,15 @@ two commands that justify it, the arm order with the page-cache bias named, four
 the budget with the cut order. Added a pointer from §5.6's close.
 
 ```console
-$ git log --oneline -- docs/PERF.md | head -3
-aee06ca docs: correct 5.7's baseline probe, before the baseline arm ran
-d32bade docs: register milestone 14's readings and preflight before the run
+$ git log --format='%h %cd %s' --date=format:'%Y-%m-%d %H:%M:%S' -- docs/PERF.md | head -2
+aee06ca 2026-08-27 23:28:12 docs: correct 5.7's baseline probe, before the baseline arm ran
+d32bade 2026-08-27 23:26:34 docs: register milestone 14's readings and preflight before the run
 ```
 
-`d32bade` is committed at 2026-08-27, before the first probe at 23:26:41 KST. **That ordering
-is Task 1's whole guarantee** and it is the only one available for a round with no code: a
-pass line chosen after seeing the numbers is how a performance claim is made to say whatever
-its author wants.
+`d32bade` at 23:26:34 precedes the first probe at 23:26:41 by seven seconds; `aee06ca` at
+23:28:12 precedes the second at 23:28:20 by eight. **That ordering is Task 1's whole guarantee**
+and it is the only one available for a round with no code: a pass line chosen after seeing the
+numbers is how a performance claim is made to say whatever its author wants.
 
 The baseline substitution was verified rather than taken from the plan:
 
