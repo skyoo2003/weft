@@ -3113,3 +3113,214 @@ not a third void run.
 6. **A position index and per-field term spaces are still format v5**, and a replaceable
    tokenizer does not change that: one tokenizer serves the whole `Text` and there is nothing
    to scope a term to. `FORMAT.md` §8 carries both with what they would cost.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 14 — The procedure landed, the probe passed, and the ladder did not run
+
+**Verdict: the four clauses are still unjudged — for the third round — and for the first time
+that is a decision costing one minute rather than an accident costing 97.** The round's own
+outcome clause is not met: nothing moved from unjudged to judged. What it did deliver is the
+thing [milestone 13 §8 item 2](#8-carried-forward) asked for, and the first use of that thing
+found a limit in it that the design had not predicted.
+
+`pkg/` diff: **0 lines**. Golden API files: **0 lines**. That was the mechanical definition of
+this being a judgment round rather than a feature one, and it held.
+
+## 1. What was registered, and that it was registered first
+
+[PERF §5.7](PERF.md) fixes the preflight and its pass line, the baseline commit, the arm
+order, four readings and the cut order. It was committed **before** anything ran, which is
+checkable:
+
+```console
+$ git log --oneline -- docs/PERF.md | head -3
+aee06ca docs: correct 5.7's baseline probe, before the baseline arm ran
+d32bade docs: register milestone 14's readings and preflight before the run
+```
+
+`d32bade` precedes the first probe (23:26:41 KST) and `aee06ca` precedes the second (23:28:20
+KST). The ordering is the point: a pass line chosen after seeing the numbers is how a
+performance claim is made to say whatever its author wants, which is [§3](PERF.md)'s standing
+rule and the reason §5.3 through §5.7 all carry *registered before it is measured* in their
+titles.
+
+**One correction was made mid-round and published rather than edited in.** §5.7's first draft
+spelled the baseline probe `make -C ../weft-m12-baseline bench-preflight`, and **that target
+does not exist on `700a178`** — this milestone adds it, so a worktree at milestone 12's merge
+has no rule for it. The command was respelled as the flags the target hardcodes; nothing
+measured changed. It is recorded because a procedure step whose command fails on one of two
+arms is the same class of defect as no step at all, and the step existing is what this round
+was buying.
+
+## 2. The baseline moved to a commit that is reachable
+
+§5.6 named `1eb2a44` as its baseline arm, and **that commit is not an ancestor of `main`** — it
+sits on the `m12-query-expressiveness-onmain` side branch as milestone 13's development base,
+so no reader of this history can check it out. `700a178`, milestone 12's merge on `main`, is
+byte-identical across all four code directories:
+
+```console
+$ git merge-base --is-ancestor 1eb2a44 HEAD
+(exit 1 — not an ancestor)
+$ git diff --stat 1eb2a44 700a178 -- pkg/ internal/ cmd/ bench/
+(empty)
+$ git diff --stat 9d05c16 eedc04a -- pkg/ internal/ cmd/
+(empty)
+```
+
+So the substitution moves the measurement to a reproducible place without changing what is
+measured, and the measured arm `eedc04a` is the same code §5.6 measured as `9d05c16`. §5.6's
+wording stands as written.
+
+## 3. Both probes passed, and reading 1 did not fire
+
+2026-08-27, 28 seconds each, 500 requests each, baseline arm second. Full output and `uptime`
+either side are in [docs/testing/weft-m14.tdd.md](testing/weft-m14.tdd.md).
+
+| | baseline `700a178` | HEAD `eedc04a` | pass line |
+| --- | --- | --- | --- |
+| unloaded p50 | 34.272 ms | 33.705 ms | — |
+| p50 at 27.28 q/s | 35.544 ms | 35.387 ms | ≤ 2× the same run's unloaded p50 |
+| **ratio** | **1.04×** | **1.05×** | ≤ 2× → **both pass** |
+| shed | **0** | **0** | 0 → **both pass** |
+| alloc per query | 10869.0 KiB | 10869.0 KiB | — |
+| load average, before / after | 3.29 / 4.14 | 2.31 / 2.49 | not a gate |
+
+Against the void run's **78×**. The instrument was in a state to measure, which is the one
+thing neither of the previous two rounds could say.
+
+**These are gate readings and they are not clause readings.** §5.7 registered them as *not
+published*, and the sense in which they appear here is narrow: what is published is that the
+probe passed and by how much, because that is the evidence the gate worked. They cannot be
+read against the clauses, for three separate reasons and any one of them is enough:
+
+1. **500 samples, not 10,000.** [PERF §2.3](PERF.md) leaves a quantile out rather than
+   printing it when fewer than 100 samples sit beyond it, and the probe's own output prints
+   `p95 -- p99 -- p99.9 --` for exactly that reason. A p50 over 500 samples is not the p50 the
+   clause names.
+2. **A lone rung is not the ladder's fourth rung.** §5.5's correction and
+   [D-014](DECISIONS.md) forbid reading a lone rung's `peakrss` against milestone 8's ladder
+   peak, and the probe's 105.7 MiB and 102.3 MiB are precisely that forbidden comparison. The
+   memory clause reads the ladder's high-water mark and there is no ladder here.
+3. **The rule needs a ladder to apply.** The probe's own summary says so:
+   *1 of 1 rungs measured … so the load-point rule has nothing to apply and there is no
+   saturation point and no headline.*
+
+So `shed = 0` and `p50 = 35.4 ms` are **not** the shed and p50 clauses being met, and this
+section declines to say they are.
+
+## 4. Why the ladder did not run, which is not reading 1
+
+The probe passed, so reading 1 — *the preflight misses its pass line* — did not fire. Readings
+2, 3 and 4 all require the ladder to have run. **No registered reading fired**, and that is
+the round's most useful finding.
+
+The ladder was not started because the machine was committed to builds, test runs and other
+agent sessions for the following three hours. That is the same condition §5.6 identified as
+what voided milestone 13's run — *a `make eval` over the 626 MiB corpus, a `go test -race
+./...`, two `golangci-lint` passes and an `npx markdownlint`, in one session on one machine* —
+known in advance this time instead of reconstructed afterwards.
+
+**So the probe is necessary and not sufficient, and the gap is structural rather than a
+tuning error.** The probe certifies the machine at the instant it runs; the ladder needs the
+machine to stay that way for 3.1 hours afterwards. Nothing in a 28-second measurement can
+speak to the next three hours. §5.7's reading list has no entry for *the operator knows in
+advance that the window is not available*, so the outcome lands in reading 1's **category** —
+**not executed, which is not void** — by a route the list did not name.
+
+The distinction is load-bearing and it is why this section is not a third §5.6:
+
+- **Void** is 97 minutes spent on numbers that cannot be read in either direction.
+- **Not executed** is one minute spent establishing that the numbers would not have been
+  readable, and 3.1 hours not spent.
+
+[D-024](DECISIONS.md) carries the amendment: the ladder needs a **committed window** as well
+as a passing probe, and a probe that passes is the beginning of the check rather than the whole
+of it.
+
+## 5. What this licenses, and what it does not
+
+1. **The four clauses are unjudged, for the third round.** Shed 0 at 27.28 q/s, p50 ≤ 40 ms,
+   ladder peak RSS ≤ 120 MiB, and milestone 9's worst read inside a commit window ≤ 1 s. Not
+   met, not missed. Carried forward again in [§7](#7-carried-forward).
+2. **No regression is attributable to milestone 13, and none is ruled out either.** The two
+   probes sit 0.44% apart at the top rate, with HEAD marginally *ahead* of the baseline —
+   which points the opposite way from §5.6's reported p50 +12.8% and is consistent with the
+   argument that the default path gained one `ix.tok == nil` branch. It is **not** evidence for
+   invariance: 500 samples apiece, one observation apiece, one rung apiece, and the page-cache
+   asymmetry below unaccounted for. The honest reading of 0.44% at n=1 is *nothing was
+   detected*, not *nothing is there*.
+3. **The quality clause stays judged and was not re-run.** Milestone 13's run C reproduced
+   nDCG@10 0.5826 / 0.6211 to four decimals ([§6 of milestone 13](#6-quality-unmoved)).
+   §5.7 removed `make eval` from the run list deliberately: a second identical verdict is not
+   worth putting a 677 MiB index load into the ladder's session, which is the condition that
+   voided the last attempt. **A subtraction, published as one.**
+4. **Allocation per query reproduced exactly, on both arms.** 10869.0 KiB against a published
+   10,869.0. [Milestone 8 §11](#11-the-memory-clause-judged--and-the-excursion-went-with-it)
+   established that this figure is a property of the query set rather than of the load, which
+   is what makes it readable off a 500-sample probe when the latency quantiles are not. It is
+   the strongest single indication that the two arms are running the same work, and it is not
+   one of the four clauses.
+5. **`ru_nivcsw` now has two observations and still has no threshold.** 26,692 on the baseline
+   probe and 24,867 on HEAD's — the first readings in this repository, which is what
+   [D-024](DECISIONS.md) rejected the metric for lacking. They do not repair it: the machine
+   passed the probe but was carrying an agent session at load average 2.3–4.1, so it was not
+   quiet in §5.7's sense, and a figure from a not-quiet machine bounds neither side. What they
+   establish is an order of magnitude — tens of thousands per 500-request rung — where before
+   there was nothing.
+
+## 6. What is not matched, and which way it biases
+
+In [PERF §4](PERF.md)'s form, because the ladder these apply to has not run and they are being
+registered rather than reported:
+
+1. **Page cache between the arms.** The first arm to run maps the index and leaves the cache
+   warm; the second inherits it. The order is fixed **baseline first**, so a HEAD regression
+   is real *despite* the cache being on HEAD's side, and a HEAD improvement has a live
+   competing explanation which will be written beside the figure rather than claimed as an
+   improvement. Running both orders would cost 6.4 hours instead of 3.2 and randomisation buys
+   nothing at n=1, so the bias is **named rather than removed**.
+2. **The probes ran in the reverse order from the ladder's.** HEAD's probe was first, at
+   23:26:41; the baseline's at 23:28:20 inherited whatever HEAD's had warmed. That is the
+   direction *against* the observation in §5 item 2 — the baseline had the cache advantage and
+   was still 0.44% slower — and it is one more reason 0.44% is not a claim.
+3. **The index is milestone 11's format v4, and only HEAD has the tokenizer guard.** HEAD's
+   `Open` re-tokenizes one live document; the baseline's does not. Both opened in **60 ms**,
+   identically, so the guard's cost is below this instrument's resolution — which is the first
+   measurement of it, against [milestone 13's gap 5](#8-carried-forward) that no test pins it.
+4. **One observation each.** [D-013](DECISIONS.md) unchanged: a single run is not a median.
+   Three repetitions would cost the 4.9 hours D-013 priced and this round did not buy them.
+
+## 7. Carried forward
+
+1. **The four performance clauses are unjudged for the third round.** [PERF §5.7](PERF.md)
+   holds the readings, the pass lines, the baseline, the arm order and the cut order, all
+   committed and all still standing. What the next attempt needs is **not** more design: it is
+   a 3.1-hour window with nothing else on the machine. Run `make bench-preflight` on both arms
+   first — the probe's certificate does not survive the wait — then the two ladder arms,
+   baseline first.
+2. **§5.7's reading list needs a fifth entry.** *The window is known in advance to be
+   unavailable* → not executed. This round landed there and the list did not name it;
+   [D-024](DECISIONS.md) records the amendment and
+   [§4](#4-why-the-ladder-did-not-run-which-is-not-reading-1) the reasoning. A probe passing is
+   the beginning of the check, not the whole of it.
+3. **The write arm is cut, and the cut is a decision.** Milestone 9's read clause needed
+   `-writes -writedocs 20000` on both arms, about 90 minutes, and §5.7 registered it as the
+   first thing to cut. It was never reached because the ladder it follows did not run, so this
+   is a cut behind a cut — published so that "the write arm was cut" reads as an ordering
+   decision rather than as an omission.
+4. **`-deletefrac` and §5.5's run B are still open**, untouched by this round and deliberately
+   so: mixing two rounds into one sitting means a void in either cannot be attributed to
+   either. Milestone 11's carried-forward item 3 and half of the PRD's open question 2 both
+   remain owed, and `-deletefrac` still does not exist in `cmd/weft-eval`.
+5. **`ru_nivcsw` per rung stays rejected, with two observations against zero.**
+   [D-024](DECISIONS.md) holds the reason and the revival signal — a ladder that comes back
+   void *after* a passing probe, which is the case where the probe cannot see what the ladder
+   feels.
+6. **The probe has no exit code, by decision.** The comparison is a person reading two printed
+   lines, and the `ponytail:` comment on `bench-preflight` prices the alternative at about
+   thirty lines in `cmd/weft-eval/bench.go` should a fourth ladder still come back void. Note
+   that the failure this round *did* hit is not one an exit code would have caught: the probe
+   passed.
