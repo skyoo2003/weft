@@ -1082,14 +1082,25 @@ leaves the page cache warm, and the second inherits it. **So the order is baseli
 Running both orders turns 3.2 hours into 6.4. At n=1 randomisation buys nothing, so the bias
 is **named rather than removed**.
 
+**Correction, made before the baseline arm was run rather than after.** This section first
+wrote the baseline probe as `make -C ../weft-m12-baseline bench-preflight`, and **that target
+does not exist on `700a178`** — it is added by this milestone, so a worktree at milestone 12's
+merge has no rule for it. The probe on the baseline arm is therefore spelled as the flags the
+target hardcodes. Nothing measured changes: `bench-preflight` *is*
+`bench -rates 27.28 -rotations 10`, and the pass line above is unchanged. It is recorded here
+because the step existing is what this round buys, and a step whose command fails on one of
+two arms is the same class of defect as no step at all.
+
 ```bash
 # The baseline arm is a worktree. The index is shared — the same bytes read by both
 # arms is the premise of the A/B.
 git worktree add ../weft-m12-baseline 700a178
 
-# Preflight both arms first. Either one failing is reading 1 below.
+# Preflight both arms first. Either one failing is reading 1 below. The baseline is
+# spelled out because `bench-preflight` postdates 700a178 — see the correction above.
 make bench-preflight
-make -C ../weft-m12-baseline bench-preflight EVAL_DATA=$PWD/.eval-data
+make -C ../weft-m12-baseline bench EVAL_DATA=$PWD/.eval-data \
+  BENCHFLAGS='-rates 27.28 -rotations 10'
 
 # The ladder, baseline first. About 92 minutes each.
 date; uptime; caffeinate -dimsu make -C ../weft-m12-baseline bench \
