@@ -1,6 +1,6 @@
 .PHONY: all fmt build vet test lint lint-if-present lint-docs lint-docs-if-present spdx fuzz arch deps run example clean \
 	changelog changelog-new changelog-check docs-site release-check \
-	eval eval-full eval-data recall bench bench-compare bench-build
+	eval eval-full eval-data recall bench bench-preflight bench-compare bench-build
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
@@ -251,6 +251,41 @@ bench:
 		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; \
 	else \
 		go run ./cmd/weft-eval bench -data $(EVAL_DATA) $(BENCHFLAGS); \
+	fi
+
+# Milestone 14. Run this before `bench`, and read two lines off it.
+#
+# Twice the ladder above has been spent on a machine that could not reproduce its own
+# published figures, and both times the finding came after the fact: milestone 11's
+# run A died in the index load, milestone 13's came back void after 97 minutes. What
+# made the second one void is on the record in docs/PERF.md section 5.6 — and the
+# reading that would have caught it is not the unloaded median. That one was *normal*
+# on the void machine, 34.072 ms against a published 32.231. The only cheap signal
+# that separates them is the top rate under load: 1.04x published, 78x void.
+#
+# So: the top rung alone, 10 rotations instead of 200. About a minute.
+#
+# PASS: the rung's p50 is at most twice the `unloaded: p50` line this same run
+# printed, and shed is 0. Twice is loadgen.SaturationRate's constant rather than a
+# number picked here — the first rung past twice the unloaded median is saturation,
+# and 27.28/s was not saturation on the published ladder. A machine that saturates
+# here cannot reproduce it, and the honest move is to not spend the 97 minutes.
+#
+# These numbers are not published. They decide whether the ladder runs.
+#
+# A separate process on purpose: peakrss is ru_maxrss, which the kernel never lowers,
+# and the memory clause reads the *ladder's* peak (docs/PERF.md section 2.7, D-014).
+# Folded into the ladder, this probe would raise the mark before rung 1 reported.
+#
+# ponytail: a documented step, not an enforced one — the comparison is a person
+# reading two printed lines. The two failures were not a failed comparison, they were
+# a probe nobody ran. If a fourth ladder still comes back void, this becomes a
+# -preflight flag with an exit code (~30 lines in cmd/weft-eval/bench.go).
+bench-preflight:
+	@if [ ! -d $(EVAL_DATA)/index ]; then \
+		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; \
+	else \
+		go run ./cmd/weft-eval bench -data $(EVAL_DATA) -rates 27.28 -rotations 10; \
 	fi
 
 # Milestone 5's third assertion: same machine, same corpus, same queries, same
