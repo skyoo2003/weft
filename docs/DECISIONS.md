@@ -1898,25 +1898,55 @@ in `cmd/weft-eval/bench.go`.
   rather than the thing. **Partly adopted**: logged beside `date`, which is what item
   2 asked for, and excluded from the verdict.
 
-### What the first use showed, which the design did not predict
+### The falsification condition fired on first use — 2026-08-28
 
-Both arms passed on 2026-08-27 — 1.05× on `eedc04a`, 1.04× on `700a178`, shed 0 on
-both — and **the ladder still did not run**, because the operator knew the machine
-would carry builds and other agent sessions for the next three hours.
+**Accepted, and amended by its own test.** The condition below said *a ladder that
+comes back void after a probe that passed* would show this wrong. Four probes passed —
+1.00× to 1.05×, shed 0 — and **two ladder attempts produced no verdict**: the first
+took SIGTERM at 46 minutes, the second completed eight rungs and both arms printed
+`DISCARD this run` after the laptop's lid was closed mid-ladder, twice.
 
-So the probe is **necessary and not sufficient**, and the reason is a property of what
-it is: it certifies the machine at the moment it runs, and the ladder needs the
-machine to stay that way for 3.1 hours afterwards. [PERF §5.7](PERF.md)'s reading list
-has no entry for *the operator knows in advance that the window is not available* —
-the outcome lands in reading 1's category, **not executed, which is not void**, but it
-arrives by a route the list did not name. That is the amendment the next round starts
-from: the ladder needs a committed window as well as a passing probe.
+The naive conclusion is that the probe is worthless. That is wrong, and the correct
+reading is what makes this decision worth keeping:
 
-### What would show this is wrong
+| failure mode | detector | worked? |
+| --- | --- | --- |
+| a **contended** machine | `bench-preflight`, this decision | untested — no attempt failed this way |
+| a **suspended** machine | `SuspendTolerance`, present since milestone 7 | **yes**, in-band, both arms, with durations |
+| a machine that **stays awake** | `caffeinate -dimsu`, prescribed since milestone 5 | **no** |
 
-A ladder that comes back void after a probe that passed. That is the design's own
-falsification condition and it is registered in [PERF §5.7](PERF.md) reading 4, which
-is why reading 4 also publishes *the probe cannot see everything* rather than only
-*this is drift*. The opposite failure — a probe that fails on a machine which would in
+**Both detectors behaved correctly; the mitigation is what failed.** The probe measures
+contention and the failure was suspension — different things, caught by different
+checks, and the second check did its job without help. So the amendment is not to the
+probe's pass line, which is untouched, but to two places around it:
+
+1. **The lid stays open.** `caffeinate -dimsu` holds `PreventUserIdleSystemSleep` and
+   has no power over clamshell sleep; the machine slept on AC at 100% charge. Nine
+   milestones prescribed a remedy that does not cover the failure mode `clock.go`'s own
+   comment names. Now stated beside the command in [PERF §5.7](PERF.md).
+   `sudo pmset disablesleep 1` rejected — root, and a machine that never sleeps if the
+   operator forgets to unset it.
+2. **The probe is necessary and not sufficient, for two reasons rather than one.** It
+   certifies the machine at the instant it runs and the ladder needs 3.1 hours; and it
+   measures one failure mode of at least three. [PERF §5.7](PERF.md) gains readings 5
+   and 6 — *window known unavailable* → not executed, and *instrument discarded the
+   completed run* → void with the cause in-band.
+
+**What the probe did buy, and it is not nothing.** Twelve independent readings of
+`alloc 10869.0 KiB/query` across probes and rungs, agreeing with the published figure
+to one decimal, which is the evidence that both arms run the same work. And the
+observation that 27.28 q/s as a **lone rung** returns 34–35 ms on this machine while
+27.28 q/s as a **ladder's fourth rung** collapses to 1.6–2.0 s — a second, sharper use
+for the distinction
+[D-014](#d-014--the-memory-pass-line-reads-the-processs-mark-milestone-8-misses-it-and-milestone-10-does-not-fire-on-that)
+drew for `peakrss`, and the reason a passing probe can never stand in for the clause.
+
+### What would still show this wrong
+
+A ladder that comes back void on a **quiet, awake** machine after a passing probe —
+the test the two attempts above did not get to run, because neither machine stayed
+awake. If that happens the probe is measuring something the ladder does not care
+about, and `ru_nivcsw` per rung becomes the next instrument rather than a rejected
+alternative. The opposite failure — a probe that fails on a machine which would in
 fact have reproduced the ladder — costs one minute and is the direction the threshold
 was chosen to err in.

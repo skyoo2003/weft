@@ -1091,6 +1091,17 @@ target hardcodes. Nothing measured changes: `bench-preflight` *is*
 because the step existing is what this round buys, and a step whose command fails on one of
 two arms is the same class of defect as no step at all.
 
+**The lid stays open, and `caffeinate` is not enough on its own.** Added after two arms were
+discarded for it. `caffeinate -dimsu` holds `PreventUserIdleSystemSleep`, which stops *idle*
+sleep and has no power over **clamshell sleep** — closing the lid sleeps the machine on AC at
+full charge, and the monotonic clock stops with it, which is what `Elapsed` in
+`internal/loadgen/clock.go` reads as unaccounted time. This file has prescribed
+`caffeinate -dimsu` as the way to keep a ladder awake since [§5.1](#51-the-campaign-in-order),
+and `clock.go` cites *thirteen hours of clamshell sleep* as the failure its suspension check
+exists to detect, so the remedy has not covered the named failure mode for nine milestones.
+`sudo pmset disablesleep 1` would enforce it and is rejected: it needs root, and it leaves a
+machine that never sleeps if the operator forgets to unset it.
+
 ```bash
 # The baseline arm is a worktree. The index is shared — the same bytes read by both
 # arms is the premise of the A/B.
@@ -1156,3 +1167,48 @@ rounds into one sitting means a void in either cannot be attributed.
 **One observation each, and that is written beside the numbers.** [D-013](DECISIONS.md)
 applies unchanged: a single run is not a median and must not be called one. Three repetitions
 would cost the 4.9 hours D-013 priced, and this round does not buy them.
+
+#### Outcome, 2026-08-27/28: four probes passed, two ladder attempts, both void
+
+**The clauses are unjudged for the third round.** Recorded here against the readings above
+rather than in a commit message.
+
+| | what happened |
+| --- | --- |
+| preflight ×4 | **all passed** — 1.00× to 1.05× against a 2× line, shed 0 every time |
+| ladder attempt 1 | **SIGTERM at 46 min**, in rung 1 of the baseline arm. Nothing published |
+| ladder attempt 2 | **eight rungs completed, both arms printed `DISCARD this run`** |
+| write arms | **not reached** — the registered first cut, behind a discard |
+| `make eval` | **not run**, by design |
+
+**Which reading fired: none of the four, and the list is the thing that was wrong.** Reading 1
+needs a *failing* probe and the probe passed four times. Readings 2, 3 and 4 need arms whose
+figures can be read, and the instrument's own suspension check refused both. Two entries are
+therefore added to the list for the next attempt:
+
+- **Reading 5 — the window is known in advance to be unavailable** → *not executed.* One minute
+  spent, 97 saved. Distinct from void.
+- **Reading 6 — the run completes and the instrument discards it** → *void, with the cause
+  recorded in-band.* Distinct from reading 4, whose drift has to be inferred from an A/B; here
+  `SuspendTolerance` names the failure and the amount.
+
+**What voided it was not what the preflight was built to catch, and both detectors worked.**
+The probe measures contention; the failure was suspension, which `SuspendTolerance` caught on
+both arms with the duration attached — 22m39s at the baseline's second rung, 4h57m08s at HEAD's
+first. The mitigation is what failed, and the lid paragraph above is the fix.
+[D-024](DECISIONS.md)'s own falsification condition — *a ladder that comes back void after a
+probe that passed* — fired, and the refinement is recorded there rather than quietly dropped.
+
+**One thing the discarded data narrows, registered so the next attempt looks for it.** The top
+rung collapsed on **both** arms — 1.635754 s and 2.034673 s against a published 33.470 ms, with
+shed 1,811 and 3,323 and the ladder mark at 660.8 and 675.8 MiB against 100.7 — while rungs 1
+through 3 stayed in family, and while four lone-rung probes at the same rate returned 34–35 ms.
+§5.6 reported the same signature for milestone 13. **The baseline arm is pre-milestone-13 code
+and collapses identically, so the cause is not that milestone.** It is not read further here:
+both arms slept before reaching that rung, and that is exactly what the discard forbids reading
+through. [FINDINGS milestone 14 §5a](FINDINGS.md) holds the shape and the three surviving
+candidates.
+
+Whoever picks this up runs the block above unchanged, **with the lid open**. Nothing about the
+tree has to change first, the pass lines and the four readings still stand as written, and the
+worktree at `700a178` is already in place.
