@@ -200,21 +200,35 @@ v2.13.1. The older one counts three `goconst` occurrences the newer does not.
 Fixed by removing the literals rather than by pinning around it — `clauseTerms`,
 `keyTerms`, `keyDocCount`.
 
-**CodeQL found a real defect**, and it is one this repository has met before.
-`intParam` validated that `limit` was positive and put no ceiling on it, so
-`GET /_weft/terms?limit=2000000000` asked `engine.Index.Terms` to allocate for
-two billion entries before a single term was walked — `go/uncontrolled-allocation-size`,
-the same rule that produced `maxResultWindow` on `_search` when the HTTP surface
-was new. RED first:
+**CodeQL reported an uncontrolled allocation, and it was a false positive — but
+the first account written of it here said otherwise, so both are recorded.**
+
+The alert was `go/uncontrolled-allocation-size` on
+`make([]map[string]any, 0, min(len(postings), limit))`, and the first reading of
+it was that `?limit=2000000000` reached an unbounded allocation. Reading the
+callee settled it the other way. That slice is bounded by `len(postings)`, and
+`engine.Index.Terms` allocates for the size of the matching term set and
+truncates to the limit *afterwards* — so the limit never sized an allocation
+anywhere on these routes. CodeQL's dataflow does not model `min()` as a bound
+and saw only that a user-provided value reached a capacity argument.
+
+The cap was kept anyway, and the alert is recorded as fixed rather than
+dismissed. A number a request names with no ceiling is worth refusing whether or
+not today's callee ignores it, and the bound is what makes that true for a
+reader who cannot see inside `engine`. RED first, GREEN after:
 
 ```text
 $ go test ./internal/opensearch/ -run TestWeftLimitIsCapped
 --- FAIL: TestWeftLimitIsCapped//papers/_weft/terms?limit=2000000000
     status 200, want 400
+... after the cap ...
+ok      github.com/skyoo2003/weft/internal/opensearch
 ```
 
-GREEN with the same cap rather than a second number, so a client that already
-handles the refusal on `_search` handles this one.
+**What this cost is one wrong sentence published in a commit message**
+(`197c726`, "which makes a query string a remote allocation primitive") before
+the callee had been read. The correction is a commit rather than a rewrite, so
+the sequence stays visible.
 
 ## Merge evidence
 

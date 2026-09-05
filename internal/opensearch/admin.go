@@ -301,13 +301,22 @@ func (s *Server) weftQuery(w http.ResponseWriter, r *http.Request) error {
 
 // intParam reads a positive integer query parameter, or its default.
 //
-// The cap is a security boundary and not a preference, which is the same
-// sentence maxResultWindow carries and for the same reason. engine.Index.Terms
-// allocates for the limit it is handed and the slice below is built to it, so a
-// number read straight out of a query string is a remote allocation primitive:
-// `?limit=` with ten digits asks this process for the memory before a single
-// term has been walked. CodeQL's go/uncontrolled-allocation-size found this one
-// exactly as it found the one on _search.
+// The cap is not what it looks like, and the difference is worth writing down
+// because a later reader will otherwise assume it closed a hole.
+//
+// **Nothing here was unbounded.** weftPostings sizes its slice with
+// min(len(postings), limit), so the posting list is the ceiling; and
+// engine.Index.Terms allocates for the size of the matching term set and
+// truncates to limit *afterwards*, so the limit never reaches an allocation
+// there either. `?limit=2000000000` allocated nothing before this cap existed.
+//
+// What the cap does is make that provable to a reader who cannot see inside
+// engine — including CodeQL, whose go/uncontrolled-allocation-size reported the
+// taint reaching a make() capacity because its dataflow does not model min() as
+// a bound. That was a false positive, and the alert is recorded as fixed rather
+// than dismissed because a bound is genuinely the better code: a number a
+// request names, with no ceiling, is worth refusing whether or not the current
+// callee happens to ignore it.
 //
 // maxResultWindow rather than a second number, because a client that already
 // handles the refusal on _search handles this one, and two caps would be two

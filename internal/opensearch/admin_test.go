@@ -192,14 +192,13 @@ func TestWeftPostings(t *testing.T) {
 	}
 }
 
-// TestWeftLimitIsCapped is an allocation boundary, not a preference.
+// TestWeftLimitIsCapped pins the ceiling on a number a request names.
 //
-// `engine.Index.Terms` allocates for the limit it is handed, so a limit read
-// straight out of a query string is a remote allocation primitive: `?limit=`
-// with ten digits asks this process for the memory before a single term is
-// walked. It is the hole `maxResultWindow` was introduced for on _search, found
-// the same way — CodeQL's go/uncontrolled-allocation-size — and refused with the
-// same number, so a client that already handles one handles the other.
+// It is not closing a hole, and the comment on intParam says why at length:
+// both slices were already bounded by something other than the limit. What this
+// pins is that the bound stays explicit — a later change that widens the walk
+// would otherwise reach an allocation with nothing between it and a ten-digit
+// query parameter, and nobody would be told.
 func TestWeftLimitIsCapped(t *testing.T) {
 	srv := dslCorpus(t)
 
