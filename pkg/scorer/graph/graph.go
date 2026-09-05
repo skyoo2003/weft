@@ -269,6 +269,18 @@ func (s *Scorer) bfs(ctx context.Context, seed engine.DocID) (map[engine.DocID]i
 // seedDocs resolves the starting set. Explicit Query.Seeds win over the seed
 // scorer, so a caller can always override.
 func (s *Scorer) seedDocs(ctx context.Context, q engine.Query) ([]engine.DocID, error) {
+	return seedDocs(ctx, s.ix, s.seed, q)
+}
+
+// seedDocs is the rule both scorers in this package start from, held once.
+//
+// A free function rather than a method, because PPR is not a Scorer with a
+// different formula bolted on — it holds an Adjacency where Scorer holds an
+// index — and two seed resolutions would be two places for "an unknown seed key
+// is skipped, not an error" and "a seed scorer's DocIDs are checked against this
+// index" to drift apart. Every judgement below is load-bearing and each is
+// argued where it stands.
+func seedDocs(ctx context.Context, ix *engine.Index, seed engine.Scorer, q engine.Query) ([]engine.DocID, error) {
 	if len(q.Seeds) > 0 {
 		ids := make([]engine.DocID, 0, len(q.Seeds))
 		for i, key := range q.Seeds {
@@ -282,7 +294,7 @@ func (s *Scorer) seedDocs(ctx context.Context, q engine.Query) ([]engine.DocID, 
 					return nil, err
 				}
 			}
-			if id, ok := s.ix.Resolve(key); ok {
+			if id, ok := ix.Resolve(key); ok {
 				ids = append(ids, id)
 			}
 			// An unknown seed key is skipped, not an error: asking about a
@@ -290,7 +302,7 @@ func (s *Scorer) seedDocs(ctx context.Context, q engine.Query) ([]engine.DocID, 
 		}
 		return ids, nil
 	}
-	if s.seed == nil {
+	if seed == nil {
 		// The nil-seed branch still has to answer for the context. Without this
 		// it is the one path out of Candidates that reports a cancelled query as
 		// a successful "no opinion": len(seeds) == 0 short-circuits above the
@@ -302,9 +314,9 @@ func (s *Scorer) seedDocs(ctx context.Context, q engine.Query) ([]engine.DocID, 
 		// conditionally rather than pre-declaring a typed nil.
 		return nil, ctx.Err()
 	}
-	cands, err := s.seed.Candidates(ctx, q, SeedN)
+	cands, err := seed.Candidates(ctx, q, SeedN)
 	if err != nil {
-		return nil, fmt.Errorf("seed scorer %s: %w", s.seed.Name(), err)
+		return nil, fmt.Errorf("seed scorer %s: %w", seed.Name(), err)
 	}
 	// The seed scorer's DocIDs are checked against this index before they are
 	// trusted. A DocID means nothing outside the index that assigned it, and a
@@ -315,7 +327,7 @@ func (s *Scorer) seedDocs(ctx context.Context, q engine.Query) ([]engine.DocID, 
 	// ignores Doc's bool prints it as a blank row.
 	ids := make([]engine.DocID, 0, len(cands))
 	for _, c := range cands {
-		if _, ok := s.ix.Doc(c.Doc); ok {
+		if _, ok := ix.Doc(c.Doc); ok {
 			ids = append(ids, c.Doc)
 		}
 	}

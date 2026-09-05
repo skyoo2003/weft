@@ -5,13 +5,31 @@ func FuseWeighted(...float64) engine.Fuser
 package fusion
 
 # ../scorer/graph
+const DefaultPrecision = 1e-4
+const DefaultRestart = 0.15
 const MaxDepth = 3
 const SeedN = 5
 func New(*engine.Index, engine.Scorer) *Scorer
+func NewAdjacency(context.Context, *engine.Index) (*Adjacency, error)
 func NewIncludingSeeds(*engine.Index, engine.Scorer) *Scorer
+func NewPPR(*Adjacency, engine.Scorer, ...Option) (*PPR, error)
+func WithPrecision(float64) Option
+func WithRestart(float64) Option
+method Adjacency.Degree(engine.DocID) int
+method Adjacency.Edges() int
+method Adjacency.In(engine.DocID) []engine.DocID
+method Adjacency.Len() int
+method Adjacency.Out(engine.DocID) []engine.DocID
+method PPR.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method PPR.Name() string
 method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
 method Scorer.Name() string
 package graph
+type Adjacency struct
+Adjacency has unexported fields
+type Option func(*PPR)
+type PPR struct
+PPR has unexported fields
 type Scorer struct
 Scorer has unexported fields
 

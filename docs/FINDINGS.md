@@ -3463,3 +3463,154 @@ what the run added:
    `bench-preflight` prices the alternative at about thirty lines in `cmd/weft-eval/bench.go`.
    Neither failure here would have been caught by it: the probe passed both times, and what
    ended the runs was a SIGTERM and a closed lid.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 15 — The graph is indexed, and the walk is built but not judged
+
+Milestone 4 measured graph proximity at **+0.0000 nDCG@10** at its best fusion weight and
+recorded the verdict at the top of `scorer/graph`'s package documentation. What it also did,
+and what this round is built on, is diagnose *why*. The finding was not that citation
+structure carries no signal. It was that one construction of it has almost no ranking to
+contribute:
+
+> with MaxDepth 3 a candidate's score takes very few distinct values, the hop-1 frontier on a
+> real citation graph runs to tens of documents per query, and `engine.TopK` breaks the
+> resulting ties on `DocID` — which is corpus insertion order.
+
+[Milestone 4 §5](#milestone-4--quality) named personalised PageRank as the principled version
+of what the BFS approximates. This round writes it, and writes the structure without which it
+is not affordable.
+
+**What is claimed and what is not.** The capability is built, tested and measured for cost.
+**No quality number is produced.** The corpus that would answer it — TREC-COVID joined to the
+Semantic Scholar citation graph — is not on this machine, and `make eval` skips without it.
+The arms are registered in `cmd/weft-eval/run.go` so that the measurement is one command
+away, and §5 says what that leaves owed.
+
+## 1. Why a traversal had to stop reading documents
+
+`scorer/graph`'s BFS reaches a node's edges through `engine.Index.Doc`, which materialises the
+key, the text and the vector in order to read `Links` — a field that is none of them. On the
+evaluation corpus 69% of the `docs` section is vector bytes, so a traversal faulted in a
+768-wide vector per node visited and dropped it. Each edge then cost an `Index.Resolve`, which
+takes the index-wide read lock and binary-searches the keys table.
+
+That is a per-query cost, paid again on every query, and it is why an algorithm with a real
+work bound was not affordable: a push loop reads a node's edges tens of thousands of times.
+
+Two things were built, in that order.
+
+**`Index.Neighbors(id) ([]DocID, bool)`** — links resolved under one read lock, reached by a
+decode that steps over the vector by arithmetic instead of reading it. `decodeDocFields` grew
+a third mode rather than a third decoder, because two decoders for one format is how a format
+drifts. `TestNeighborsStepsOverAVectorToReachTheLinks` is what holds the skip honest: mutating
+the skip to `4*vn-1` fails it, and the four other `Neighbors` tests with it.
+
+**`graph.Adjacency`** — the whole link structure resolved once into `DocID` space, forward and
+reverse, CSR. After it, a hop is a slice bound.
+
+The reverse direction is a capability and not a mirror. `Document.Links` says what a paper
+cites; *what cites this paper* is the transpose of every edge in the corpus, and no per-query
+traversal can reach it without scanning every document. `Adjacency.In` is that, and
+`TestPPRTravelsBothDirections` shows the BFS scorer returning nothing on a query the walk
+answers.
+
+## 2. What it cost and what it bought, measured
+
+`BenchmarkGraphArm`, 20,000 committed documents, 128-wide vectors, 120,000 edges, five seeds,
+`k=10`. darwin/arm64, Apple M4. Committed and reopened, because a pending index hands `Doc`
+the struct the caller passed and the decode this removes exists only on the other side of a
+commit.
+
+| Arm | ns/op | B/op | allocs/op |
+| --- | --- | --- | --- |
+| `bfs-over-index` | 1,378,929 | 1,031,404 | 48,522 |
+| `ppr-over-adjacency` | 235,896 | 184,088 | **230** |
+
+**5.8× the speed, and 211× fewer allocations.** The second number is the one that matters more
+than the first. [Milestone 5 §3.2](#milestone-5--performance) measured this project's
+throughput wall as live heap under concurrency — "every candidate decodes a whole record" —
+and 48,522 allocations a query is what that sentence looks like on the graph arm.
+
+The two are not the same algorithm, so this is not a speedup of one into the other. It is what
+a caller pays for a graph stream, before and after.
+
+**The build is not free and is not fast.** `BenchmarkAdjacencyBuild` is **93.6 ms and 4.4
+million allocations** over the same corpus — about 37 allocations an edge, which is one binary
+search through the keys table decoding a string at every probe. Reading the links themselves
+is 7 allocations a document. It repays against the per-query saving in **81 queries**, which is
+the whole of the argument for leaving it; the `ponytail:` comment on `NewAdjacency` names the
+way out and the condition for buying it.
+
+## 3. The tie group is gone, and the direction of the new ranking is the opposite of the guess
+
+`TestPPRBreaksTheTiesHopDistanceCannot` builds the shape milestone 4 diagnosed — one seed,
+eight one-hop neighbours differing only in what lies beyond them — and asserts both halves:
+
+- the BFS arm produces **at most 2 distinct scores** over the eight, which is the tie group;
+- the walk produces **8**.
+
+So the mechanism milestone 4 blamed is removed. Whether removing it recovers any nDCG is
+§5's open question and nothing here answers it.
+
+**What the test caught is worth recording, because the prediction written into it was wrong.**
+The assertion first written said the *least*-connected neighbour should keep the most mass, on
+the reasoning that a node with fewer edges spreads less of what it is handed. It fails: h0
+scored 0.0271 and h7 scored 0.0734. Mass a node spreads down its edges returns along the same
+edges, so the better-connected neighbour keeps more. That is PageRank's degree bias, present
+here by construction.
+
+It is also the property most likely to be wrong for this task. On a citation corpus the
+best-connected paper is the one everything cites and nothing is specifically about, so a
+stream ranking it first is ranking by fame. **This is a plausible reading of what milestone 4
+measured and did not explain**, and it survives the change of algorithm — which is the reason
+to state it here rather than treat the walk as a fix.
+
+The lever is degree normalization. It is deliberately **not** a mode on the scorer — a seam
+with a menu in it is not a seam ([D-022](DECISIONS.md)) — and it is reachable from outside,
+because `Adjacency.Degree` is exported and `engine.Search` takes scorers by interface. The
+recipe is the wrapper shape [ADOPTION §8](ADOPTION.md) already recommends.
+
+## 4. Two smaller things the round settled
+
+**Seed order cannot change a ranking.** Float addition is not associative, so the order
+residual arrives at a node decides its last bit, and that order is the order the frontier was
+seeded in — the caller's. Two mathematically equal scores differing in their last bit make
+`TopK`'s `DocID` tiebreak unreachable, so permuting `Query.Seeds` would silently permute the
+result. One sort of at most `SeedN` ids makes the whole push sequence a function of the
+adjacency alone. `TestPPRIsIndependentOfSeedOrder` asserts **exact** equality across three
+permutations; a tolerance there would pass the very difference the sort exists to remove.
+`Scorer.Candidates` buys the same property a harder way, by tallying per hop count.
+
+**A bad constant is refused at construction rather than clamped.** A restart probability of 0
+does not make the walk fail — it removes the term that bounds its work, so the loop runs until
+float underflow instead of terminating on the argument that licenses it. `NewPPR` returns an
+error, which is the one place it can be said to the party able to fix it.
+
+## 5. Carried forward
+
+1. **No quality number exists, and that is the whole debt of this round.** `text+graph-ppr`
+   and `text+vector+graph-ppr` are registered arms with two registered comparisons — against
+   the same baseline as milestone 4's binding pair, and against the BFS arm the walk was
+   written to replace. Neither has been run. Until one is, the honest statement is that the
+   mechanism milestone 4 blamed is removed and nothing is known about whether that recovers
+   any nDCG.
+2. **Degree normalization is untested.** §3 argues it is the first thing to try if the walk
+   does not beat the baseline. It needs no new API.
+3. **`WithRestart` and `WithPrecision` were chosen by arithmetic, not by measurement.**
+   `DefaultPrecision = 1e-4` comes from the work bound against the 579,719-edge evaluation
+   graph — 66,667 edges a query — and `DefaultRestart = 0.15` is the PageRank convention. Both
+   are exported and overridable precisely so a sweep can set them; no sweep has run.
+4. **The adjacency is a snapshot and nothing enforces rebuilding it.** A caller who ingests
+   and forgets gets a stale graph, and a stale graph answers plausibly. `TestAdjacencyIsASnapshot`
+   pins the behaviour; making it self-invalidating would mean the structure holding a lock on
+   the index, which is what building it once exists to avoid.
+5. **The build's 4.4 million allocations are a resolution cost, not a link-reading cost.** The
+   fix is a key-to-id cache across the walk, which needs the raw keys and therefore a second
+   engine accessor beside `Neighbors`. Owed when a corpus makes 93.6 ms show up as ingest
+   latency rather than as a startup cost.
+6. **The demo does not show it.** `cmd/weft` still fuses the four milestone-1 scorers, and the
+   README's sample output is the one that documents. Adding a fifth column is a documentation
+   change, not a code one, and it is not worth making before §5.1 says what the column means.

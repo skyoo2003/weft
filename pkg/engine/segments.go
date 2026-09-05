@@ -355,6 +355,27 @@ func (s *segment) vector(id DocID) ([]float32, bool) {
 	return v, len(v) > 0
 }
 
+// links is doc with only the link keys materialised. Same record, same
+// checksum, same false on damage — see decodeDocLinks for what it skips.
+//
+// A document with no links answers an empty slice and true, which is not the
+// shape vector uses and is deliberate: no vector means a scorer has no opinion,
+// while no links means a node with no edges, and a traversal that treated the
+// two alike would stop telling a missing document from a leaf.
+func (s *segment) links(id DocID) ([]string, bool) {
+	local := id - s.base
+	r, ok := s.recordAt(local)
+	if !ok {
+		return nil, false
+	}
+	l, err := decodeDocLinks(r, int(local))
+	if err != nil {
+		// False rather than an error, for the reason doc gives above.
+		return nil, false
+	}
+	return l, true
+}
+
 // docLen is arithmetic on the mapped table, not a decode. BM25 asks once per
 // posting, which is why the token count is in the table at all.
 func (s *segment) docLen(id DocID) int {

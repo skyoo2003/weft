@@ -812,6 +812,29 @@ func (r *segReader) skipStr(what string) (int, error) {
 	return int(n), nil
 }
 
+// skipn advances past n bytes of fixed-width payload without reading them.
+//
+// A byte count rather than a field, because the vector is the only field wide
+// enough for this to matter and the only one whose extent is arithmetic rather
+// than a length prefix. On the evaluation corpus 69% of the docs section is
+// vectors, so a links walk that skipped only the strings would still fault in
+// every vector page it stepped over — 455 MB of a 626 MB file. Skipped this way
+// those pages are never touched.
+//
+// What it gives up is the non-finite check the materialising path runs per
+// component. That check exists to keep a NaN out of a score, and a mode that
+// returns no vector cannot put one anywhere: Index.Vector is what reads them and
+// it still checks every one. The bytes stay covered by the record's seeded
+// checksum, which is computed over the whole extent including what was skipped —
+// the same guarantee skipStr leaves on the text.
+func (r *segReader) skipn(what string, n int) error {
+	if n < 0 || n > len(r.b)-r.off {
+		return fmt.Errorf("%s: %s of %d bytes overruns the buffer: %w", r.name, what, n, ErrCorrupt)
+	}
+	r.off += n
+	return nil
+}
+
 func (r *segReader) str(what string) (string, error) {
 	n, err := r.uvarint(what + " length")
 	if err != nil {
@@ -1066,8 +1089,22 @@ func decodeMeta(r *segReader) (docCount, totalLen, vecDim, live int, err error) 
 // taken, a vector of a different width — is the walker's, which is the only
 // reason this returns rather than stores.
 func decodeDocRecord(r *segReader, i int) (Document, int, error) {
-	return decodeDocFields(r, i, false)
+	return decodeDocFields(r, i, wantAll)
 }
+
+// docPart says which of a record's fields a decode materialises.
+//
+// Every mode walks the whole record and verifies the same seeded checksum. What
+// differs is what is copied out of the mapping — and, for the vector, which
+// pages are touched in order to step over it. A mode is not a second decoder:
+// decodeDocFields is still the one place the record's layout is written down.
+type docPart uint8
+
+const (
+	wantAll    docPart = iota // every field — Index.Doc
+	wantVector                // the vector alone — Index.Vector
+	wantLinks                 // the links alone — Index.Neighbors
+)
 
 // decodeDocVector reads the same record and materialises only the vector.
 //
@@ -1079,18 +1116,32 @@ func decodeDocRecord(r *segReader, i int) (Document, int, error) {
 // candidates a query on the vector arm. Index.Vector carries the measurement and
 // says what it is not.
 func decodeDocVector(r *segReader, i int) ([]float32, error) {
-	d, _, err := decodeDocFields(r, i, true)
+	d, _, err := decodeDocFields(r, i, wantVector)
 	return d.Vector, err
+}
+
+// decodeDocLinks reads the same record and materialises only the link keys.
+//
+// It is decodeDocVector's mirror and exists for a larger version of the same
+// measurement. A traversal reads a document to find out where its edges go, and
+// on the evaluation corpus that record carries a 768-wide vector it will never
+// look at: 69% of the docs section, 455 MB of 626 MB. Index.Doc — which is what
+// scorer/graph's BFS calls once per node visited — materialises the key, the
+// text and all of it. This skips every one of them, so a traversal faults in the
+// pages holding link keys and nothing else.
+func decodeDocLinks(r *segReader, i int) ([]string, error) {
+	d, _, err := decodeDocFields(r, i, wantLinks)
+	return d.Links, err
 }
 
 // decodeDocFields is the one place the record's layout is written down. The mode
 // changes what is copied out of it and nothing about what is read or checked —
 // two decoders for one format is how a format drifts.
-func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error) {
+func decodeDocFields(r *segReader, i int, want docPart) (Document, int, error) {
 	start := r.off
 	var d Document
 	var err error
-	if vectorOnly {
+	if want != wantAll {
 		// The empty-key check survives the skip: its length is what says so, and
 		// the length is read either way.
 		n, kerr := r.skipStr("document key")
@@ -1108,7 +1159,7 @@ func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error
 			return Document{}, 0, fmt.Errorf("%s: document %d has an empty key, which Add refuses: %w", r.name, i, ErrCorrupt)
 		}
 	}
-	if vectorOnly {
+	if want != wantAll {
 		if _, err = r.skipStr("document text"); err != nil {
 			return Document{}, 0, err
 		}
@@ -1124,7 +1175,14 @@ func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error
 	if err != nil {
 		return Document{}, 0, err
 	}
-	if vn > 0 {
+	if vn > 0 && want == wantLinks {
+		// Stepped over four bytes at a time without reading any of them. vn is
+		// already bounded by the payload that remains, so the multiply cannot
+		// overflow the int it lands in. See skipn for what this gives up.
+		if err := r.skipn("vector", 4*vn); err != nil {
+			return Document{}, 0, err
+		}
+	} else if vn > 0 {
 		d.Vector = make([]float32, vn)
 		for j := range d.Vector {
 			bits, err := r.u32("vector component")
@@ -1143,7 +1201,7 @@ func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error
 	if err != nil {
 		return Document{}, 0, err
 	}
-	if ln > 0 && vectorOnly {
+	if ln > 0 && want == wantVector {
 		for range ln {
 			if _, err := r.skipStr("link key"); err != nil {
 				return Document{}, 0, err

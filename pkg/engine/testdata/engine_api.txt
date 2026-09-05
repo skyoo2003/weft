@@ -17,6 +17,7 @@ method Index.Lookup(string) []Posting
 method Index.LookupInto(string, []Posting) []Posting
 method Index.Merge() error
 method Index.Nearest([]float32, int) []DocID
+method Index.Neighbors(DocID) ([]DocID, bool)
 method Index.Resolve(string) (DocID, bool)
 method Index.Stats() (int, float64)
 method Index.Tokenize(string) []string

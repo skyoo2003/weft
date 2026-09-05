@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -44,6 +45,16 @@ const (
 	armTextGraph     = "text+graph"
 	armVecGraph      = "text+vector+graph"
 	armVecGraphSeeds = "text+vector+graph-including-seeds"
+
+	// Milestone 15's arms. The graph signal again, from the same citation edges,
+	// under a walk instead of a hop count.
+	//
+	// They are additional rather than replacements. Milestone 4's five arms are
+	// what docs/EVAL.md publishes and re-deriving those numbers with one command
+	// is the whole reason this target exists, so the BFS arms keep their names,
+	// their scorers and their place in the table.
+	armTextPPR = "text+graph-ppr"
+	armVecPPR  = "text+vector+graph-ppr"
 )
 
 // comparison is one delta the report has to show, named rather than positional so
@@ -61,6 +72,8 @@ var comparisons = []comparison{
 	{armTextBase, armTextGraph, "same signal against the text-only baseline, for comparison"},
 	{armVecBase, armVecGraphSeeds, "double-counting control (FINDINGS milestone 1 section 2.3)"},
 	{armTextBase, armVecBase, "what the vector scorer contributes, reported because it decides the baseline"},
+	{armVecBase, armVecPPR, "milestone 15: the same edges under a walk, against the same baseline as the binding pair"},
+	{armVecGraph, armVecPPR, "milestone 15: whether the walk beats the hop count it was written to replace"},
 }
 
 // rrf is fusion.Fuse with the rank constant lifted into a parameter.
@@ -265,9 +278,46 @@ func armsFor(ix *engine.Index, fuse engine.Fuser, overfetch int) map[string]eval
 	return out
 }
 
+// pprArms builds milestone 15's arms, which need a structure the others do not:
+// the citation graph resolved into DocID space, built once and shared.
+//
+// Separate from armsFor for two reasons, and the first is the one that matters.
+// armsFor is called from inside the rank-constant sweep, once per grid cell;
+// building a corpus-sized adjacency in there would pay for the whole graph 28
+// times over to answer a question about the RRF constant. And it can fail, where
+// armsFor cannot — a cancelled build and a refused restart probability are both
+// real, and a map-returning function has nowhere to put them.
+//
+// The adjacency is shared by both arms and the scorer is shared with them, which
+// is the arrangement docs/ADOPTION.md recommends to every caller: the half of a
+// scorer's input that does not change per query is built once and handed over.
+func pprArms(ctx context.Context, ix *engine.Index, fuse engine.Fuser, overfetch int) (map[string]eval.Arm, error) {
+	adj, err := graph.NewAdjacency(ctx, ix)
+	if err != nil {
+		return nil, fmt.Errorf("building the graph index: %w", err)
+	}
+	ts := text.New(ix)
+	gp, err := graph.NewPPR(adj, ts)
+	if err != nil {
+		return nil, err
+	}
+	sets := map[string][]engine.Scorer{
+		armTextPPR: {ts, gp},
+		armVecPPR:  {ts, vector.New(ix), gp},
+	}
+	out := make(map[string]eval.Arm, len(sets))
+	for name, scorers := range sets {
+		out[name] = eval.Arm{Name: name, Scorers: scorers, Fuse: fuse, Overfetch: overfetch}
+	}
+	return out, nil
+}
+
 // armOrder is the reporting order. A map has none, and a table whose rows move
 // between runs is a table nobody can diff.
-var armOrder = []string{armTextBase, armVecBase, armTextGraph, armVecGraph, armVecGraphSeeds}
+var armOrder = []string{
+	armTextBase, armVecBase, armTextGraph, armVecGraph, armVecGraphSeeds,
+	armTextPPR, armVecPPR,
+}
 
 // openIndex opens the committed index under dir and, unless anySnapshot, checks that
 // it is the one docs/EVAL.md publishes numbers from.
@@ -399,6 +449,11 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	arms := armsFor(ix, fuse, overfetch)
+	walks, err := pprArms(ctx, ix, fuse, overfetch)
+	if err != nil {
+		return err
+	}
+	maps.Copy(arms, walks)
 	runs, err := evaluateArms(ctx, ix, qs, arms, armOrder, k)
 	if err != nil {
 		return err

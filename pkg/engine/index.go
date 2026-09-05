@@ -229,6 +229,21 @@ func (ix *Index) vectorAt(id DocID) ([]float32, bool) {
 	return v, len(v) > 0
 }
 
+func (ix *Index) linksAt(id DocID) ([]string, bool) {
+	if ix.dead.has(id) {
+		return nil, false
+	}
+	if s := ix.segFor(id); s != nil {
+		return s.links(id)
+	}
+	if uint64(id) < uint64(ix.base) || uint64(id) >= uint64(ix.base)+uint64(len(ix.docs)) {
+		return nil, false
+	}
+	// A pending document is held as the caller passed it, so this aliases rather
+	// than copies — the same contract docAt has.
+	return ix.docs[uint64(id)-uint64(ix.base)].Links, true
+}
+
 func (ix *Index) docLenAt(id DocID) int {
 	// Zero, which is what an unassigned id already answers and what DocLen
 	// documents BM25 must read as "no normalization". Delete reads the length
@@ -1068,6 +1083,57 @@ func (ix *Index) Vector(id DocID) ([]float32, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return ix.vectorAt(id)
+}
+
+// Neighbors returns the DocIDs a document's Links point at. The bool is false
+// for an id that was never assigned or has been deleted; a document with no
+// edges answers true and an empty slice, and a traversal needs that difference —
+// a missing document is not a leaf.
+//
+// Links are Keys, so this is Links plus Resolve, and it exists because doing
+// those two things separately costs a caller both halves of what a traversal
+// spends. Doc materialises the key, the text and the vector to reach a field
+// that is none of them: on the evaluation corpus that is a 768-wide vector per
+// node visited, 69% of the docs section, faulted in and dropped. And Resolve
+// takes the index-wide read lock once per link, so a high-degree node loses
+// throughput as cores are added. Here the whole document costs one acquisition
+// and touches no vector page. scorer/graph's ponytail note on bfs asked for
+// exactly this.
+//
+// What it drops, and what it does not:
+//
+//   - A Key no live document holds is skipped, not reported. A dangling link is
+//     ordinary — Links may name a document that has not been added yet, or one
+//     that has been deleted since — so a traversal reads the result as the edges
+//     that lead somewhere.
+//   - A Key repeated in Links yields its DocID twice, in Links order. This does
+//     not deduplicate: Links is the caller's list, a repeat may be information,
+//     and a traversal that cares keeps a visited set anyway. A weighting scheme
+//     that would double-count must deduplicate for itself.
+//   - A self-link is kept for the same reason.
+//
+// The result is freshly allocated and is the caller's to keep and to modify.
+func (ix *Index) Neighbors(id DocID) ([]DocID, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+
+	keys, ok := ix.linksAt(id)
+	if !ok {
+		return nil, false
+	}
+	if len(keys) == 0 {
+		return nil, true
+	}
+	out := make([]DocID, 0, len(keys))
+	for _, k := range keys {
+		// resolveLive, not resolve: an edge into a deleted document leads
+		// nowhere, and it is the same judgement Resolve makes for a caller who
+		// asks about that key directly.
+		if n, live := ix.resolveLive(k); live {
+			out = append(out, n)
+		}
+	}
+	return out, true
 }
 
 // Resolve maps a caller-supplied Key to its DocID. The bool is false for a Key

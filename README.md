@@ -36,6 +36,7 @@ Milestones 1 through 6 are done. **Not usable in production:** a commit holds a 
 | 5 | Performance — p99 including GC pauses | ✅ p99 **108.193 ms**, of which the collector is 411 µs (0.38%); 1.88× bleve v2.6.0 against a 10× bar |
 | 6 | External contribution readiness | ✅ measured — two subjects with no prior sight of the tree added a signal from the documentation alone, which found three documentation defects. Both subjects were **agents, not people**, so this is a lower bound and not a user study: [ADOPTION.md](docs/ADOPTION.md) |
 | 7 | A baseline nobody has to qualify | ⚠️ **there is no baseline.** Three runs at one arrival rate gave 37.9 ms, 1.539 s and 416 ms; the load point is not reproducible and what decides the outcome is not the load: [FINDINGS milestone 7](docs/FINDINGS.md) |
+| 15 | Graph indexing and search | ⚠️ **built and measured for cost, not for quality.** The citation graph is an index — resolved into `DocID` space, forward and reverse — and a personalized-PageRank scorer walks it: 5.8× the speed of the BFS arm and **211× fewer allocations** (48,522 → 230 a query). The tie group milestone 4 blamed is gone, 2 distinct scores becoming 8 on the fixture that reproduces it. **No nDCG number exists**: the arms are registered and the corpus has not been run: [FINDINGS milestone 15](docs/FINDINGS.md) |
 
 No tag yet; the first will be `v0.1.0`. Until then `go get` resolves to a pseudo-version naming a commit, which is the honest state — a tag would give you a shorter name without changing anything the warning above says. [CHANGELOG](CHANGELOG.md) is where a version tells you whether you have work to do, and it records three things only: the exported API of every package under `pkg/`, the on-disk format version, and the minimum Go version. The milestone numbers in this table are not among them.
 
@@ -160,7 +161,8 @@ pkg/
   scorer/
     text/          BM25, ln(1+…) IDF form
     vector/        brute-force cosine
-    graph/         seed BFS, 1/(1+hops)
+    graph/         seed BFS, 1/(1+hops); Adjacency, the link structure resolved
+                   into DocID space forward and reverse; PPR, a walk over it
     recency/       1/(1+age/HalfLife)
 internal/
   eval/            nDCG@10, arm runner, paired bootstrap, dataset readers
@@ -215,6 +217,8 @@ make bench      # milestone 5's latency ladder (needs a prepared corpus, ~90 min
 | Durability stops at fsync | Atomic against process death; best-effort against power loss, with no platform write barrier: [FORMAT.md §6](docs/FORMAT.md). |
 | No early termination | The top-k candidate interface forecloses WAND-style skipping. Cost and extension path: [FINDINGS §3.1](docs/FINDINGS.md). |
 | **Graph proximity measured worthless** | +0.0000 nDCG@10 at its best fusion weight — no weight in the tested grid beats the baseline, and at 0.1 and below the arm is the baseline exactly — and −0.1227 if fused at equal weight. Kept for the milestone 1 assertions and marked in its package doc: [D-005](docs/DECISIONS.md). Do not enable `scorer/graph` expecting quality, and weight it down if you enable it at all. |
+| The graph walk that replaces it is **unmeasured** | `graph.NewPPR` removes the mechanism milestone 4 blamed — the tie group — and costs 5.8× less per query than the BFS. Whether that recovers any nDCG is **not known**: the arms are registered in `weft-eval run` and have not been run. It also carries PageRank's degree bias, which on a citation corpus ranks the paper everything cites above the paper the query is about; the lever is degree normalization and it is not measured either: [FINDINGS milestone 15](docs/FINDINGS.md). |
+| A graph `Adjacency` is a snapshot | It resolves every edge once, at construction, and nothing invalidates it. A document added, updated or deleted afterwards is not in it, and a stale graph answers plausibly rather than erroring. Rebuild after ingest, which is the rule every caller-held side store already follows. |
 | Fusion weights have no source | `FuseWeighted` exists, but nothing decides what the weights should be. Hand-tuning per corpus reintroduces the per-deployment burden this design avoids; learning them from judgments is unbuilt. Use `Fuse` unless you have measured your own. The one exception this project publishes is the 0.1 graph discount, which milestone 4 did measure and which `cmd/weft` and `examples/basic` therefore use ([FINDINGS milestone 4 §7](docs/FINDINGS.md)). |
 | Scorers must share one index | `DocID` is index-relative, so scorers built against different indexes fuse unrelated documents. A precondition on `Search`, not a check: [FINDINGS §3.4](docs/FINDINGS.md). |
 | No CJK tokenization, but the tokenizer is replaceable | The default splits on whitespace and punctuation only, so a CJK run collapses into one token — for Korean that means `"검색엔진을"` and `"검색엔진"` are different terms and a query for the second finds nothing. `engine.WithTokenizer` replaces it at index time and query time together, and `ExampleWithTokenizer` shows a ten-line Hangul bigram tokenizer doing it. weft ships **no** second tokenizer and no morphological analysis: that would collide with the zero-dependency constraint, and a seam with a menu in it is not a seam ([D-022](docs/DECISIONS.md)). |
