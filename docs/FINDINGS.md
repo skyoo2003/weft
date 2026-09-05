@@ -3990,3 +3990,109 @@ that no published number changed.
 3. **Neither this nor milestone 17 has been measured on the ladder.** Both are Go microbenchmarks
    on one machine. Whether the arrival rate at which p50 goes from 39 ms to 1.27 s has moved is
    still unrun, and is now owed by two rounds rather than one.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 22 — Measured against bleve, and the gap that is left is not time
+
+The README has carried one comparison against bleve since milestone 5: **p99 108.193 ms, 1.88×
+bleve v2.6.0 against a 10× bar.** [Milestone 7](#milestone-7--a-baseline-nobody-has-to-qualify)
+then showed the load point that figure came from is not reproducible, and
+[milestone 14](#milestone-14--the-probe-passed-the-ladder-ran-twice-and-a-closed-lid-discarded-both)
+recorded a third consecutive void ladder. Meanwhile
+[17](#milestone-17--the-floor-under-every-query-found-and-removed) and
+[21](#milestone-21--the-sort-nobody-had-measured) changed the query path twice, by 2.78× on the
+expensive query, and **neither was ever compared against the engine weft is supposed to be in
+the same class as.**
+
+This round asks the smaller question the ladder cannot be waited on for: for one query,
+sequentially, how much work does each engine do? `make bench-head` is that, in the `bench`
+module beside the ladder, on a corpus it generates rather than one that must be downloaded.
+
+## 1. The result
+
+50,000 documents, one BM25 query, top 10, darwin/arm64, Apple M4. `common` is a term in every
+document, `mid` in one in fifty, `rare` in three, `absent` in none.
+
+| Query | weft ns | bleve ns | weft B/op | bleve B/op |
+| --- | --- | --- | --- | --- |
+| `absent` | **645** | 5,934 | **72** | 10,525 |
+| `rare` | **2,102** | 5,244 | 7,289 | 11,703 |
+| `mid` | **44,608** | 63,919 | 70,979 | 17,694 |
+| `common` | **2,139,639** | 2,914,216 | 2,819,333 | **18,062** |
+| `mixed` | **2,118,154** | 3,204,713 | 2,838,586 | **31,863** |
+
+**weft is faster than bleve on every shape** — 9.2× on a query matching nothing, 1.36× on the
+most expensive one. That is not a claim milestone 5 could have made and it is not a claim this
+project has made before.
+
+## 2. What that number is not
+
+It is one query at a time on one machine. It is **not a tail**, not a throughput figure, and not
+a replacement for the ladder, which measures p99 under open-loop load against a prepared
+TREC-COVID index. `108.193 ms` and its two caveats stand exactly as
+[milestone 7](#milestone-7--a-baseline-nobody-has-to-qualify) left them.
+
+Nor is it a quality comparison, and the reason is in the harness rather than in the result:
+bleve stems and removes stopwords through its standard analyzer where weft's default tokenizer
+does neither, so **the two are not searching the same term space**. No nDCG figure may be
+derived from this benchmark. Each engine is answering its own query correctly and they are not
+the same query.
+
+## 3. The gap that is left, which the time column hides
+
+Read the two right-hand columns. On the expensive query weft allocates **2,819,333 bytes against
+bleve's 18,062** — **156×** — and on the mixed query 89×. weft wins on time and loses on memory
+by two orders of magnitude.
+
+That is not a curiosity. It is the same quantity [milestone 5
+§3.2](#milestone-5--performance) named as the throughput wall — *live heap under concurrency* —
+measured directly for the first time and against something other than weft's own past. It is
+also the reason the two engines behave differently under load rather than at rest: a sequential
+benchmark hands the collector the whole gap between queries, and a concurrent one does not.
+
+Where weft's 2.8 MB goes, on the `common` query:
+
+| Structure | Bytes | Why it is corpus-sized |
+| --- | --- | --- |
+| the BM25 accumulator | ~1.2 MB | one entry per matching document |
+| the posting buffer | ~800 KB | the term's whole list, materialised |
+| the candidate slice | ~800 KB | one candidate per accumulator entry |
+
+All three are consequences of one decision: weft scores **term-at-a-time**, accumulating every
+matching document before ranking any of them. bleve scores **document-at-a-time** through
+cursors with a k-sized heap, so it holds the frontier and nothing else.
+
+[Milestone 17](#milestone-17--the-floor-under-every-query-found-and-removed) removed the part
+of the accumulator that did not depend on the query, and
+[21](#milestone-21--the-sort-nobody-had-measured) stopped the candidate slice being *sorted* —
+but neither could stop either from being *allocated*, because term-at-a-time requires them.
+
+## 4. What this licenses, and what it changes about the plan
+
+**It licenses the statement that weft's per-query latency is not behind bleve's**, on one
+machine, on this corpus, for one BM25 query at a time. That is the narrowest true version of
+the claim and it is the one the README now carries.
+
+**It changes what block-max WAND is for.** The reason to build it has been recorded since
+[D-001](DECISIONS.md) as early termination — a latency optimisation. §3 says that is the smaller
+half. Document-at-a-time traversal removes the accumulator and the candidate slice outright, so
+WAND is primarily how the 156× becomes something near 1×, and only incidentally how a query gets
+faster. A round that built it for speed and measured only speed would have reported a modest win
+and missed the point.
+
+## 5. Carried forward
+
+1. **Document-at-a-time is the next round and §3 is its brief.** It needs a block-level cursor on
+   `Index`, which is an API question rather than a format one — the metadata has been on disk
+   since version 1 and nothing reads it.
+2. **The `mid` row is the one to watch.** weft already allocates 4× bleve there on a query that
+   touches a fiftieth of the corpus, so the gap is not only about the worst case.
+3. **The analyzer difference is unquantified.** weft indexes more distinct terms than bleve does
+   for the same text, which affects both engines' posting lists and neither engine's correctness.
+   Whether it flatters or penalises weft here is not known, and the honest response is that this
+   is a cost comparison and not a quality one.
+4. **The ladder is still owed by three rounds.** This does not discharge it. What it does is make
+   the debt smaller: a change to the query path can now be checked against bleve in under a
+   minute, so the ladder is needed for the tail rather than for every decision.

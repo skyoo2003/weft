@@ -1,6 +1,6 @@
 .PHONY: all fmt build vet test lint lint-if-present lint-docs lint-docs-if-present spdx fuzz arch deps run example clean \
 	changelog changelog-new changelog-check docs-site release-check \
-	eval eval-full eval-data recall bench bench-preflight bench-compare bench-build
+	eval eval-full eval-data recall bench bench-preflight bench-compare bench-build bench-head
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
@@ -314,6 +314,21 @@ bench-compare:
 # module, and what is left is the bleve calls themselves.
 bench-build:
 	cd bench && go vet ./... && go test ./...
+
+# The head-to-head against bleve, on a corpus this generates rather than one that
+# has to be downloaded.
+#
+# It is not the ladder and does not replace it: `bench` measures a tail under
+# open-loop load against the prepared TREC-COVID index, and this measures what
+# one query costs sequentially. What it buys is that the second question can be
+# answered on a laptop in under a minute, against an engine that is not weft — so
+# a change to the query path has something to be checked against without waiting
+# on a 90-minute run that has come back void three rounds running.
+#
+# Read both columns. Time and allocation move independently here, and the
+# allocation column is the one docs/FINDINGS.md milestone 22 is about.
+bench-head:
+	cd bench && go test -run '^$$' -bench HeadToHead -benchtime 50x
 
 # Everything milestone 4 publishes: the degeneracy diagnostic, the frozen arms, the
 # sensitivity sweep, and the fusion weight sweep behind the README's claim that no
