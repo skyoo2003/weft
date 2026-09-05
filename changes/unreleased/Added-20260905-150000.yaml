@@ -1,0 +1,25 @@
+kind: Added
+body: '**A query string syntax.** `query.Parse(ix, "+title:covid -draft \"airborne
+  transmission\"")` returns a `Plan` — the scorers to run and the constraints
+  between them — and the caller assembles it: `engine.Search(ctx, q, k,
+  p.Fuse(fusion.Fuse), p.Scorers...)`. Two halves rather than one scorer, because
+  a constraint in this package is a `Fuser`, and `Search` takes the fuser as a
+  parameter precisely so the caller owns the fusion policy. `Plan.Fuse` wraps
+  *any* base, so a parsed query can be fused with `Fuse`, with `FuseWeighted`, or
+  with anything else — Parse decides which documents are eligible and never how
+  the eligible ones are ranked. The syntax, whole: a bare term, `field:term`,
+  `+required`, `-excluded`, `"exact phrase"`, `term*` (Glob), `term~` and
+  `term~2` (Fuzzy), `field:[lo TO hi]` with `*` for an unbounded side (Range).
+  **There is no boolean algebra** — no parentheses, no OR, no nesting — because a
+  clause list with `+` and `-` is exactly what rank fusion can express: a union of
+  votes with an intersection and a difference applied to it. `a OR (b AND c)`
+  would mean a query tree and an evaluator over it, which is a different engine
+  and not a parser. What the flat list buys is that every query is a set of
+  streams the caller can see, weight and reason about. An unterminated quote, a
+  malformed or inverted range, a phrase with no terms, and an out-of-range edit
+  distance are all **errors** rather than queries that quietly return nothing. An
+  empty query is a plan with no scorers, so a caller taking input from a text box
+  needs no branch for the empty case.'
+time: 2026-09-05T15:00:00.000000000+09:00
+custom:
+  Issue: 26

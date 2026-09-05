@@ -14,9 +14,14 @@ func Fuzzy(*engine.Index, string, string, int) engine.Scorer
 func Glob(*engine.Index, string, string) engine.Scorer
 func Must(engine.Fuser, ...int) engine.Fuser
 func MustNot(engine.Fuser, ...int) engine.Fuser
+func Parse(*engine.Index, string) (Plan, error)
 func Phrase(*engine.Index, engine.Scorer, string) engine.Scorer
 func Range(*engine.Index, string, string, string) engine.Scorer
+method Plan.Fuse(engine.Fuser) engine.Fuser
 package query
+type Plan struct
+field Plan.Scorers []engine.Scorer
+Plan has unexported fields
 
 # ../scorer/graph
 const DefaultPrecision = 1e-4
