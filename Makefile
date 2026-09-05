@@ -1,6 +1,6 @@
 .PHONY: all fmt build vet test lint lint-if-present lint-docs lint-docs-if-present spdx fuzz arch deps run serve compat example clean \
 	changelog changelog-new changelog-check docs-site release-check \
-	eval eval-full eval-data recall bench bench-preflight bench-compare bench-build bench-head
+	eval eval-full eval-data recall bench bench-preflight bench-compare bench-build bench-head bench-http
 
 # `all` needs nothing installed beyond the Go toolchain, which is what lets a
 # first-time contributor run the whole gate before they have read anything.
@@ -122,6 +122,8 @@ FUZZTIME ?= 30s
 fuzz:
 	go test -fuzz=FuzzSegmentDecoding -fuzztime=$(FUZZTIME) -run '^$$' ./pkg/engine
 	go test -fuzz=FuzzParseSection -fuzztime=$(FUZZTIME) -run '^$$' ./pkg/engine
+	go test -fuzz=FuzzParseDSL -fuzztime=$(FUZZTIME) -run '^$$' ./internal/opensearch
+	go test -fuzz=FuzzParseBulk -fuzztime=$(FUZZTIME) -run '^$$' ./internal/opensearch
 
 # Every .go file carries its licence in a line a machine can find, which is
 # what an SPDX scanner reads when this repository is vendored into another.
@@ -287,6 +289,37 @@ bench-preflight:
 	else \
 		go run ./cmd/weft-eval bench -data $(EVAL_DATA) -rates 27.28 -rotations 10; \
 	fi
+
+# Milestone 27: the same ladder, through a socket.
+#
+# Two processes on one machine, which is deliberate and is the comparison's whole
+# point — the in-process ladder measured the same corpus on the same hardware, so
+# the difference between the two runs is the HTTP surface and the second process,
+# and nothing else. The address is loopback because weftd binds loopback.
+#
+# It starts weftd itself and stops it afterwards, because a run against a server
+# somebody started by hand is a run whose data directory and uptime are not
+# recorded anywhere. Everything the report says about memory and the collector
+# comes from that server's GET /_nodes/stats and not from the load generator —
+# cmd/weft-eval/benchhttp.go is the argument for why there is no fallback.
+#
+# It needs the same quiet window every ladder needs. `make bench-preflight` first,
+# and the lid open: docs/PERF.md section 5.7 and D-024.
+WEFTD_ADDR ?= 127.0.0.1:9200
+WEFTD_INDEX ?= papers
+
+bench-http:
+	@if [ ! -d $(EVAL_DATA)/index ]; then \
+		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; exit 0; \
+	fi; \
+	go run ./cmd/weftd -addr $(WEFTD_ADDR) -data $(EVAL_DATA)/weftd & \
+	pid=$$!; \
+	trap "kill $$pid 2>/dev/null" EXIT INT TERM; \
+	until curl -sf http://$(WEFTD_ADDR)/ >/dev/null 2>&1; do \
+		kill -0 $$pid 2>/dev/null || { echo "FAIL: weftd exited before it listened"; exit 1; }; \
+		sleep 1; \
+	done; \
+	go run ./cmd/weft-eval bench -data $(EVAL_DATA) -http $(WEFTD_ADDR) -http-index $(WEFTD_INDEX) $(BENCHFLAGS)
 
 # Milestone 5's third assertion: same machine, same corpus, same queries, same
 # driver. bench/ is a separate module so that bleve never enters this one — `make

@@ -54,3 +54,23 @@ Not limitations of what weft computes, but preconditions it does not check for y
 | Scorers must share one index | `DocID` is index-relative, so scorers built against different indexes fuse unrelated documents. A precondition on `Search`, not a check: [FINDINGS §3.4](FINDINGS.md). |
 | A graph `Adjacency` is a snapshot | It resolves every edge once, at construction, and nothing invalidates it. A document added, updated or deleted afterwards is not in it, and a stale graph answers plausibly rather than erroring. Rebuild after ingest, which is the rule every caller-held side store already follows. |
 | A field's terms and `Text`'s do not mix | A term in `Text` and the same term in a field are two different terms. That is what makes a scoped query mean anything; a caller wanting a word findable both ways puts it in both places, which counts its tokens twice toward the document's length. |
+
+## The HTTP surface (`cmd/weftd`)
+
+The server is not the library. Everything above applies to it, and these are its own —
+`docs/DECISIONS.md` D-025 through D-031 are the arguments, and `internal/opensearch`'s package
+documentation is the shortest version.
+
+| Limitation | Detail |
+| --- | --- |
+| `keyword` is analysed like `text` | One index has one tokenizer ([D-022](DECISIONS.md)) and there is no per-field analyser, so a `keyword` value is tokenized like any other field. A single-token keyword — an id, a status, a tag — behaves exactly as OpenSearch's does. A keyword holding **two** tokens is found as a conjunction of them: `{"term":{"city":"New York"}}` matches documents whose `city` holds both words in any order, which is broader than OpenSearch. |
+| `terms` loses a multi-token value's conjunction | Each value's tokens become separate streams, so `{"terms":{"tag":["new york","paris"]}}` matches a document holding `new` and `paris`. Single-token values are unaffected, which is what a `terms` clause usually holds. |
+| `wildcard` reads `[` as a character class | `query.Glob` borrows `path.Match`, where `[a-z]` is an alternation; OpenSearch reads `[` literally. Rewriting the pattern in the server would make it disagree with the library about what a pattern means. `*` and `?` agree. |
+| `fuzzy` counts **bytes**, not characters | `query.Fuzzy`'s edit distance is over bytes, so one mistyped Hangul syllable is three edits and is past `MaxEditDistance` before it is one character wrong. `fuzziness: AUTO` uses OpenSearch's length thresholds over byte length for the same reason. |
+| Deep paging is linear, and capped at 10,000 | A page is `from + size` candidates fetched and then cut, because the top-k collector has no notion of an offset. `from + size` over `index.max_result_window` is refused rather than allocated. |
+| No boolean algebra | A `bool` holds leaf clauses one level deep. A nested `bool` is a 400: a query here is a flat list of streams with an intersection and a difference over it, and nesting would need a query tree and an evaluator — a different engine. |
+| One vector and one time per index | `engine.Document` carries one `Vector` and one `Time`, so a mapping may declare one `knn_vector` field and one `"recency": true` date field. A second of either is refused at mapping time rather than accepted and ignored. |
+| Decay parameters are refused | `function_score` accepts `gauss`, `exp` and `linear` and approximates all three with `scorer/recency`'s fixed half-life. `origin`, `scale`, `offset` and `decay` are refused, because reading them and ignoring them would rank by a curve nobody asked for. |
+| `_source` and `_mapping` are two side stores | Both live beside the segments and are published by atomic rename. `LoadSource` refuses to start when the store and the index disagree about how many documents exist; **there is no equivalent check for the mapping**, so a mapping file lost while the segments survive is an index that silently encodes the next document by a different rule. |
+| The refusal rate is 32% of the documented query surface | Five of twenty-five rows in the PRD's DSL table refuse for reasons in the format rather than in the schedule: nested `bool`, `aggs`, `sort`, `highlight`, `scroll`/PIT. `TestTheRefusalRateIsCounted` is what keeps that number honest. |
+| Nothing is measured under load | Every judgment about the server is functional. The 27 q/s collapse and the eleven-second commit lock documented above are the *library's*, measured through a Go harness; what they look like through HTTP is unmeasured. |

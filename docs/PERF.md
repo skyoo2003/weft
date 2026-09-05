@@ -1212,3 +1212,77 @@ candidates.
 Whoever picks this up runs the block above unchanged, **with the lid open**. Nothing about the
 tree has to change first, the pass lines and the four readings still stand as written, and the
 worktree at `700a178` is already in place.
+
+### 5.8 Milestone 27's arm — the ladder through a socket, registered before the run
+
+The measurement design of section 2 carries over **unchanged**: the same open loop,
+the same rung structure, the same saturation rule, the same `SuspendTolerance`, the
+same 3.1-hour window and the same lid-open precondition D-024 registered. What
+changes is which process is measured, and that change is the whole reason this
+section exists.
+
+#### What is registered before the run
+
+**Outcome 1 — the shape of the collapse.** The in-process ladder publishes a knee
+at 27.28 q/s: shed 1,438 of 10,000, p50 39 ms → 1.27 s, RSS 126 → 853 MiB
+(FINDINGS M5 §3.2). The question is whether HTTP moves that knee, and in which
+direction. **Met or missed, it is published.** Two rungs of the answer are already
+predictable and are written down here so that finding them is not mistaken for
+insight: an HTTP run adds a request and a response encoding per query, and it adds
+a second process's scheduling. Neither is a defect and both are part of what a
+server costs.
+
+**Outcome 2 — where the memory goes.** The in-process collapse was diagnosed as
+live heap under concurrency: 30,549 decoded candidate records alive per query,
+times an in-flight of 40. Over HTTP the `_source` store and the response encoder
+are new heap on the same side of the process boundary, and the load generator's
+own buffers are on the other. Whether the knee moves earlier is the interesting
+half.
+
+**Outcome 3 — shed means something different.** `loadgen.Drive` sheds when the
+in-flight cap binds, which is a property of the load. A server can also refuse, and
+the HTTP client is deliberately given **no timeout** so that a slow answer stays a
+slow answer instead of becoming a shed one. Two causes in one counter is one cause
+lost.
+
+#### The rule that makes the numbers legitimate
+
+**Every memory and collector figure comes from the server, through
+`GET /_nodes/stats`.** The load generator holds the in-flight requests and no index
+at all, so its resident set is precise, stable, reproducible and about the wrong
+program — which is worse than no number, because it looks like one. The counters
+the server reports are read from the same instruments `internal/loadgen` reads
+in-process, so the two arms are not reading different meters.
+
+**A failed counter read ends the run.** There is no fallback to the local counters.
+A ladder that silently substituted them would produce a report whose latency column
+is the server's and whose memory column is the load generator's, with nothing in
+the output saying so. The report header prints `measuring=` for the same reason.
+
+#### The procedure
+
+```bash
+make bench-preflight                  # the loaded probe, 28s — D-024
+make bench-http BENCHFLAGS='-rates 3.41,6.82,13.64,27.28 -rotations 200'
+```
+
+`make bench-http` starts `weftd`, waits for it to listen, runs the ladder and stops
+it. Started by the target rather than by hand, because a run against a server
+somebody else started is a run whose data directory and uptime are recorded
+nowhere.
+
+Three preconditions, and they are the ones four previous rounds failed on rather
+than a formality: a quiet 3.1-hour window, **the lid open** (`caffeinate` does not
+prevent clamshell sleep — FINDINGS M14 §5a), and a preflight pass immediately
+before each arm, because the certificate expires. Detach with the `perl`
+`fork`/`setsid`/`exec` form; a session-managed background job took a SIGTERM at 46
+minutes.
+
+#### What this arm cannot say
+
+The two arms do not run the same query. In-process, the `text` arm scores with
+`scorer/text`'s BM25; over HTTP, a `match` becomes one `query.Glob` stream per
+token, fused. The work has the same shape — a vocabulary lookup and a posting walk
+per token, then a fusion, then a top-k — and the scoring does not. **No nDCG figure
+may be derived from this arm**, and a latency difference between the two is a
+difference between two query plans as well as between two transports.

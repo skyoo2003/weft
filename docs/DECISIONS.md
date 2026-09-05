@@ -2064,3 +2064,151 @@ way the operator cannot attribute — a 501 arriving somewhere the client has no
 path for, so it surfaces as a hang or a silent empty page. If milestone 24's
 `make compat` run finds that shape, the answer is not a lower version number but a
 documented list of what the claim invites, kept in this decision.
+
+## D-027 — The mapping is the server's, and it has five types because five is what changes an answer
+
+**Context.** `query.EncodeInt` names its own contract: *the caller indexes it and the caller
+queries it.* A value encoded one way and queried another matches nothing with nothing to report.
+weft's index holds terms and postings and does not hold the fact that `views` was a number, so
+over HTTP something has to remember it — the client that wrote the document and the client that
+writes the range query are not the same process, and may not be the same person.
+
+**Decision.** The server keeps a mapping in `<dir>/_mapping.json`, beside `_source.json` and
+published by the same temp-file-then-rename rule. Five types: `text`, `keyword`, `date`,
+`integer`/`long`, `knn_vector`. Any other type is **refused**, and a field already declared
+cannot be re-declared to a different type.
+
+**Why five.** Each type has to earn itself twice — once deciding what term a value becomes at
+index time, once deciding what a bound becomes at query time. A type that changed neither answer
+would be `text` wearing a different name. `date` and the integers exist so `EncodeTime` and
+`EncodeInt` can be applied at both moments; `knn_vector` exists so an array lands on
+`Document.Vector` instead of being dropped as a non-scalar; `keyword` differs from `text` at
+query time only.
+
+**What was rejected.** *Accepting an unknown type and treating it as `text`* — that is the
+failure this whole surface is arranged against: a range over a silently-demoted field matches
+nothing and reports nothing. *Inferring the type from the first document* — the width of a
+`knn_vector` would then depend on arrival order, and `engine.ErrDimMismatch` refuses a
+mismatched width for the whole commit rather than for one document. *Allowing a re-map* — the
+documents already indexed were encoded by the old rule, so the field would hold two encodings
+and a range query would read half of it; OpenSearch refuses the same change for the same reason.
+
+**The price, stated.** `keyword` does not fully arrive. One index has one tokenizer ([D-022] —
+no `SetTokenizer`, no per-field analyser), so a keyword value is tokenized like any other field
+and a keyword holding two tokens is found as a **conjunction** of its tokens rather than as one
+indivisible term. Right for ids, statuses and tags; broader than OpenSearch for `"New York"`.
+Fixing it is a per-field analyser, which is a `pkg/` change, which milestone 25's mechanical
+definition forbids. Priced in `docs/LIMITATIONS.md` instead.
+
+**Falsification.** If a sixth type is wanted and cannot be added without changing how the five
+are read, the mapping is doing more than carrying an encoding and belongs somewhere else.
+
+## D-028 — A required clause is one stream, and the disjunction that makes it one is a scorer
+
+**Context.** `query.Must` intersects the positions it is given, and a `match` over two tokens is
+two streams. Wired the obvious way, `bool.must` holding a two-word match becomes `operator: and`
+— narrower than the client wrote, with no error and nothing to notice it by.
+
+**Decision.** A clause landing in `must` or `filter` is collapsed to **one** stream first. A
+single-stream clause is itself; a conjunction (`operator: and`, a multi-token `term`) is its
+streams, which `Must` can require directly; a disjunction of several streams becomes `anyOf` —
+twelve lines in `internal/opensearch` that union its inner scorers' candidates.
+
+**Why here and not in `pkg/query`.** The constraint vocabulary did not need a disjunction; what
+was missing was a *scorer*, which is the extension point this project is built on. Adding
+`query.Any` would have grown the library's API for a problem a caller can solve, and
+`docs/ADOPTION.md` measured callers solving exactly this kind of problem from outside.
+
+`anyOf` returns every nominated document and does not truncate to `k`, which is the rule
+`pkg/query`'s package documentation states for any scorer used as a restriction: a restriction
+truncated to `k` excludes every document below its own cut, and that is a wrong answer rather
+than a narrow one.
+
+**`must_not` does not get this treatment**, and the asymmetry is the point: excluding a document
+present in *any* of the streams is exactly what "this clause did not match" means for a
+disjunction, so `query.MustNot` over every position is already correct.
+
+**Falsification.** If a third occurrence type needs a fourth collapsing rule, "a constraint
+names one stream" is not the right abstraction and the plan should carry a query tree instead.
+
+## D-029 — `bool.filter` is emptied after it narrows, and a weight of 0 is not the short spelling
+
+**Context.** A filter must narrow without contributing to the ranking. `fusion.FuseWeighted`
+takes a weight per position, and weight 0 looks like the way to say "does not vote".
+
+**Decision.** Filter streams are required by `query.Must` and then **emptied** — `blank`, ten
+lines — before the base fuser sees them. Weight 0 is not used.
+
+**Why.** A weight of 0 does not silence a stream's vote; it removes the document from the fused
+result entirely. A filter written that way excludes everything it was meant to keep, which is
+the inverse of the request. The PRD registered this trap in the `bool.filter` row before the
+code existed, and it was still the first thing tried.
+
+**What it rests on.** `query.Must` and `query.MustNot` each hand on a slice of the **same length
+and order**, so a position stays meaningful through the whole chain
+`Must(blank(MustNot(Fuse)))`. That property was undocumented; it is now asserted by test.
+
+**The one exception.** A bool holding nothing but filters is not blanked — there is no other
+ranking, and blanking would answer nothing to a query that named documents.
+
+## D-030 — A weight is a position on the wire too, and `search_pipeline` is refused
+
+**Context.** OpenSearch's `hybrid` query puts the weighting in a search pipeline's normalization
+processor: two streams are normalized onto a common scale and then combined. That pipeline is
+the thing this PRD's section 1 says weft exists to make unnecessary.
+
+**Decision.** `hybrid` takes an optional `weights` array — weft's, not OpenSearch's — with one
+weight per sub-query, expanded to one weight per **stream** and handed to
+`fusion.FuseWeighted`. `search_pipeline` is refused with a 400 that says why.
+
+**Why it can exist at all.** A weight attaches to a *position*, never to a name. So
+`FuseWeighted` takes a `[]float64` and still cannot identify a single scorer, and
+`go list -deps ./pkg/fusion` names no scorer package after this change exactly as before it.
+That is [D-005]'s repayment reaching the wire: milestone 4's −0.1202 nDCG@10 was the cost of an
+unweighted vote from a stream with nothing to say, and a client can now turn that vote down
+without the fusion learning what the stream holds.
+
+**What the refusal says.** Normalizing two streams onto a common scale is the step this server
+does not have, because rank fusion reads position and never score —
+`engine.Candidate.Score` is explicitly not comparable across streams. Answering
+`search_pipeline` would mean inventing a normalization and calling it OpenSearch's.
+
+**The structural guard.** Weights are positions in the original stream list and `query.MustNot`
+is the one wrapper that hands on a shorter one. A hybrid inside a `bool.must_not` would shift
+every weight after the removed stream by one, silently. It cannot happen, because a hybrid is a
+whole query rather than a clause of a bool — refused, and tested rather than commented.
+
+**Falsification.** If a caller needs a weight that depends on what a stream holds — a boost that
+means something different for a vector than for a posting list — the positional convention is
+insufficient and the fusion has to learn about signals, which is the architecture hypothesis
+failing at the wire.
+
+## D-031 — The document's time is a mapping flag, because a JSON body has no field for it
+
+**Context.** `scorer/recency` reads `engine.Document.Time` and nothing else. A JSON body has no
+such field: `{"published": "2024-03-01"}` is a date the client happens to care about, and
+nothing on the wire says it is *the* date.
+
+**Decision.** A `date` property may carry `"recency": true`. One per index. `documentFrom` sets
+`Document.Time` from that field — and indexes it as a range-able term as well, because a client
+that mapped a date wants both and neither is derivable from the other. `function_score` with a
+`gauss`, `exp` or `linear` decay on that field becomes a `recency.NewAt(ix, time.Now())` stream;
+a decay on any other field is refused by name.
+
+**Why a mapping flag rather than a convention.** The alternatives were worse in the way this
+project cares about: *the only `date` field* would break the moment a second date is mapped and
+would break silently; *a field literally named `time`* would collide with a client's own schema;
+*an index setting* would put the binding somewhere that does not already know the field's type
+at both index and query time. `dimension` on `knn_vector` is the same shape of extension — the
+k-NN plugin's, not core OpenSearch's — so the precedent is one a client already accepts.
+
+**What this cost, and it is milestone 26's actual finding.** 33 net lines, all of them index-
+time plumbing that a Go caller does not pay: filling `Document.Time` in a Go program is a struct
+field assignment. The query half — the `function_score` clause — is 57 lines, inside milestone
+1's budget. **The wire's surcharge on a signal is the binding, not the fusion.**
+
+**Decay parameters are refused.** `scorer/recency` is an exponential with a fixed half-life;
+reading `origin`, `scale`, `offset` or `decay` and ignoring them would rank by a curve nobody
+asked for. The three curve *names* are accepted and approximated, because a name this server can
+answer approximately is better than three names it refuses — and a parameter it would silently
+ignore is not.

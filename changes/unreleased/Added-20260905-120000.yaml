@@ -1,15 +1,25 @@
 kind: Added
-body: '`cmd/weftd` serves weft over a subset of the OpenSearch REST API, so trying it no
-  longer requires writing a Go program: `GET /`, `_cluster/health`, index create/delete/exists,
-  the `_doc` create-read-update-delete round trip, and `_search` speaking `match` and
-  `match_all`. `opensearch-py` drives it unmodified — `make compat` is that check, and it
-  skips rather than fails when the client is absent so `make all` still needs nothing but
-  the Go toolchain. The handshake reports OpenSearch 2.19.0, which is untrue and is the
-  only untrue thing the server says: past it, a query weft cannot express returns 400 or
-  501 with a reason and never 200 with an empty hit list. A `match` becomes one term stream
-  per token fused by `fusion.Fuse`, because rank fusion is already the union of votes an
-  OR-ed match means. The server lives in `cmd/` and `internal/`, and this release changes
-  **zero lines under `pkg/`** — see docs/DECISIONS.md D-025 and D-026.'
+body: '**`weftd` now speaks most of the OpenSearch query DSL, and refuses the rest
+  by name.** `match` (both operators, with `fuzziness`), `match_phrase`, `term`,
+  `terms`, `prefix`, `wildcard`, `fuzzy`, `range`, `exists`, `bool` with
+  `must`/`must_not`/`should`/`filter`, and `from`/`size` paging — each mapped onto
+  `pkg/query` with **zero lines under `pkg/`**. Field mappings arrive with them and
+  exist for one reason: `query.EncodeInt` only works when the same encoding is
+  applied at index time and at query time, and over HTTP those are two different
+  processes. Five types — `text`, `keyword`, `date`, `integer`/`long`,
+  `knn_vector` — kept in `<index>/_mapping.json` beside the `_source` store and
+  published by the same atomic rename; any other type is refused rather than
+  silently demoted to `text`, because a range over a demoted field matches nothing
+  with nothing to report. `_bulk` speaks NDJSON through one hold of the index
+  writer, reports per item, and refuses a batch whose action and source lines are
+  off by one — that shape would write documents under each other''s ids with a 200
+  on it. Two fuzz targets join `make fuzz`: `FuzzParseDSL` (which executes the plan,
+  not only parses it) and `FuzzParseBulk`, at 5.8M and 3.6M executions with no
+  crash. **The refusal rate is counted rather than claimed: 8 of 25 documented rows,
+  32.0%** — under the 50% at which "OpenSearch compatible" would have had to become
+  "OpenSearch wire subset" — and `TestTheRefusalRateIsCounted` fails in both
+  directions, so a row that quietly changes behaviour breaks the build instead of
+  the documentation.'
 time: 2026-09-05T12:00:00.000000000+09:00
 custom:
-  Issue: 24
+  Issue: 25

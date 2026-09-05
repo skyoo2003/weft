@@ -65,7 +65,22 @@ curl -XPOST localhost:9200/papers/_search \
 
 `weftd` speaks a subset of the OpenSearch REST API, and `opensearch-py` drives it unmodified — `make compat` is that check. `GET /` reports OpenSearch 2.19.0, which is untrue and is the **only** untrue thing it says: past the handshake, a query weft cannot express returns 400 or 501 with a reason rather than 200 with an empty hit list. [DECISIONS](docs/DECISIONS.md) D-025 and D-026 argue both halves.
 
-The library is still the product. The server is a `cmd/`, and adding it changed **zero lines under `pkg/`** — which is the assertion rather than the aspiration. The production warning above applies to it unchanged, and it binds to loopback because there is no authentication and no TLS.
+The subset is `match`, `match_phrase`, `term`, `terms`, `prefix`, `wildcard`, `fuzzy`, `range`, `exists`, one level of `bool`, `knn`, `hybrid`, `function_score` decay, `_bulk`, and `from`/`size` paging. **Eight of twenty-five documented rows refuse — 32%, counted by a test rather than by eye**, and [LIMITATIONS](docs/LIMITATIONS.md) lists what each refusal is protecting you from.
+
+The hybrid is the point of the server, not a feature of it:
+
+```bash
+curl -XPOST localhost:9200/papers/_search -H 'Content-Type: application/json' -d '{
+  "query": {"hybrid": {"queries": [
+    {"match": {"text": "rank fusion"}},
+    {"knn": {"vec": {"vector": [0.1, 0.9, 0.2], "k": 10}}},
+    {"function_score": {"gauss": {"published": {}}}}],
+    "weights": [1, 1, 0.5]}}}'
+```
+
+Three signals, one request, no search pipeline and no normalization processor. The weights attach to **positions**, so `fusion.FuseWeighted` still cannot name a single scorer — which is the whole architecture claim, restated on the far side of a socket.
+
+The library is still the product. The server is a `cmd/`, and the DSL, the mappings, `_bulk` and the hybrid together changed **zero lines under `pkg/`** — which is the assertion rather than the aspiration. Adding recency as a *fourth* signal to the HTTP surface changed zero lines of fusion code and 57 lines in its query clause; what it did cost is an index-time binding, because a JSON body has no field for "this date is the document's time" ([FINDINGS](docs/FINDINGS.md) milestone 26). The production warning above applies to it unchanged, and it binds to loopback because there is no authentication and no TLS.
 
 ## Documentation
 

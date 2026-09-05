@@ -3,6 +3,7 @@
 package opensearch
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -39,12 +40,12 @@ func TestMatchAcceptsTheLongFormAndRefusesItsOptions(t *testing.T) {
 		t.Errorf("long-form match found %+v, want the one document", res.Hits.Hits)
 	}
 
-	// Every option on it is named rather than dropped. `operator: and` read
-	// silently as `or` returns more documents than the client asked for and
-	// looks like a working search, which is the shape D-026 exists to refuse.
+	// Every option on it is named rather than dropped. `minimum_should_match: 2`
+	// read silently as absent returns more documents than the client asked for and
+	// still looks like a working search, which is the shape D-026 exists to refuse.
+	// operator and fuzziness left this list in milestone 25 — they are implemented
+	// now, and TestEveryRowOfTheDSLTable is where they are checked.
 	for _, body := range []string{
-		`{"query":{"match":{"text":{"query":"fusion","operator":"and"}}}}`,
-		`{"query":{"match":{"text":{"query":"fusion","fuzziness":"AUTO"}}}}`,
 		`{"query":{"match":{"text":{"query":"fusion","minimum_should_match":2}}}}`,
 		`{"query":{"match":{"text":{"boost":2}}}}`,
 		`{"query":{"match":{"text":{"query":42}}}}`,
@@ -145,21 +146,37 @@ func TestScalarsAreIndexedAndStructuresAreOnlyStored(t *testing.T) {
 }
 
 // Accepting a mapping and dropping it is the worst of the three options: a range
-// query later matches nothing, with nothing to report. Refused instead, naming
-// the milestone that will honour it.
-func TestCreateIndexRefusesAMappingItCannotHonour(t *testing.T) {
+// query later matches nothing, with nothing to report. Milestone 24 refused the
+// whole key for that reason; milestone 25 honours the five types it can and
+// refuses the rest by name, which is the same rule with more of it implemented.
+func TestCreateIndexHonoursAMappingOrRefusesItByName(t *testing.T) {
 	srv, _ := newTestServer(t)
 
 	status, raw := do(t, srv, http.MethodPut, "/papers",
 		`{"mappings":{"properties":{"views":{"type":"integer"}}}}`)
-	if status != http.StatusBadRequest {
-		t.Fatalf("create with mappings: status %d, want 400 (body %s)", status, raw)
+	if status != http.StatusOK {
+		t.Fatalf("create with mappings: status %d, want 200 (body %s)", status, raw)
+	}
+	if status, raw := do(t, srv, http.MethodGet, "/papers/_mapping", ""); status != http.StatusOK ||
+		!bytes.Contains(raw, []byte(`"views":{"type":"integer"}`)) {
+		t.Errorf("GET _mapping: status %d, body %s", status, raw)
+	}
+
+	// A type this server cannot honour is refused, and the index is not left
+	// behind: a client told its mapping failed and then finding the index there
+	// would index by the wrong rule until something noticed.
+	if status, raw := do(t, srv, http.MethodPut, "/geo",
+		`{"mappings":{"properties":{"where":{"type":"geo_point"}}}}`); status != http.StatusBadRequest {
+		t.Errorf("create with geo_point: status %d, want 400 (body %s)", status, raw)
+	}
+	if status, _ := do(t, srv, http.MethodHead, "/geo", ""); status != http.StatusNotFound {
+		t.Errorf("the index survived a refused mapping: HEAD /geo is %d, want 404", status)
 	}
 
 	// settings are accepted and ignored: shards and replicas have nowhere to
 	// land in a single-node engine, and refusing them would refuse every client
 	// that sends its defaults.
-	if status, raw := do(t, srv, http.MethodPut, "/papers",
+	if status, raw := do(t, srv, http.MethodPut, "/plain",
 		`{"settings":{"number_of_shards":1}}`); status != http.StatusOK {
 		t.Errorf("create with settings: status %d, want 200 (body %s)", status, raw)
 	}
