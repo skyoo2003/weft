@@ -1,0 +1,23 @@
+kind: Added
+body: '**The citation graph is now an index rather than a walk over documents.**
+  `graph.NewAdjacency(ctx, ix)` reads every document''s links once and resolves them
+  into `DocID` space, forward *and* reverse, so a hop is a slice bound instead of a
+  record decode and a locked key lookup. `Adjacency.Out`, `In` and `Degree` are the
+  graph query surface — `In` is the direction a citation corpus does not store and a
+  query usually wants, since `Document.Links` says what a paper cites and "what cites
+  this paper" is the reverse of every edge in the corpus. It is a **snapshot**: rebuild
+  after ingest, which is the rule any corpus-sized side store already follows.
+  `graph.NewPPR(adj, seed)` ranks on it by personalized PageRank — Andersen–Chung–Lang
+  forward push, so total edge work is bounded by `1/(restart × precision)` however
+  large the corpus is, tunable with `WithRestart` and `WithPrecision`. It exists
+  because milestone 4 diagnosed *why* hop distance contributed nothing: with
+  `MaxDepth 3` a candidate holds one of a handful of scores and `TopK` settles the
+  tie group on `DocID`, which is corpus insertion order. A walk has no such ceiling.
+  On 20,000 committed documents with 128-wide vectors and 120,000 edges the graph arm
+  goes from **1.379 ms and 48,522 allocations a query to 236 µs and 230** — 5.8× the
+  speed and 211× fewer allocations — against a one-off adjacency build of 93.6 ms.
+  Whether it improves nDCG is **not claimed**: the arms are registered in
+  `weft-eval run` and the corpus that would answer it has not been run.'
+time: 2026-09-05T10:00:00.000000000+09:00
+custom:
+  Issue: 21

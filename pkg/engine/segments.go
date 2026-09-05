@@ -41,6 +41,17 @@ type segment struct {
 	totalLen int
 	vecDim   int
 
+	// version is the format version every one of this segment's sections
+	// declared. openSegment refuses a segment whose sections disagree, so one
+	// number describes the whole of it.
+	//
+	// It is kept because the *record* layout varies with it: version 5 appends
+	// a field block to each docs record, and a reader positioned on a record has
+	// to know whether to expect one. Without it the fields decode as trailing
+	// bytes inside the unit and every record fails its own checksum — which is
+	// damage reported for a segment that is intact.
+	version uint64
+
 	// live is how many of this segment's documents had no tombstone when it was
 	// written, which is how many entries its keys section holds. It is a
 	// cross-check and nothing reads it at query time: whether a document is
@@ -116,6 +127,7 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 	}
 	s.maps = append(s.maps, metaB)
 
+	s.version = metaR.version
 	secs := segSectionsFor(metaR.version)
 	rs := make([]*segReader, len(secs))
 	rs[0] = metaR
@@ -355,6 +367,27 @@ func (s *segment) vector(id DocID) ([]float32, bool) {
 	return v, len(v) > 0
 }
 
+// links is doc with only the link keys materialised. Same record, same
+// checksum, same false on damage — see decodeDocLinks for what it skips.
+//
+// A document with no links answers an empty slice and true, which is not the
+// shape vector uses and is deliberate: no vector means a scorer has no opinion,
+// while no links means a node with no edges, and a traversal that treated the
+// two alike would stop telling a missing document from a leaf.
+func (s *segment) links(id DocID) ([]string, bool) {
+	local := id - s.base
+	r, ok := s.recordAt(local)
+	if !ok {
+		return nil, false
+	}
+	l, err := decodeDocLinks(r, int(local))
+	if err != nil {
+		// False rather than an error, for the reason doc gives above.
+		return nil, false
+	}
+	return l, true
+}
+
 // docLen is arithmetic on the mapped table, not a decode. BM25 asks once per
 // posting, which is why the token count is in the table at all.
 func (s *segment) docLen(id DocID) int {
@@ -434,7 +467,7 @@ func (s *segment) recordAt(local DocID) (*segReader, bool) {
 		}
 		end = next - segHeaderLen
 	}
-	return &segReader{name: docsFile, b: s.docs[:end], off: off - segHeaderLen}, true
+	return &segReader{name: docsFile, b: s.docs[:end], off: off - segHeaderLen, version: s.version}, true
 }
 
 // lookup decodes the postings for term, ascending by index-wide DocID, or nil

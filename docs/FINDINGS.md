@@ -3113,3 +3113,1109 @@ not a third void run.
 6. **A position index and per-field term spaces are still format v5**, and a replaceable
    tokenizer does not change that: one tokenizer serves the whole `Text` and there is nothing
    to scope a term to. `FORMAT.md` §8 carries both with what they would cost.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 14 — The probe passed, the ladder ran twice, and a closed lid discarded both
+
+**Verdict: the four clauses are still unjudged, for the third round.** The round's own outcome
+clause is not met. Two ladder attempts were made in one session: the first was killed by
+SIGTERM at 46 minutes, the second completed all eight rungs and **both of its arms printed
+`DISCARD this run`** — the machine slept mid-ladder, twice, because the laptop's lid was closed.
+
+What the round did deliver is the thing [milestone 13 §8 item 2](#8-carried-forward) asked for,
+and the second attempt is the first time anything here has tested it end to end. The result is
+more useful than a pass would have been: **the probe this round added passed before both
+attempts, and the run was void anyway** — which is [D-024](DECISIONS.md)'s own registered
+falsification condition firing on its first serious use.
+
+`pkg/` diff: **0 lines**. Golden API files: **0 lines**. That was the mechanical definition of
+this being a judgment round rather than a feature one, and it held.
+
+## 1. What was registered, and that it was registered first
+
+[PERF §5.7](PERF.md) fixes the preflight and its pass line, the baseline commit, the arm
+order, four readings and the cut order. It was committed **before** anything ran, which is
+checkable:
+
+```console
+$ git log --format='%h %cd %s' --date=format:'%H:%M:%S' -- docs/PERF.md | head -2
+aee06ca 23:28:12 docs: correct 5.7's baseline probe, before the baseline arm ran
+d32bade 23:26:34 docs: register milestone 14's readings and preflight before the run
+```
+
+`d32bade` at 23:26:34 precedes the first probe at **23:26:41** by seven seconds, and `aee06ca`
+at 23:28:12 precedes the second at **23:28:20** by eight. The ordering is the point: a pass
+line chosen after seeing the numbers is how a performance claim is made to say whatever its
+author wants, which is [§3](PERF.md)'s standing rule and the reason §5.3 through §5.7 all carry
+*registered before it is measured* in their titles.
+
+**One correction was made mid-round and published rather than edited in.** §5.7's first draft
+spelled the baseline probe `make -C ../weft-m12-baseline bench-preflight`, and **that target
+does not exist on `700a178`** — this milestone adds it, so a worktree at milestone 12's merge
+has no rule for it. The command was respelled as the flags the target hardcodes; nothing
+measured changed. It is recorded because a procedure step whose command fails on one of two
+arms is the same class of defect as no step at all, and the step existing is what this round
+was buying.
+
+## 2. The baseline moved to a commit that is reachable
+
+§5.6 named `1eb2a44` as its baseline arm, and **that commit is not an ancestor of `main`** — it
+sits on the `m12-query-expressiveness-onmain` side branch as milestone 13's development base,
+so no reader of this history can check it out. `700a178`, milestone 12's merge on `main`, is
+byte-identical across all four code directories:
+
+```console
+$ git merge-base --is-ancestor 1eb2a44 HEAD
+(exit 1 — not an ancestor)
+$ git diff --stat 1eb2a44 700a178 -- pkg/ internal/ cmd/ bench/
+(empty)
+$ git diff --stat 9d05c16 eedc04a -- pkg/ internal/ cmd/
+(empty)
+```
+
+So the substitution moves the measurement to a reproducible place without changing what is
+measured, and the measured arm `eedc04a` is the same code §5.6 measured as `9d05c16`. §5.6's
+wording stands as written.
+
+## 3. Both probes passed, and reading 1 did not fire
+
+2026-08-27, 28 seconds each, 500 requests each, baseline arm second. Full output and `uptime`
+either side are in [docs/testing/weft-m14.tdd.md](testing/weft-m14.tdd.md).
+
+| | baseline `700a178` | HEAD `eedc04a` | HEAD, 00:25 | HEAD, 05:36 | pass line |
+| --- | --- | --- | --- | --- | --- |
+| unloaded p50 | 34.272 ms | 33.705 ms | 35.098 ms | 32.800 ms | — |
+| p50 at 27.28 q/s | 35.544 ms | 35.387 ms | 35.161 ms | 34.421 ms | ≤ 2× the same run's unloaded p50 |
+| **ratio** | **1.04×** | **1.05×** | **1.00×** | **1.05×** | ≤ 2× → **all pass** |
+| shed | **0** | **0** | **0** | **0** | 0 → **all pass** |
+| alloc per query | 10869.0 KiB | 10869.0 KiB | 10869.0 KiB | 10869.0 KiB | — |
+| single-rung peak RSS | 102.3 MiB | 105.7 MiB | 97.5 MiB | 99.8 MiB | not a clause reading |
+| load average at start | 3.29 | 2.31 | — | **6.85** | not a gate |
+
+Four probes, four passes, against the void run's **78×**. The instrument was in a state to
+measure every time, which is the one thing neither of the previous two rounds could say. The
+last one is the gate certificate for the ladder attempt in [§4](#4-two-attempts-and-what-ended-each);
+it was taken at 05:36:27, seventy-eight seconds before that ladder started, and it passed at
+1.05× on a machine whose one-minute load average was 6.85 — higher than any other probe.
+Recorded because §5.7 keeps load average out of the verdict but logs it.
+
+**These are gate readings and they are not clause readings.** §5.7 registered them as *not
+published*, and the sense in which they appear here is narrow: what is published is that the
+probe passed and by how much, because that is the evidence the gate worked. They cannot be
+read against the clauses, for three separate reasons and any one of them is enough:
+
+1. **500 samples, not 10,000.** [PERF §2.3](PERF.md) leaves a quantile out rather than
+   printing it when fewer than 100 samples sit beyond it, and the probe's own output prints
+   `p95 -- p99 -- p99.9 --` for exactly that reason. A p50 over 500 samples is not the p50 the
+   clause names.
+2. **A lone rung is not the ladder's fourth rung.** §5.5's correction and
+   [D-014](DECISIONS.md) forbid reading a lone rung's `peakrss` against milestone 8's ladder
+   peak, and the probe's 105.7 MiB and 102.3 MiB are precisely that forbidden comparison. The
+   memory clause reads the ladder's high-water mark and there is no ladder here.
+3. **The rule needs a ladder to apply.** The probe's own summary says so:
+   *1 of 1 rungs measured … so the load-point rule has nothing to apply and there is no
+   saturation point and no headline.*
+
+So `shed = 0` and `p50 = 35.4 ms` are **not** the shed and p50 clauses being met, and this
+section declines to say they are.
+
+## 4. Two attempts, and what ended each
+
+### Attempt 1 — killed at 46 minutes
+
+Started 00:52:36 after a probe that passed at 1.00×. Reached 9,386 of rung 1's 10,000 samples
+and took **SIGTERM** at 01:38:38 (`make: *** [bench] Terminated: 15`), 46 minutes in, from
+outside the run. It was launched as a session-managed background task, and the operator did not
+stop it.
+
+**Nothing is published from it**, because one partial rung of one arm is not a cut — it is the
+void production §5.7 forbids. It is recorded because §5.1 requires it: *a run thrown away
+silently is indistinguishable from one that was never made.* Its partial rung is quoted once,
+in [§5 item 4](#5-what-this-licenses-and-what-it-does-not), for the single narrow thing it
+establishes.
+
+### Attempt 2 — eight rungs, both arms discarded
+
+Relaunched detached — `perl` fork plus `POSIX::setsid`, because macOS ships no `setsid` and the
+previous process group was the thing that got killed. It survived, ran 05:37:05 to roughly
+17:00, and **completed all four rungs on both arms.** Both then printed the instrument's own
+refusal:
+
+```text
+DISCARD this run: the process did not run for 22m39s of the rung at 6.82/s, so the ladder
+was measured across a suspension. There is no headline.
+DISCARD this run: the process did not run for 4h57m8s of the rung at 3.41/s, so the ladder
+was measured across a suspension. There is no headline.
+```
+
+**The cause is a closed lid**, and `pmset -g log` names it exactly:
+
+```text
+06:46:41  Sleep  Entering DarkWake state due to 'Clamshell Sleep'  Using AC (Charge:100%)
+06:46:46  Sleep  Entering Sleep state due to 'Clamshell Sleep'     Using Batt (Charge:100%)
+07:10:00  Wake   Wake from Deep Idle ... due to ... lid ... HID Activity
+```
+
+`Elapsed` in `internal/loadgen/clock.go` subtracts the monotonic clock from the wall clock, and
+on Darwin the monotonic clock does not advance while the system sleeps, so the gap is proof the
+process was not running. The guard at `cmd/weft-eval/bench.go` inspects **every** rung and
+discards the whole ladder when any one of them was suspended, on the stated ground that *a
+machine that slept during rung one was not the same machine for rung five*. That reasoning binds
+here, so no rung from either arm is quotable, including the clean ones.
+
+### What ended them is not what this round built a check for
+
+**The probe passed before both attempts and neither produced a verdict.** That is
+[D-024](DECISIONS.md)'s registered falsification condition — *a ladder that comes back void
+after a probe that passed* — and it fired. But the honest reading is narrower than *the probe
+is wrong*, and the distinction matters for what the next round should do:
+
+| failure mode | what catches it | did it work? |
+| --- | --- | --- |
+| a **contended** machine | `make bench-preflight`, added this round | untested — no attempt failed this way |
+| a **suspended** machine | `SuspendTolerance`, already present since milestone 7 | **yes, in-band, on both arms** |
+| a machine that **stays awake** | `caffeinate -dimsu`, prescribed since milestone 5 | **no** |
+
+So the two detectors are complementary and both behaved correctly. **The thing that failed is
+the mitigation.** `caffeinate -dimsu` holds `PreventUserIdleSystemSleep`, which stops *idle*
+sleep; it has no power over clamshell sleep, and the machine was on AC at 100% charge when the
+lid closed, so no power-state condition was in play either. This file has prescribed
+`caffeinate -dimsu` as the way to keep a ladder awake since §5.1, and `clock.go`'s own comment
+cites *thirteen hours of clamshell sleep* as the failure the suspension check exists to detect.
+**The documented remedy does not cover the documented failure mode, and that has been true for
+nine milestones.** Nothing caught it before now because until this round no ladder had been
+started and then left alone for three hours.
+
+The fix needs no code and is registered in [PERF §5.7](PERF.md): **the lid stays open**, and
+`caffeinate` is kept for what it does cover. `sudo pmset disablesleep 1` would enforce it and is
+rejected for the usual reason — it needs root and leaves a machine that never sleeps if the
+operator forgets to unset it, which is a worse failure than the one it prevents.
+
+## 5. What this licenses, and what it does not
+
+1. **The four clauses are unjudged, for the third round.** Shed 0 at 27.28 q/s, p50 ≤ 40 ms,
+   ladder peak RSS ≤ 120 MiB, and milestone 9's worst read inside a commit window ≤ 1 s. Not
+   met, not missed. Carried forward again in [§7](#7-carried-forward).
+2. **No regression is attributable to milestone 13, and this round narrowed that further than
+   the last one could.** The four probes put the two arms 0.44% apart at the top rate, HEAD
+   marginally ahead. That is not evidence for invariance — 500 samples, one observation, one
+   rung — but it points the opposite way from §5.6's reported p50 +12.8%. What the discarded
+   ladder adds is stronger and is in [§5a](#5a-a-pattern-in-the-discarded-data-registered-as-a-hypothesis-and-not-a-finding):
+   the top-rung collapse §5.6 reported for milestone 13 **reproduces on pre-milestone-13
+   code**. Whatever it is, it is not the `ix.tok == nil` branch.
+3. **The quality clause stays judged and was not re-run.** Milestone 13's run C reproduced
+   nDCG@10 0.5826 / 0.6211 to four decimals ([§6 of milestone 13](#6-quality-unmoved)).
+   §5.7 removed `make eval` from the run list deliberately: a second identical verdict is not
+   worth putting a 677 MiB index load into the ladder's session, which is the condition that
+   voided the last attempt. **A subtraction, published as one.**
+4. **Allocation per query reproduced everywhere, including across the discard.** 10869.0 KiB on
+   all four probes, and 10868.9 to 10869.0 KiB on every non-saturated rung of both discarded
+   arms, against a published 10,869.0.
+   [Milestone 8 §11](#11-the-memory-clause-judged--and-the-excursion-went-with-it) established
+   that this figure is a property of the query set rather than of the load, which is what makes
+   it readable where the latency quantiles are not. Twelve independent readings agreeing to one
+   decimal is the strongest evidence available that both arms run the same work — and it is not
+   one of the four clauses, so it judges nothing.
+5. **Attempt 1's partial rung establishes exactly one thing.** 9,386 samples at 3.41 q/s gave
+   p50 56.617 ms against a published 78.576, shed 0, and the rung raised the memory mark by
+   0.1 MiB. **The machine was capable of the ladder's lower rungs.** It is quoted only for
+   that, because the run was terminated rather than completed and a truncated rung is not a
+   rung.
+6. **`ru_nivcsw` has many observations now and still no threshold**, which is the more useful
+   negative result. 22,698 to 27,434 per 500-request probe; 649,334 to 970,547 per 10,000-sample
+   rung on the clean rungs of both arms; and **2,395,569 and 2,723,482** on the two collapsed
+   top rungs — a 3.7× step over the rung below on the same arm. [D-024](DECISIONS.md) rejected
+   the metric for having no baseline, and it still has none, because every one of these readings
+   comes from a machine that either was not quiet or slept mid-run. What they establish is that
+   the figure **moves with the collapse**, which is what would make it a signal if a clean
+   ladder ever bracketed it.
+
+## 5a. A pattern in the discarded data, registered as a hypothesis and not a finding
+
+The two arms are discarded and no number below is a clause reading. They are set down because
+the same shape appears on both arms and matches §5.6's void run, and because the next attempt
+should be looking for it rather than discovering it again.
+
+| rung | rate | M8 published p50 | baseline `700a178` | HEAD `eedc04a` |
+| --- | --- | --- | --- | --- |
+| 12.5% | 3.41/s | 78.576 ms | 55.426 ms | 66.643 ms |
+| 25% | 6.82/s | 50.825 ms | 47.661 ms | 44.952 ms |
+| 50% | 13.64/s | 34.124 ms | 37.076 ms | 37.744 ms |
+| **100%** | **27.28/s** | **33.470 ms** | **1.635754 s** | **2.034673 s** |
+| shed at the top rung | | 0 | 1,811 | 3,323 |
+| ladder peak RSS | | 100.7 MiB | 660.8 MiB | 675.8 MiB |
+| raised *at* the top rung | | +1.8 MiB | +553.0 MiB | +574.3 MiB |
+
+**Rungs 1 through 3 are in family with the published ladder on both arms. The top rung
+collapses on both.** And §5.6's milestone 13 void run reported 2.616899 s, shed 4,857 and
+654.1 MiB at that same rung — the same signature, a third time.
+
+Set against that: **four single-rung probes at 27.28 q/s returned 34–35 ms, shed 0 and roughly
+100 MiB**, on this machine, this week, including one taken 78 seconds before the ladder started.
+So 27.28 q/s alone is fine and 27.28 q/s as a ladder's fourth rung is not.
+
+That is precisely the distinction [D-014](DECISIONS.md) and §5.5's correction exist to enforce,
+and it now has a second use: the lone rung and the ladder's rung are **different measurements of
+different things**, and the probe cannot stand in for the clause because of it.
+
+Four candidate explanations, and this round eliminates one:
+
+1. **Milestone 13's code** — **eliminated.** The baseline arm is pre-milestone-13 and collapses
+   the same way. Whatever this is, the `ix.tok == nil` branch is not it, and §5.6's residual
+   "p50 +12.8%" between arms was noise on top of a shared failure.
+2. **A ladder-prefix effect** — 85 minutes and 30,000 queries of prior load degrade something a
+   lone rung never reaches. The +553 MiB step *at* the top rung looks like queue depth becoming
+   resident, which is what saturation looks like from the inside.
+3. **Post-suspension state** — both arms slept *before* reaching the top rung and woke on
+   battery. A machine that has been asleep for five hours and comes back on battery is not the
+   machine the first three rungs ran on. This one is a direct consequence of the discard and is
+   the reason the discard binds.
+4. **Toolchain** — the published figures are Go **1.26.1** ([§Machine](PERF.md)); every run since
+   is on **1.26.7**. Both arms share it, so it cannot explain a difference *between* arms, but it
+   is live for the difference against the published ladder.
+
+**2, 3 and 4 are not separated by anything in this data**, and 3 alone is enough to refuse the
+whole reading. A clean ladder — lid open — distinguishes 2 and 4 from 3 immediately, and that is
+the first thing the next attempt buys.
+
+## 6. What is not matched, and which way it biases
+
+In [PERF §4](PERF.md)'s form. The first four were registered before the run; items 5 and 6 are
+what the run added:
+
+1. **Page cache between the arms.** The first arm to run maps the index and leaves the cache
+   warm; the second inherits it. The order is fixed **baseline first**, so a HEAD regression
+   is real *despite* the cache being on HEAD's side, and a HEAD improvement has a live
+   competing explanation which will be written beside the figure rather than claimed as an
+   improvement. Running both orders would cost 6.4 hours instead of 3.2 and randomisation buys
+   nothing at n=1, so the bias is **named rather than removed**.
+2. **The probes ran in the reverse order from the ladder's.** HEAD's probe was first, at
+   23:26:41; the baseline's at 23:28:20 inherited whatever HEAD's had warmed. That is the
+   direction *against* the observation in §5 item 2 — the baseline had the cache advantage and
+   was still 0.44% slower — and it is one more reason 0.44% is not a claim.
+3. **The index is milestone 11's format v4, and only HEAD has the tokenizer guard.** HEAD's
+   `Open` re-tokenizes one live document; the baseline's does not. Both opened in **60 ms**,
+   identically, so the guard's cost is below this instrument's resolution — which is the first
+   measurement of it, against [milestone 13's gap 5](#8-carried-forward) that no test pins it.
+4. **One observation each.** [D-013](DECISIONS.md) unchanged: a single run is not a median.
+   Three repetitions would cost the 4.9 hours D-013 priced and this round did not buy them.
+5. **The Go toolchain is not the published one.** Every figure in this file's milestone 8 ladder
+   was measured on Go **1.26.1**; both arms here ran on **1.26.7**. Shared between the arms, so
+   the A/B is internally valid; unmatched against the published denominators, which is where
+   three of the four clauses come from. Direction unknown, and [§5a item 4](#5a-a-pattern-in-the-discarded-data-registered-as-a-hypothesis-and-not-a-finding)
+   keeps it live. The [Machine table](PERF.md) is the place this has to be reconciled before any
+   verdict is published against those denominators.
+6. **The two suspensions were unequal, and not in the arms' favour.** The baseline arm lost
+   22m39s at rung 2; HEAD lost **4h57m08s** at rung 1. HEAD's unloaded median was also the
+   outlier of the session at 39.134 ms against 32.8–35.1 ms everywhere else. So the arm with the
+   worse figures is also the arm that slept thirteen times longer, and the two cannot be
+   separated. **This is why the discard binds rather than being a formality** — reading these
+   arms against each other would attribute five hours of sleep to milestone 13.
+
+## 7. Carried forward
+
+1. **The four performance clauses are unjudged for the third round.** [PERF §5.7](PERF.md)
+   holds the readings, the pass lines, the baseline, the arm order and the cut order, all
+   committed and all still standing. What the next attempt needs is **not** more design. It is
+   three things, and the third is new: a 3.1-hour window with nothing else on the machine, a
+   passing `make bench-preflight` on each arm taken immediately before that arm, and **the lid
+   left open**.
+2. **`caffeinate -dimsu` is not sufficient and this file has said otherwise since milestone 5.**
+   It cannot prevent clamshell sleep, which is what discarded both arms.
+   [§4](#4-two-attempts-and-what-ended-each) has the `pmset` evidence and
+   [PERF §5.7](PERF.md) now states the requirement beside the command. This is the round's most
+   transferable finding: every ladder in this file's history was run under a mitigation that
+   does not cover the failure mode its own suspension check was built to detect.
+3. **The top-rung collapse is the next thing to explain, and it is not milestone 13's.**
+   [§5a](#5a-a-pattern-in-the-discarded-data-registered-as-a-hypothesis-and-not-a-finding) has the
+   shape, the three surviving candidate causes and the one it eliminated. A single clean ladder
+   settles whether it is real, and if it is, the three clauses that live on the ladder are
+   missed rather than unjudged — which would be the first actual verdict since milestone 8.
+4. **§5.7's reading list needs two more entries, not one.** *The window is known in advance to
+   be unavailable* → not executed; and *the run completed and the instrument discarded it* →
+   void, distinct from reading 4's drift because the cause is recorded in-band rather than
+   inferred from an A/B. This round hit the second one twice.
+   [D-024](DECISIONS.md) records both amendments.
+5. **Go 1.26.1 is not installed on this machine.** `~/.goenv/versions/` holds 1.26.7 alone, so
+   [§5a item 4](#5a-a-pattern-in-the-discarded-data-registered-as-a-hypothesis-and-not-a-finding)'s
+   toolchain candidate cannot be tested without fetching it first. Cheap, and worth doing only
+   if a clean ladder still misses — otherwise it is a variable nobody needs to move.
+6. **The write arm is cut, and the cut is a decision.** Milestone 9's read clause needed
+   `-writes -writedocs 20000` on both arms, about 90 minutes, and §5.7 registered it as the
+   first thing to cut. It was never reached because the ladder it follows was discarded, so this
+   is a cut behind a discard — published so that "the write arm was cut" reads as an ordering
+   decision rather than as an omission.
+7. **`-deletefrac` and §5.5's run B are still open**, untouched by this round and deliberately
+   so: mixing two rounds into one sitting means a void in either cannot be attributed to
+   either. Milestone 11's carried-forward item 3 and half of the PRD's open question 2 both
+   remain owed, and `-deletefrac` still does not exist in `cmd/weft-eval`.
+8. **`ru_nivcsw` per rung stays rejected, and its revival signal has now fired.**
+   [D-024](DECISIONS.md) named *a ladder that comes back void after a passing probe* as the
+   condition that would revive it, and that happened twice. It stays rejected anyway, for the
+   reason [§5 item 6](#5-what-this-licenses-and-what-it-does-not) gives: the readings move with
+   the collapse, but every one of them comes from a machine that slept, so there is still
+   nothing to calibrate against. **Reviving it is the second thing a clean ladder buys**, not
+   something to add before one exists.
+9. **The probe has no exit code, and this round's failures argue against adding one.** The
+   comparison is a person reading two printed lines, and the `ponytail:` comment on
+   `bench-preflight` prices the alternative at about thirty lines in `cmd/weft-eval/bench.go`.
+   Neither failure here would have been caught by it: the probe passed both times, and what
+   ended the runs was a SIGTERM and a closed lid.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 15 — The graph is indexed, and the walk is built but not judged
+
+Milestone 4 measured graph proximity at **+0.0000 nDCG@10** at its best fusion weight and
+recorded the verdict at the top of `scorer/graph`'s package documentation. What it also did,
+and what this round is built on, is diagnose *why*. The finding was not that citation
+structure carries no signal. It was that one construction of it has almost no ranking to
+contribute:
+
+> with MaxDepth 3 a candidate's score takes very few distinct values, the hop-1 frontier on a
+> real citation graph runs to tens of documents per query, and `engine.TopK` breaks the
+> resulting ties on `DocID` — which is corpus insertion order.
+
+[Milestone 4 §5](#milestone-4--quality) named personalised PageRank as the principled version
+of what the BFS approximates. This round writes it, and writes the structure without which it
+is not affordable.
+
+**What is claimed and what is not.** The capability is built, tested and measured for cost.
+**No quality number is produced.** The corpus that would answer it — TREC-COVID joined to the
+Semantic Scholar citation graph — is not on this machine, and `make eval` skips without it.
+The arms are registered in `cmd/weft-eval/run.go` so that the measurement is one command
+away, and §5 says what that leaves owed.
+
+## 1. Why a traversal had to stop reading documents
+
+`scorer/graph`'s BFS reaches a node's edges through `engine.Index.Doc`, which materialises the
+key, the text and the vector in order to read `Links` — a field that is none of them. On the
+evaluation corpus 69% of the `docs` section is vector bytes, so a traversal faulted in a
+768-wide vector per node visited and dropped it. Each edge then cost an `Index.Resolve`, which
+takes the index-wide read lock and binary-searches the keys table.
+
+That is a per-query cost, paid again on every query, and it is why an algorithm with a real
+work bound was not affordable: a push loop reads a node's edges tens of thousands of times.
+
+Two things were built, in that order.
+
+**`Index.Neighbors(id) ([]DocID, bool)`** — links resolved under one read lock, reached by a
+decode that steps over the vector by arithmetic instead of reading it. `decodeDocFields` grew
+a third mode rather than a third decoder, because two decoders for one format is how a format
+drifts. `TestNeighborsStepsOverAVectorToReachTheLinks` is what holds the skip honest: mutating
+the skip to `4*vn-1` fails it, and the four other `Neighbors` tests with it.
+
+**`graph.Adjacency`** — the whole link structure resolved once into `DocID` space, forward and
+reverse, CSR. After it, a hop is a slice bound.
+
+The reverse direction is a capability and not a mirror. `Document.Links` says what a paper
+cites; *what cites this paper* is the transpose of every edge in the corpus, and no per-query
+traversal can reach it without scanning every document. `Adjacency.In` is that, and
+`TestPPRTravelsBothDirections` shows the BFS scorer returning nothing on a query the walk
+answers.
+
+## 2. What it cost and what it bought, measured
+
+`BenchmarkGraphArm`, 20,000 committed documents, 128-wide vectors, 120,000 edges, five seeds,
+`k=10`. darwin/arm64, Apple M4. Committed and reopened, because a pending index hands `Doc`
+the struct the caller passed and the decode this removes exists only on the other side of a
+commit.
+
+| Arm | ns/op | B/op | allocs/op |
+| --- | --- | --- | --- |
+| `bfs-over-index` | 1,378,929 | 1,031,404 | 48,522 |
+| `ppr-over-adjacency` | 235,896 | 184,088 | **230** |
+
+**5.8× the speed, and 211× fewer allocations.** The second number is the one that matters more
+than the first. [Milestone 5 §3.2](#milestone-5--performance) measured this project's
+throughput wall as live heap under concurrency — "every candidate decodes a whole record" —
+and 48,522 allocations a query is what that sentence looks like on the graph arm.
+
+The two are not the same algorithm, so this is not a speedup of one into the other. It is what
+a caller pays for a graph stream, before and after.
+
+**The build is not free and is not fast.** `BenchmarkAdjacencyBuild` is **93.6 ms and 4.4
+million allocations** over the same corpus — about 37 allocations an edge, which is one binary
+search through the keys table decoding a string at every probe. Reading the links themselves
+is 7 allocations a document. It repays against the per-query saving in **81 queries**, which is
+the whole of the argument for leaving it; the `ponytail:` comment on `NewAdjacency` names the
+way out and the condition for buying it.
+
+## 3. The tie group is gone, and the direction of the new ranking is the opposite of the guess
+
+`TestPPRBreaksTheTiesHopDistanceCannot` builds the shape milestone 4 diagnosed — one seed,
+eight one-hop neighbours differing only in what lies beyond them — and asserts both halves:
+
+- the BFS arm produces **at most 2 distinct scores** over the eight, which is the tie group;
+- the walk produces **8**.
+
+So the mechanism milestone 4 blamed is removed. Whether removing it recovers any nDCG is
+§5's open question and nothing here answers it.
+
+**What the test caught is worth recording, because the prediction written into it was wrong.**
+The assertion first written said the *least*-connected neighbour should keep the most mass, on
+the reasoning that a node with fewer edges spreads less of what it is handed. It fails: h0
+scored 0.0271 and h7 scored 0.0734. Mass a node spreads down its edges returns along the same
+edges, so the better-connected neighbour keeps more. That is PageRank's degree bias, present
+here by construction.
+
+It is also the property most likely to be wrong for this task. On a citation corpus the
+best-connected paper is the one everything cites and nothing is specifically about, so a
+stream ranking it first is ranking by fame. **This is a plausible reading of what milestone 4
+measured and did not explain**, and it survives the change of algorithm — which is the reason
+to state it here rather than treat the walk as a fix.
+
+The lever is degree normalization. It is deliberately **not** a mode on the scorer — a seam
+with a menu in it is not a seam ([D-022](DECISIONS.md)) — and it is reachable from outside,
+because `Adjacency.Degree` is exported and `engine.Search` takes scorers by interface. The
+recipe is the wrapper shape [ADOPTION §8](ADOPTION.md) already recommends.
+
+## 4. Two smaller things the round settled
+
+**Seed order cannot change a ranking.** Float addition is not associative, so the order
+residual arrives at a node decides its last bit, and that order is the order the frontier was
+seeded in — the caller's. Two mathematically equal scores differing in their last bit make
+`TopK`'s `DocID` tiebreak unreachable, so permuting `Query.Seeds` would silently permute the
+result. One sort of at most `SeedN` ids makes the whole push sequence a function of the
+adjacency alone. `TestPPRIsIndependentOfSeedOrder` asserts **exact** equality across three
+permutations; a tolerance there would pass the very difference the sort exists to remove.
+`Scorer.Candidates` buys the same property a harder way, by tallying per hop count.
+
+**A bad constant is refused at construction rather than clamped.** A restart probability of 0
+does not make the walk fail — it removes the term that bounds its work, so the loop runs until
+float underflow instead of terminating on the argument that licenses it. `NewPPR` returns an
+error, which is the one place it can be said to the party able to fix it.
+
+## 5. Carried forward
+
+1. **No quality number exists, and that is the whole debt of this round.** `text+graph-ppr`
+   and `text+vector+graph-ppr` are registered arms with two registered comparisons — against
+   the same baseline as milestone 4's binding pair, and against the BFS arm the walk was
+   written to replace. Neither has been run. Until one is, the honest statement is that the
+   mechanism milestone 4 blamed is removed and nothing is known about whether that recovers
+   any nDCG.
+2. **Degree normalization is untested.** §3 argues it is the first thing to try if the walk
+   does not beat the baseline. It needs no new API.
+3. **`WithRestart` and `WithPrecision` were chosen by arithmetic, not by measurement.**
+   `DefaultPrecision = 1e-4` comes from the work bound against the 579,719-edge evaluation
+   graph — 66,667 edges a query — and `DefaultRestart = 0.15` is the PageRank convention. Both
+   are exported and overridable precisely so a sweep can set them; no sweep has run.
+4. **The adjacency is a snapshot and nothing enforces rebuilding it.** A caller who ingests
+   and forgets gets a stale graph, and a stale graph answers plausibly. `TestAdjacencyIsASnapshot`
+   pins the behaviour; making it self-invalidating would mean the structure holding a lock on
+   the index, which is what building it once exists to avoid.
+5. **The build's 4.4 million allocations are a resolution cost, not a link-reading cost.** The
+   fix is a key-to-id cache across the walk, which needs the raw keys and therefore a second
+   engine accessor beside `Neighbors`. Owed when a corpus makes 93.6 ms show up as ingest
+   latency rather than as a startup cost.
+6. **The demo does not show it.** `cmd/weft` still fuses the four milestone-1 scorers, and the
+   README's sample output is the one that documents. Adding a fifth column is a documentation
+   change, not a code one, and it is not worth making before §5.1 says what the column means.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 17 — The floor under every query, found and removed
+
+[Milestone 5 §3.2](#milestone-5--performance) measured this project's throughput wall and named
+its cause in one sentence: **live heap under concurrency**. At 27 queries/s — weft's own
+sequential rate — p50 went from 39 ms to 1.27 s, 14% of queries were shed, and RSS went from 126
+to 853 MiB. The explanation attached to it was "every candidate decodes a whole record", and
+[§9 of milestone 8](#milestone-8--what-a-repetition-has-to-hold) had already corrected that
+attribution once without replacing it.
+
+This round measured `scorer/text` directly and found a second, larger source that is not a
+decode at all.
+
+## 1. What a query allocated before it scored anything
+
+`BenchmarkCandidates`, 50,000 documents committed and reopened, darwin/arm64, Apple M4. The
+corpus is deliberately skewed: `everywhere` in every document, `occasional` in one in fifty,
+`singular` in three, and a query term in none.
+
+| Query | ns/op | B/op |
+| --- | --- | --- |
+| a term **no document holds** | 78,685 | **1,182,240** |
+| a term in 3 documents | 101,285 | 1,185,247 |
+| a term in 1 document in 50 | 176,454 | 1,216,432 |
+| a term in every document | 5,838,555 | 2,818,997 |
+
+**1.18 MB and 78 µs to answer a query that matches nothing.** The line responsible was one
+allocation:
+
+```go
+acc := make(map[engine.DocID]float64, docs)
+```
+
+The accumulator was sized to the corpus. The comment above it argued the case honestly and the
+argument was sound as far as it went — one common term produces one entry per matching document,
+and an unhinted map re-buckets its way up through every doubling on exactly the queries that
+cost most. What it did not price is that the insurance is bought **on every query**, including
+the ones that will never write an entry into it.
+
+That is the floor. It does not scale with what a query reaches; it scales with the corpus. On
+the 171,332-document evaluation index the same benchmark shape measures **4.73 MB a query**, and
+at the 27 queries/s where milestone 5 saw the collapse that is **128 MB/s of garbage produced
+before a single document is scored**.
+
+## 2. The first fix moved the cost instead of removing it
+
+Sizing the map lazily from the first term that has postings is one line and removes the floor
+completely — a query matching nothing allocates 16 bytes. It also **made the realistic case
+worse**, which is the outcome the original comment predicted:
+
+| Query, 200k in-memory corpus | corpus hint | first-term hint |
+| --- | --- | --- |
+| three terms, rarest first | 11,200,864 B | **15,930,392 B** |
+
+Sizing from a three-document term and then growing to a 200,000-document one costs the doublings,
+and 42% more than the hint it replaced. Real queries are multi-term, so this was not a trade
+worth taking on its own.
+
+## 3. `Index.PostingBound`, and why the bound was already on disk
+
+The third option is to size from the widest list the query will *actually* walk, which needs
+the lengths before the loop that produces them. It turns out to cost almost nothing: a term's
+postings entry begins with its **block count**, and every block but the last holds exactly
+`blockSize`. One varint per term per segment gives a bound tight to within one block, without
+decoding a posting.
+
+`decodeTermPostings` already computed exactly this and handed it to `size` so `Lookup` could
+allocate its slice once. What was missing was a way to ask for it without also asking for the
+postings.
+
+```go
+widest := 0
+for _, term := range terms {
+    widest = max(widest, s.ix.PostingBound(term))
+}
+acc := make(map[engine.DocID]float64, min(widest, docs))
+```
+
+It is a **bound and not a count**, and the distinction is load-bearing in two directions: a
+bound below the truth is a map that grows anyway, which is harmless, while a caller treating it
+as a count would be reading a number that does not subtract tombstones — a deleted document
+keeps its posting and `Lookup` filters at read time.
+
+## 4. The result
+
+Same benchmark, 50,000 documents committed and reopened, before and after:
+
+| Query | ns before | ns after | B before | B after |
+| --- | --- | --- | --- | --- |
+| a term no document holds | 78,685 | **151** | 1,182,240 | **16** |
+| a term in 3 documents | 101,285 | **982** | 1,185,247 | **7,166** |
+| a term in 1 in 50 | 176,454 | **84,655** | 1,216,432 | **70,415** |
+| a term in every document | 5,838,555 | 6,085,817 | 2,818,997 | 2,818,797 |
+
+**521× faster and 73,890× less memory** on a query matching nothing; **103×** and **165×** on a
+rare term; **2.1×** and **17×** on a mid-frequency one. The expensive query is unchanged in
+memory to within 200 bytes and unchanged in time to within run-to-run variation — the two
+measurements of it differ by 4% in opposite directions across runs, which is the noise band at
+100 iterations and not a result.
+
+**Nothing about the ranking changed.** Map sizing does not touch a score, and
+`internal/eval/bm25_test.go` — the check that matches `rank_bm25` to 4.44e-16 — is what says so
+rather than an assertion here.
+
+## 5. What this does and does not license
+
+**It does not re-open milestone 5's numbers.** `108.193 ms` was measured under a load-point rule
+[milestone 7](#milestone-7--a-baseline-nobody-has-to-qualify) then showed is not reproducible,
+and this round ran a Go microbenchmark rather than the ladder. What is claimed is what was
+measured: the per-query allocation floor, on one machine, at two corpus sizes.
+
+**It is a strong reason to expect the collapse to move, and no evidence that it does.** The
+wall milestone 5 named is live heap under concurrency; this removes between 1.18 and 4.73 MB per
+query of it, before any candidate is scored. Whether the arrival rate at which p50 goes from
+39 ms to 1.27 s moves as a result is a ladder run, and the ladder has come back void three
+rounds running ([milestone 14](#milestone-14--the-probe-passed-the-ladder-ran-twice-and-a-closed-lid-discarded-both)).
+
+## 6. Carried forward
+
+1. **The ladder is still owed, and now has a second reason to run.** It was owed a reproducible
+   load point; it is now also the only thing that can say whether §4 moves the collapse.
+2. **`scorer/vector` and `scorer/graph` have not been measured this way.** The accumulator
+   pattern was `scorer/text`'s; whether either of the others carries a corpus-sized allocation
+   of its own is unlooked-at. `graph.PPR` allocates 230 times a query by construction, which is
+   evidence about the new scorer and not about the old ones.
+3. **`DocLen` still takes the index-wide read lock once per posting.** The `ponytail:` note in
+   `scorer/text` has said so since milestone 3 and nothing here changed it. A term held by a
+   million documents is a million lock acquisitions, and that cost gets *worse* as cores are
+   added — which is the shape of a throughput wall and is exactly what this round did not
+   measure.
+4. **`PostingBound` is a bound and could be a count.** Making it exact means summing the last
+   block's posting count, which is one more varint at a known offset per segment. Nothing needs
+   the exact number yet; block-max WAND would.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 18 — Fields, and the cheapest place to put them
+
+[FORMAT.md §8](FORMAT.md) has carried the same line since milestone 3: *no fields — a document
+is one `Text`, tokenized into one term space*, with per-field term spaces priced as a format v5
+that was not planned. [ADOPTION §8](ADOPTION.md) records a trial subject reaching for it and
+being told to keep a side table. It is the largest single thing a bleve user has and weft did
+not.
+
+## 1. A field is a term space, not a section
+
+The obvious construction is a per-field index: a section on disk, a table to seek into it,
+per-field statistics. The construction taken is smaller by an order of magnitude and it starts
+from what the index already is.
+
+A field's text is split by the same `Tokenizer`, and its terms go into the same `postings`
+under `name + NUL + token`. That is all. `engine.FieldTerm` spells the rule and is exported so
+a scorer written outside the module can build the same key, which is the arrangement
+`Index.Tokenize` already makes for the tokenizer — the index owns the rule and a scorer asks
+rather than reimplementing.
+
+What that bought:
+
+- **No new section, no new table, no new seek structure.** `segSectionsFor` hands v3, v4 and v5
+  the same seven files.
+- **Nothing in `engine` learned what a field means.** A scoped query is an ordinary
+  `Lookup`. The whole of `scorer/text`'s field support is one struct field, one constructor,
+  and one loop that maps tokens through `FieldTerm` — the plain scorer passes an empty name and
+  gets the token back unchanged, so both forms take one code path.
+- **Searching two fields is two scorers and fusion between them**, not a feature of one. That
+  is the milestone 1 claim holding one level down, and `TestTwoFieldScorersAreTwoStreams` is
+  where it is asserted.
+
+**A term in `Text` and the same term in a field are different terms**, and that is the point
+rather than a limitation: it is what makes a scoped query mean anything. A caller wanting a
+word findable both ways puts it in both places and pays for its tokens twice.
+
+## 2. One invariant decided the design, and it was already written down
+
+A document's stored token count **includes every field's tokens**. That is not a preference. §5
+of FORMAT.md has refused, since version 1, a segment where a document's frequencies summed
+across every term fall short of its stored length — and field terms are ordinary postings. So
+the length has to count them or the writer produces segments that cannot be scrubbed.
+
+The consequence lands on BM25 and is the one genuinely awkward thing in this round: **there is
+no per-field length to normalize against.** A five-token title inside a five-thousand-token
+document would be normalized by five thousand, so every title match in a long document scores
+near zero and the ranking becomes a ranking of document brevity.
+
+`text.NewField` answers that by setting `B` to 0 — no length normalization at all, so the score
+is IDF times saturating term frequency. Not normalizing is worse than normalizing correctly and
+much better than normalizing by the wrong length.
+`TestAFieldScorerDoesNotRankByDocumentBrevity` asserts both halves: two identical titles score
+identically however different their bodies are, *and* the plain scorer still separates two
+documents that differ only in length — which is what makes the first a decision rather than an
+accident.
+
+What it gives up is separating two equally good field matches by field length. A per-field count
+in the record is a format v6 and is not bought before something measures that it is needed.
+
+## 3. What the append cost, and the rule it leaves for version 6
+
+§7.7 drew a lesson — *append a section rather than changing one* — and §7.8 sharpened it: *a
+root-level file costs less than a segment section*. **Version 5 is the other end of that
+scale**, and the round is worth recording mostly for that.
+
+A `docs` record is a **unit**: it carries its own CRC seeded with its `DocID`, and it sits
+inside a section whose per-record offsets live in a second file. So appending one field to a
+record moved three things at once — every record's checksum, every `docoff` entry behind it,
+and both files' frame checksums.
+
+Reading an older version stayed free, exactly as §7.7 predicted: a v4 record is a v5 record with
+the count absent, and the version already decides whether to look for one. What was *not* free
+is anything that has to **produce** older bytes. The test helper that downgrades a generation is
+a backwards walk over a trailing varint for versions 3 and 4; for version 5 it is a full
+re-encode of `docs` and `docoff`, and it refuses outright a segment that actually carries a
+field rather than producing bytes that lie.
+
+Two smaller things the append broke, both caught by checks that already existed and neither by
+a test written for this round:
+
+- **`checkTokenizer` compared `Text`'s tokens against a length that now counts fields.** Every
+  corpus using fields would have been refused at `Open` with `ErrTokenizerMismatch`, under the
+  right tokenizer. The fix is that the rule about what a document's terms are lives in **one**
+  function, `tokenizeDoc`, which `Add`, `Update`, `replacePending` and this check all reach.
+- **`cmd/weft-eval`'s own copy of the record layout drifted by one byte per record**, and its
+  witness — the sum of derived record sizes against the file size — refused to print rather than
+  publishing working-set figures that were wrong by an unknown amount. That guard was written in
+  milestone 3b for exactly this and this is the first time it has fired.
+
+**The rule this leaves: append to a section, not to a record, unless the field belongs to the
+record's identity.** A field's text does belong to it, which is why this was still the right
+trade. A corpus-derived statistic would not be.
+
+## 4. `Update` was the one place a second copy of the rule would have been silent
+
+`replacePending` decides which postings to drop by re-tokenizing the **old** document. A walk of
+its `Text` alone leaves every field posting behind — so the document keeps answering a title
+query for a title it no longer has, with the record right and the posting stale, which no check
+that reads the record can see.
+
+That call site reads the tokenizing rule backwards, and it is the one a second copy would have
+forgotten. `TestUpdateDropsTheOldFieldsPostings` pins it, including the case where the field is
+removed entirely.
+
+## 5. Carried forward
+
+1. **Per-field length is unbought and its cost is stated rather than measured.** §2 argues B=0
+   from the shape of the failure, not from an nDCG number. Nothing has measured how much a
+   properly normalized field match would be worth, and the corpus that could is the one
+   milestone 15 also could not run.
+2. **The field separator is not checked on the token side.** A field's terms are
+   `name + NUL + token`, and nothing verifies that a *token* holds no NUL. The default tokenizer
+   cannot produce one; a caller-supplied one could, and such a token could collide with some
+   field's term and share its posting list. Checking it is a byte scan of every token of every
+   document. FORMAT §8 records it.
+3. **A field costs the document its tokens twice if the caller wants the word findable both
+   ways**, and nothing warns about that. It is arithmetic a caller can do, and a warning would
+   have to guess at intent.
+4. **`pkg/query` does not know about fields.** `Glob` matches against raw terms, so
+   `Glob(ix, "title\x00go*")` works and reads badly; there is no `query.Field` helper. It is a
+   thin wrapper over `FieldTerm` and is worth writing alongside the query syntax rather than
+   before it.
+5. **`Document` is now 128 bytes and gocritic's `rangeValCopy` default is 128.** The threshold
+   was raised to 192 with the reason named in `.golangci.yaml` rather than nineteen loops being
+   rewritten to index. The next field on `Document` crosses it again, and that is the point of
+   leaving the check on.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 21 — The sort nobody had measured
+
+[Milestone 17](#milestone-17--the-floor-under-every-query-found-and-removed) removed
+the per-query allocation floor and left the expensive query — a term held by every document —
+at 5.87 ms, unchanged. This round profiled that query instead of reasoning about it, and found
+the cost somewhere neither the code comments nor the earlier findings had put it.
+
+## 1. What the profile said, against what the notes predicted
+
+`scorer/text` carries a `ponytail:` note, standing since milestone 3, saying `Index.DocLen` takes
+the index-wide read lock once per posting and that this gets *worse* as cores are added. A term
+held by 50,000 documents is 50,000 lock acquisitions, so that was the obvious suspect and
+[milestone 17 §6](#milestone-17--the-floor-under-every-query-found-and-removed)
+carried it forward as the next thing to measure.
+
+The profile puts `DocLen` at **2.4%**. What it puts at the top, discounting the collector and
+the scheduler, is `slices.SortFunc`, its comparator, and `insertionSortCmpFunc` — `engine.TopK`,
+together about 13% of *sampled* time and, once the idle samples are discounted, most of the real
+work.
+
+`TopK` also carried a `ponytail:` note, and that one named its own trigger exactly:
+
+> full sort, O(n log n). A bounded container/heap is O(n log k) and worth it once a scorer
+> produces candidate sets far larger than k — none does in milestone 1
+
+`scorer/text` emits one candidate per matching document. The condition had been true since the
+corpus got large and nobody had gone back to read the note.
+
+## 2. What it is now
+
+A k-sized heap ordered so its **root is the worst** of the best k found so far, which is the
+inversion that makes bounded selection work: a heap with the best at the root answers "what is
+the best so far", which nothing needs, where selection needs "what is the first thing to throw
+away". Every remaining candidate is compared against the root once and discarded unless it beats
+it. That is n comparisons plus a sift per survivor against n·log₂n for the sort — on the query
+above, roughly 50 thousand against 780 thousand.
+
+The heap is `cands[:k]` itself, so this still sorts in place, still returns a prefix of the
+input, and allocates nothing. `k >= n` keeps the full sort, because there is nothing to select;
+that is the path `pkg/query`'s scorers take, which return every match rather than truncating.
+
+The note also warned against buying it before the cursor interface was settled, on the grounds
+that early termination maintains a threshold rather than a heap. That reading was wrong and is
+worth correcting rather than quietly stepping around: block-max WAND maintains a top-k heap
+*and* uses its minimum as the threshold. The heap is the thing WAND wants, not a detour from it.
+
+## 3. Measured
+
+`BenchmarkTopK`, 50,000 candidates, darwin/arm64, Apple M4. The `k=n` row is the unchanged full
+sort and is what the others are bought against.
+
+| k | ns/op | allocs |
+| --- | --- | --- |
+| 10 | **167,777** | 0 |
+| 100 | **130,180** | 0 |
+| 1000 | 446,699 | 0 |
+| 50000 (`k=n`) | 3,955,998 | 0 |
+
+**23.6× at k=10.** The figure includes an 800 KB copy of the input per iteration, so the
+selection itself is faster than the ratio says.
+
+End to end, `BenchmarkCandidates` on 50,000 committed documents, against milestone 17's numbers:
+
+| Query | ns before | ns after |
+| --- | --- | --- |
+| a term in every document | 5,870,612 | **2,111,504** |
+| three terms, one in every document | 5,841,230 | **2,109,801** |
+| a term in one document in fifty | 84,655 | **35,465** |
+| a term in three documents | 982 | 858 |
+| a term no document holds | 151 | 120 |
+
+**2.78× on the expensive query**, which means the sort was around 64% of what that query did —
+five times what the sampled profile suggested, because half the samples were the collector and
+the scheduler rather than the query.
+
+## 4. Why this is a substitution and not a change
+
+The two paths return the same answer, and the argument is short enough to check: the comparator
+is a **total order** — score descending, then DocID ascending, and no two candidates name one
+document — so "the best k" is a unique *set* and sorting that set gives a unique *sequence*.
+Selection cannot pick a different ten.
+
+That argument is worth nothing without the test, because the failure it protects against is
+invisible downstream. A comparator inversion or an off-by-one in the sift returns a ranking that
+is ordered, is the right length, and is missing a document; fusion consumes ranks and cannot
+know what was left out. `TestTopKSelectsExactlyWhatSortingWouldHaveChosen` runs both paths over
+every n and k that touches a boundary and demands they agree exactly, and
+`TestTopKAgreesWithSortingOnTies` does the case random scores never generate — every score
+equal, so the DocID tiebreak decides the whole answer.
+
+`internal/eval`'s BM25 and nDCG reference tests are unmoved, which is the independent statement
+that no published number changed.
+
+## 5. Carried forward
+
+1. **`DocLen`'s lock is still there and is still unmeasured under concurrency.** 2.4% of a
+   single-threaded profile is not the claim the ponytail note makes — it says the cost grows
+   with cores. That needs a concurrent benchmark, not a sequential one, and this round did not
+   write it.
+2. **Block-max WAND is now the next lever and is unblocked.** The metadata has been on disk
+   since version 1 ([D-001](DECISIONS.md)), nothing reads it, and §2 corrects the note that
+   argued for waiting. What it needs is a block-level cursor on `Index`, which is an API
+   question rather than a format one.
+3. **Neither this nor milestone 17 has been measured on the ladder.** Both are Go microbenchmarks
+   on one machine. Whether the arrival rate at which p50 goes from 39 ms to 1.27 s has moved is
+   still unrun, and is now owed by two rounds rather than one.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 22 — Measured against bleve, and the gap that is left is not time
+
+The README has carried one comparison against bleve since milestone 5: **p99 108.193 ms, 1.88×
+bleve v2.6.0 against a 10× bar.** [Milestone 7](#milestone-7--a-baseline-nobody-has-to-qualify)
+then showed the load point that figure came from is not reproducible, and
+[milestone 14](#milestone-14--the-probe-passed-the-ladder-ran-twice-and-a-closed-lid-discarded-both)
+recorded a third consecutive void ladder. Meanwhile
+[17](#milestone-17--the-floor-under-every-query-found-and-removed) and
+[21](#milestone-21--the-sort-nobody-had-measured) changed the query path twice, by 2.78× on the
+expensive query, and **neither was ever compared against the engine weft is supposed to be in
+the same class as.**
+
+This round asks the smaller question the ladder cannot be waited on for: for one query,
+sequentially, how much work does each engine do? `make bench-head` is that, in the `bench`
+module beside the ladder, on a corpus it generates rather than one that must be downloaded.
+
+## 1. The result
+
+50,000 documents, one BM25 query, top 10, darwin/arm64, Apple M4. `common` is a term in every
+document, `mid` in one in fifty, `rare` in three, `absent` in none.
+
+| Query | weft ns | bleve ns | weft B/op | bleve B/op |
+| --- | --- | --- | --- | --- |
+| `absent` | **645** | 5,934 | **72** | 10,525 |
+| `rare` | **2,102** | 5,244 | 7,289 | 11,703 |
+| `mid` | **44,608** | 63,919 | 70,979 | 17,694 |
+| `common` | **2,139,639** | 2,914,216 | 2,819,333 | **18,062** |
+| `mixed` | **2,118,154** | 3,204,713 | 2,838,586 | **31,863** |
+
+**weft is faster than bleve on every shape** — 9.2× on a query matching nothing, 1.36× on the
+most expensive one. That is not a claim milestone 5 could have made and it is not a claim this
+project has made before.
+
+## 2. What that number is not
+
+It is one query at a time on one machine. It is **not a tail**, not a throughput figure, and not
+a replacement for the ladder, which measures p99 under open-loop load against a prepared
+TREC-COVID index. `108.193 ms` and its two caveats stand exactly as
+[milestone 7](#milestone-7--a-baseline-nobody-has-to-qualify) left them.
+
+Nor is it a quality comparison, and the reason is in the harness rather than in the result:
+bleve stems and removes stopwords through its standard analyzer where weft's default tokenizer
+does neither, so **the two are not searching the same term space**. No nDCG figure may be
+derived from this benchmark. Each engine is answering its own query correctly and they are not
+the same query.
+
+## 3. The gap that is left, which the time column hides
+
+Read the two right-hand columns. On the expensive query weft allocates **2,819,333 bytes against
+bleve's 18,062** — **156×** — and on the mixed query 89×. weft wins on time and loses on memory
+by two orders of magnitude.
+
+That is not a curiosity. It is the same quantity [milestone 5
+§3.2](#milestone-5--performance) named as the throughput wall — *live heap under concurrency* —
+measured directly for the first time and against something other than weft's own past. It is
+also the reason the two engines behave differently under load rather than at rest: a sequential
+benchmark hands the collector the whole gap between queries, and a concurrent one does not.
+
+Where weft's 2.8 MB goes, on the `common` query:
+
+| Structure | Bytes | Why it is corpus-sized |
+| --- | --- | --- |
+| the BM25 accumulator | ~1.2 MB | one entry per matching document |
+| the posting buffer | ~800 KB | the term's whole list, materialised |
+| the candidate slice | ~800 KB | one candidate per accumulator entry |
+
+All three are consequences of one decision: weft scores **term-at-a-time**, accumulating every
+matching document before ranking any of them. bleve scores **document-at-a-time** through
+cursors with a k-sized heap, so it holds the frontier and nothing else.
+
+[Milestone 17](#milestone-17--the-floor-under-every-query-found-and-removed) removed the part
+of the accumulator that did not depend on the query, and
+[21](#milestone-21--the-sort-nobody-had-measured) stopped the candidate slice being *sorted* —
+but neither could stop either from being *allocated*, because term-at-a-time requires them.
+
+## 4. What this licenses, and what it changes about the plan
+
+**It licenses the statement that weft's per-query latency is not behind bleve's**, on one
+machine, on this corpus, for one BM25 query at a time. That is the narrowest true version of
+the claim and it is the one the README now carries.
+
+**It changes what block-max WAND is for.** The reason to build it has been recorded since
+[D-001](DECISIONS.md) as early termination — a latency optimisation. §3 says that is the smaller
+half. Document-at-a-time traversal removes the accumulator and the candidate slice outright, so
+WAND is primarily how the 156× becomes something near 1×, and only incidentally how a query gets
+faster. A round that built it for speed and measured only speed would have reported a modest win
+and missed the point.
+
+## 5. Carried forward
+
+1. **Document-at-a-time is the next round and §3 is its brief.** It needs a block-level cursor on
+   `Index`, which is an API question rather than a format one — the metadata has been on disk
+   since version 1 and nothing reads it.
+2. **The `mid` row is the one to watch.** weft already allocates 4× bleve there on a query that
+   touches a fiftieth of the corpus, so the gap is not only about the worst case.
+3. **The analyzer difference is unquantified.** weft indexes more distinct terms than bleve does
+   for the same text, which affects both engines' posting lists and neither engine's correctness.
+   Whether it flatters or penalises weft here is not known, and the honest response is that this
+   is a cost comparison and not a quality one.
+4. **The ladder is still owed by three rounds.** This does not discharge it. What it does is make
+   the debt smaller: a change to the query path can now be checked against bleve in under a
+   minute, so the ladder is needed for the tail rather than for every decision.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 23 — Document-at-a-time, and the 156× that became 1.8×
+
+[Milestone 22](#milestone-22--measured-against-bleve-and-the-gap-that-is-left-is-not-time)
+measured weft against bleve and found weft faster on every query shape and allocating **156×
+more** on the widest — 2.82 MB against 18 KB. It named the cause precisely: weft scored
+term-at-a-time, so a query held an accumulator, a posting buffer and a candidate slice, and all
+three were sized by the corpus rather than by the answer. This round removes all three.
+
+## 1. The result
+
+`make bench-head`, 50,000 documents, one BM25 query, top 10, darwin/arm64, Apple M4.
+
+| Query | weft before | weft after | bleve |
+| --- | --- | --- | --- |
+| `absent` | 645 ns / 72 B | **295 ns / 152 B** | 7,198 ns / 10,524 B |
+| `rare` | 2,102 ns / 7,289 B | **911 ns / 2,732 B** | 4,341 ns / 11,704 B |
+| `mid` | 44,608 ns / 70,979 B | **21,212 ns / 3,682 B** | 64,925 ns / 17,694 B |
+| `common` | 2,139,639 ns / 2,819,333 B | **944,509 ns / 32,337 B** | 2,902,909 ns / 18,062 B |
+| `mixed` | 2,118,154 ns / 2,838,586 B | **1,008,872 ns / 37,721 B** | 3,179,371 ns / 31,773 B |
+
+On the widest query: **87× less memory and 2.3× faster than before**, and against bleve **3.1×
+faster at 1.8× the memory** where it was 1.36× faster at 156×. On three of the five shapes weft
+now allocates *less* than bleve — 4.8× less on a term in a fiftieth of the corpus, 69× less on
+one no document holds.
+
+The time improved as well as the memory, which was not the point and is worth explaining rather
+than claiming: a map write per posting and a slice append per matching document are not free,
+and neither happens now.
+
+## 2. The middle version that was tried and rejected
+
+Document-at-a-time removes the accumulator and the candidate slice by construction: a document's
+score is complete the moment every cursor has passed it, so it is offered to a k-sized collector
+and forgotten. The obvious way to write it is to fetch each term's posting list with `Lookup` and
+walk the lists in step.
+
+**That is worse than what it replaces for a query whose terms are all common.** Term-at-a-time
+walked one term to exhaustion and reused a single buffer, so it held the *longest* list;
+document-at-a-time cannot, because a document may be reached by any term, so it holds the *sum*.
+Three common terms is three lists where the old path held one plus an accumulator.
+
+`TestScoringDoesNotAllocateAPostingListPerTerm` caught it — a test written for milestone 8 to
+pin exactly the invariant this was trading away, which is what a test written about a property
+rather than about an implementation is for.
+
+So the lists are not held at all. `engine.BlockCursor` hands one block at a time, and the cost
+becomes `blockSize` postings per term whatever the corpus holds.
+
+## 3. What a cursor cannot be, and what that forced
+
+A cursor that kept a `*segment` across a lock release would be a **segmentation fault** rather
+than an error: `Close` unmaps, and this package promises never to panic. So the cursor holds
+numbers only — a segment's base DocID, a byte offset, a block index — and re-resolves the
+segment under a fresh read lock on every block.
+
+Three things follow, and each is a decision rather than a consequence:
+
+- **A segment can go away mid-walk.** A merge replaces the oldest run while a cursor is inside
+  it. The cursor stops and says so through `Err`, because `Next` returning nil cannot carry the
+  difference between "the term ended" and "the term could not be read" — and a short posting
+  list is not a smaller answer, it is a wrong one.
+- **One read lock per block**, about four hundred for a term held by fifty thousand documents,
+  against one for `Lookup`. Against the corpus walk it replaces, that is not the term that
+  matters.
+- **`decodeBlock` had to be extracted** so the eager reader and the cursor are two *walkers* and
+  not two decoders. Two implementations of a format is how a format drifts, and
+  `TestACursorAgreesWithLookup` checks the two walkers against each other over a corpus that
+  crosses block boundaries, a segment boundary and the pending segment.
+
+## 4. Two bugs this nearly shipped, both found by asking the same question twice
+
+**The cursor did not filter tombstones.** A deleted document keeps its posting, its length and
+its record — only the index knows it is gone — so a cursor without the filter puts deleted
+documents in front of every scorer built on it and nothing downstream can tell. The deletion
+tests caught it. Every other read path takes tombstones off inside the read that decoded them,
+and this one now does too.
+
+**A block of nothing but tombstones ended the walk.** Once the filter existed, a block whose
+every posting was deleted decoded to an empty slice — and empty is what a caller reads as "this
+term is finished". The corpus that would show it is one where a whole block is deleted
+consecutively, which no existing test built.
+`TestACursorSurvivesAWholeBlockOfTombstones` is that corpus.
+
+**And one that was caught by writing the changelog.** The first version used
+`Index.PostingBound` for IDF, because a cursor cannot say how long it is without being walked
+and IDF must be known before the first posting is scored. A bound is not a frequency: rounded up
+to a block boundary and not subtracting tombstones, it drifts every score in the corpus by an
+amount that depends on where the block boundaries fell. `PostingBound` is now `PostingCount`,
+exact and tombstone-filtered, and it costs one counting pass per term with postings decoded and
+never collected. `TestRestoredIndexRanksIdentically` is what would have caught it — a pending
+index and the same index committed and reopened must rank the same, and only the second has
+blocks.
+
+## 5. What is claimed
+
+**Per-query cost parity with bleve, on one machine, on this corpus, for one BM25 query at a
+time — in both time and allocation.** That is the narrowest true version and it is the one the
+README carries. Milestone 22 §2 says what this benchmark is not, and all of it still applies:
+not a tail, not a throughput figure, not a quality comparison, and no substitute for the ladder.
+
+**No score or ranking changed.** `internal/eval`'s match to `rank_bm25` at 4.44e-16 and to
+`pytrec_eval`'s `ndcg_cut_10` are unmoved, and `TestRestoredIndexRanksIdentically` holds across
+the commit boundary where the block structure appears.
+
+## 6. Carried forward
+
+1. **Block-max WAND is now cheap to add and has not been added.** The cursor is the structure it
+   needs, the metadata has been on disk since version 1, and what is missing is a `Peek` that
+   returns a block's summary without decoding it. What it would buy is skipping blocks whose
+   best possible score cannot reach the k-th best so far — a *time* win, where this round was a
+   memory one.
+2. **The remaining 1.8× on the widest query is 1,321 allocations.** Most of what is left is the
+   per-block decode path rather than anything corpus-sized, so the next figure to move is a
+   count, not a size.
+3. **`DocLen`'s lock is now paid once per document rather than once per posting.** The
+   `ponytail:` note that stood on it since milestone 3 asked for a batched read;
+   document-at-a-time answered the same question by needing the length once. It is still a lock
+   per document and still unmeasured under concurrency.
+4. **The ladder is owed by four rounds.** Every figure here is sequential.

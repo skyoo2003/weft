@@ -1,0 +1,25 @@
+kind: Added
+body: '**Numeric and date ranges, fuzzy matching, and field scoping for every
+  pattern query.** `query.Range(ix, field, lo, hi)` selects documents whose field
+  holds a term in an inclusive byte range, either bound empty for unbounded. There
+  is no numeric index and none was added: `query.EncodeInt` returns sixteen hex
+  digits with the sign bit flipped, so the string sorts exactly as the number does
+  — fixed width removes the short-string problem, the flip puts negatives below
+  positives, and hex survives the default tokenizer where punctuation would be
+  split. `query.EncodeTime` is that over `UnixNano` (valid 1678–2262). The caller
+  indexes with it and queries with it; a value encoded one way and queried another
+  matches nothing, which is why these are named functions rather than advice.
+  **The cost scales with how many distinct values a field holds, not with how many
+  documents hold them** — a field of a thousand price points is cheap however
+  large the corpus. `query.Fuzzy(ix, field, term, dist)` is Levenshtein within
+  `MaxEditDistance` (2), with a length filter in front of the quadratic part and
+  an early exit once a row exceeds the budget; **bytes, not runes**, so it is
+  accurate for Latin text and poor for CJK, and it says so. And `Glob`, `Range`
+  and `Fuzzy` all take a **field** as their second argument — empty for
+  `Document.Text` — so a caller never has to know that a field''s terms are
+  spelled with a separator, which is the wart milestone 18 recorded as carried
+  forward. An inverted range and an out-of-range edit distance are both errors
+  rather than queries that quietly return nothing.'
+time: 2026-09-05T14:00:00.000000000+09:00
+custom:
+  Issue: 25

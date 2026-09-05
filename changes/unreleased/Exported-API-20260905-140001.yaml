@@ -1,0 +1,16 @@
+kind: Exported API
+body: '**`query.Glob` takes a field as its second argument**, so
+  `query.Glob(ix, "go*")` becomes `query.Glob(ix, "", "go*")` for Document.Text or
+  `query.Glob(ix, "title", "go*")` for a field. That is the one break, and it is
+  taken rather than wrapped: the alternative was a caller spelling
+  `engine.FieldTerm("title", "go") + "*"`, which reads badly and leaks the
+  separator into every call site. Added: `Range`, `Fuzzy`, `EncodeInt`,
+  `EncodeTime`, and the constant `MaxEditDistance`. `Glob`, `Range` and `Fuzzy`
+  now share one scoring implementation with three selection rules, so a stream
+  names its field — `"glob:title"`, `"range:price"`, `"fuzzy:author"` — the same
+  convention `scorer/text` uses. `public_api.txt` moves; `engine_api.txt` does
+  not, and the on-disk format is **v5, unchanged** — all of this reads the term
+  dictionary each segment already decodes at `Open`.'
+time: 2026-09-05T14:00:01.000000000+09:00
+custom:
+  Issue: 25

@@ -1,0 +1,21 @@
+kind: Exported API
+body: '`engine.Index.PostingBound(term) int` is added — an upper bound on how many
+  postings `Lookup` would return, read **without decoding any of them**. A term''s
+  postings entry begins with its block count and every block but the last holds
+  exactly the block size, so this is one varint per segment and the answer is tight
+  to within one block per segment. It exists so a caller can size a per-query
+  accumulator before it starts filling one; `scorer/text` is the first caller and
+  the Fixed entry beside this carries what it was worth. **A bound, not a count**,
+  and both halves of that matter: a bound below the truth is a map that grows
+  anyway, while a caller treating it as a document frequency would be reading a
+  number that does **not** subtract tombstones — a deleted document keeps its
+  posting and `Lookup` filters at read time. Zero means no segment claims the term
+  and nothing is pending for it. Nothing else about the value is promised. One
+  line of `pkg/engine/testdata/engine_api.txt`; `public_api.txt` does not move.
+  **Nothing already written stops compiling**, and the on-disk format is **v4,
+  unchanged** — the block count this reads has been written since version 1, and
+  `decodeTermPostings` already computed the same bound internally to size
+  `Lookup`''s slice.'
+time: 2026-09-05T12:00:01.000000000+09:00
+custom:
+  Issue: 23

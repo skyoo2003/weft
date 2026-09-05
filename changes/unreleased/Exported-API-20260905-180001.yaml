@@ -1,0 +1,23 @@
+kind: Exported API
+body: 'Two names are added for scorers that stream rather than accumulate.
+  `engine.BlockCursor`, from `Index.BlockCursor(term)`, walks one term''s postings
+  a block at a time with `Next(buf)` and `Err()` — Scanner-shaped, because `Next`
+  returning nil cannot carry the difference between "the term ended" and "the term
+  could not be read", and a short posting list is not a smaller answer but a wrong
+  one. It is **not a snapshot**: extents are read once and bytes per block under a
+  fresh lock, so a merge landing mid-walk is reported through `Err` rather than
+  silently truncating, and it holds no pointer into a mapping between calls, which
+  is what makes it safe at all. `engine.Collector`, from `NewCollector(k)`, keeps
+  the best k out of a stream in memory bounded by k — `TopK` is the same selection
+  with the stream already in a slice, and a slice that is never built cannot be
+  sized to the corpus. **`Index.PostingBound` is replaced by
+  `Index.PostingCount`**, which is exact and subtracts tombstones where the bound
+  did neither. That is a correction and not a rename: the bound was added to size
+  an accumulator, document-at-a-time has no accumulator, and the number a cursor
+  *does* need is the collection frequency BM25 divides by — an IDF computed from a
+  bound drifts every score in the corpus by an amount depending on where the block
+  boundaries fell. It costs one counting pass per term, with postings decoded and
+  never collected. Format **v5, unchanged**.'
+time: 2026-09-05T18:00:01.000000000+09:00
+custom:
+  Issue: 29

@@ -783,6 +783,89 @@ func downgradeSection(t *testing.T, path string, v byte) uint64 {
 	return dropped
 }
 
+// stripFieldBlocks rewrites a segment's docs section as the bytes a version 4
+// writer produced, and rewrites docoff to match.
+//
+// This is the one downgrade that is not a backwards walk over a trailing
+// varint, and the reason is the reason FORMAT.md §7.7 gives for preferring an
+// appended *section*: version 5 appended to a **record**, once per document, and
+// every record is a unit with its own seeded checksum inside a section whose
+// offsets are recorded in a second file. So removing the block moves every
+// record behind it and invalidates three things at once — the record's own
+// checksum, docoff's entry for it, and both files' frame checksums.
+//
+// It refuses a segment that actually carries a field rather than producing bytes
+// that lie. That is the rule downgradeToV2 already keeps about tombstones: a
+// directory holding something an older reader could not express must not be
+// simulated into one that claims it does not.
+//
+// The alternative to all of this was a fixture, and a fixture is a second copy
+// of the format somebody has to keep in step.
+func stripFieldBlocks(t *testing.T, segDir string) {
+	t.Helper()
+	docsPath := filepath.Join(segDir, docsFile)
+	docs, err := os.ReadFile(docsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offPath := filepath.Join(segDir, docoffFile)
+	offs, err := os.ReadFile(offPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// docoff is a uvarint count then fixed 16-byte entries, so entry i's offset
+	// is arithmetic. It is what says where each record begins, which is what lets
+	// this walk records without decoding their contents.
+	n, hdr := binary.Uvarint(offs[segHeaderLen:])
+	if hdr <= 0 {
+		t.Fatalf("%s: unreadable document count", docoffFile)
+	}
+	entries := segHeaderLen + hdr
+	starts := make([]int, n+1)
+	for i := range int(n) {
+		// Absolute into the file, not into the payload: recordAt is what subtracts
+		// segHeaderLen, because it works on the frame-stripped section and this
+		// works on the whole file.
+		starts[i] = int(binary.LittleEndian.Uint64(offs[entries+i*16:]))
+	}
+	starts[n] = len(docs) - crc32.Size
+
+	out := append([]byte(nil), docs[:starts[0]]...)
+	for i := range int(n) {
+		rec := docs[starts[i]:starts[i+1]]
+		// The field count is the last byte before the record's four-byte
+		// checksum. Zero encodes as one byte; anything else means this segment
+		// holds a field and must not be downgraded.
+		body := rec[:len(rec)-crc32.Size]
+		if len(body) == 0 || body[len(body)-1] != 0 {
+			t.Fatalf("document %d carries fields; a version 4 reader could not express them", i)
+		}
+		body = body[:len(body)-1]
+
+		// The offset moves and the checksum is recomputed independently: a
+		// record's seed is its DocID and not its position, so neither implies the
+		// other.
+		binary.LittleEndian.PutUint64(offs[entries+i*16:], uint64(len(out)))
+
+		var seed [8]byte
+		binary.LittleEndian.PutUint64(seed[:], uint64(i))
+		sum := crc32.Update(crc32.Update(0, segCRC, seed[:]), segCRC, body)
+		out = append(out, body...)
+		out = binary.LittleEndian.AppendUint32(out, sum)
+	}
+	out = append(out, make([]byte, crc32.Size)...)
+	binary.LittleEndian.PutUint32(out[len(out)-crc32.Size:], crc32.Checksum(out[:len(out)-crc32.Size], segCRC))
+	binary.LittleEndian.PutUint32(offs[len(offs)-crc32.Size:], crc32.Checksum(offs[:len(offs)-crc32.Size], segCRC))
+
+	if err := os.WriteFile(docsPath, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(offPath, offs, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOtherVersionsAreRefusedNotMisread(t *testing.T) {
 	dir, _ := commitTiny(t)
 	for _, path := range segmentFiles(t, dir) {

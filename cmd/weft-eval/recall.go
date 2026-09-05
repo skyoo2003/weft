@@ -410,6 +410,13 @@ func recordExtents(ix *engine.Index, path string) (extents, error) {
 			sz += strLen(len(l))
 		}
 		sz += vLen(d.Time.Unix()) + uvLen(uint64(d.Time.Nanosecond()))
+		// Format version 5's field block, appended after the timestamp. A
+		// document with no fields still carries the count, which is the one byte
+		// per record the witness below caught this derivation missing.
+		sz += uvLen(uint64(len(d.Fields)))
+		for _, f := range d.Fields {
+			sz += strLen(len(f.Name)) + strLen(len(f.Text))
+		}
 		sz += 4 // the record's own seeded checksum
 		e.off[i], e.size[i] = at, sz
 		at += sz

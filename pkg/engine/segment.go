@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -32,7 +33,24 @@ import (
 // stable across versions: a future reader can only reject what it cannot
 // parse if the version is always in the same place.
 const (
-	// formatVersion 4 is milestone 11's: version 3 plus a `dead-<gen>` file at
+	// formatVersion 5 is milestone 18's: version 4 with named fields appended to
+	// each `docs` record, after the timestamp and before the record's checksum.
+	// No section is added and none moves, so segSectionsFor hands v3, v4 and v5
+	// the same seven.
+	//
+	// It is the shape FORMAT.md section 7.7 called the cheap one — append rather
+	// than change — and a v4 record needs no branch of its own beyond the count
+	// it does not carry: a document written before fields existed has none. What
+	// it could not avoid is the bump itself, and that is the point rather than
+	// the price. A field's tokens are ordinary postings under FieldTerm and they
+	// count toward the document's stored length, so a build that predates fields
+	// would read a v5 segment, find frequencies it cannot account for against
+	// that length, and refuse it as corrupt — the one failure that must not be
+	// reported as damage. Stamping the frame with 5 makes such a build refuse the
+	// directory at the version check instead, which is a sentence a caller can
+	// act on.
+	//
+	// formatVersion 4 was milestone 11's: version 3 plus a `dead-<gen>` file at
 	// the index root, and one uvarint on `MANIFEST`. Nothing inside a segment
 	// moved, so segSectionsFor hands v3 and v4 the same seven sections.
 	//
@@ -50,7 +68,7 @@ const (
 	// reading all of them, so neither a DocID nor a Key could reach its document
 	// without decoding every document in front of it — no arrangement of a lazy
 	// reader fixes that, only different bytes do.
-	formatVersion = 4
+	formatVersion = 5
 
 	// minFormatVersion is the oldest version this build reads.
 	//
@@ -619,6 +637,16 @@ func encodeDocs(w *segWriter, src segSource) (offs, lens []int, keys []string) {
 		}
 		w.varint(d.Time.Unix())
 		w.uvarint(uint64(d.Time.Nanosecond()))
+		// Version 5's, appended after everything version 4 wrote and before the
+		// unit checksum, so a v4 record is a v5 record with this count absent
+		// rather than a different layout. The names are written in the caller's
+		// order — Document.Fields is a slice for exactly this reason, since a map
+		// would make one index produce two different segments.
+		w.uvarint(uint64(len(d.Fields)))
+		for _, f := range d.Fields {
+			w.str(f.Name)
+			w.str(f.Text)
+		}
 		w.endUnit()
 	}
 	return offs, lens, keys
@@ -810,6 +838,29 @@ func (r *segReader) skipStr(what string) (int, error) {
 	}
 	r.off += int(n)
 	return int(n), nil
+}
+
+// skipn advances past n bytes of fixed-width payload without reading them.
+//
+// A byte count rather than a field, because the vector is the only field wide
+// enough for this to matter and the only one whose extent is arithmetic rather
+// than a length prefix. On the evaluation corpus 69% of the docs section is
+// vectors, so a links walk that skipped only the strings would still fault in
+// every vector page it stepped over — 455 MB of a 626 MB file. Skipped this way
+// those pages are never touched.
+//
+// What it gives up is the non-finite check the materialising path runs per
+// component. That check exists to keep a NaN out of a score, and a mode that
+// returns no vector cannot put one anywhere: Index.Vector is what reads them and
+// it still checks every one. The bytes stay covered by the record's seeded
+// checksum, which is computed over the whole extent including what was skipped —
+// the same guarantee skipStr leaves on the text.
+func (r *segReader) skipn(what string, n int) error {
+	if n < 0 || n > len(r.b)-r.off {
+		return fmt.Errorf("%s: %s of %d bytes overruns the buffer: %w", r.name, what, n, ErrCorrupt)
+	}
+	r.off += n
+	return nil
 }
 
 func (r *segReader) str(what string) (string, error) {
@@ -1066,8 +1117,22 @@ func decodeMeta(r *segReader) (docCount, totalLen, vecDim, live int, err error) 
 // taken, a vector of a different width — is the walker's, which is the only
 // reason this returns rather than stores.
 func decodeDocRecord(r *segReader, i int) (Document, int, error) {
-	return decodeDocFields(r, i, false)
+	return decodeDocFields(r, i, wantAll)
 }
+
+// docPart says which of a record's fields a decode materialises.
+//
+// Every mode walks the whole record and verifies the same seeded checksum. What
+// differs is what is copied out of the mapping — and, for the vector, which
+// pages are touched in order to step over it. A mode is not a second decoder:
+// decodeDocFields is still the one place the record's layout is written down.
+type docPart uint8
+
+const (
+	wantAll    docPart = iota // every field — Index.Doc
+	wantVector                // the vector alone — Index.Vector
+	wantLinks                 // the links alone — Index.Neighbors
+)
 
 // decodeDocVector reads the same record and materialises only the vector.
 //
@@ -1079,18 +1144,32 @@ func decodeDocRecord(r *segReader, i int) (Document, int, error) {
 // candidates a query on the vector arm. Index.Vector carries the measurement and
 // says what it is not.
 func decodeDocVector(r *segReader, i int) ([]float32, error) {
-	d, _, err := decodeDocFields(r, i, true)
+	d, _, err := decodeDocFields(r, i, wantVector)
 	return d.Vector, err
+}
+
+// decodeDocLinks reads the same record and materialises only the link keys.
+//
+// It is decodeDocVector's mirror and exists for a larger version of the same
+// measurement. A traversal reads a document to find out where its edges go, and
+// on the evaluation corpus that record carries a 768-wide vector it will never
+// look at: 69% of the docs section, 455 MB of 626 MB. Index.Doc — which is what
+// scorer/graph's BFS calls once per node visited — materialises the key, the
+// text and all of it. This skips every one of them, so a traversal faults in the
+// pages holding link keys and nothing else.
+func decodeDocLinks(r *segReader, i int) ([]string, error) {
+	d, _, err := decodeDocFields(r, i, wantLinks)
+	return d.Links, err
 }
 
 // decodeDocFields is the one place the record's layout is written down. The mode
 // changes what is copied out of it and nothing about what is read or checked —
 // two decoders for one format is how a format drifts.
-func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error) {
+func decodeDocFields(r *segReader, i int, want docPart) (Document, int, error) {
 	start := r.off
 	var d Document
 	var err error
-	if vectorOnly {
+	if want != wantAll {
 		// The empty-key check survives the skip: its length is what says so, and
 		// the length is read either way.
 		n, kerr := r.skipStr("document key")
@@ -1108,7 +1187,7 @@ func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error
 			return Document{}, 0, fmt.Errorf("%s: document %d has an empty key, which Add refuses: %w", r.name, i, ErrCorrupt)
 		}
 	}
-	if vectorOnly {
+	if want != wantAll {
 		if _, err = r.skipStr("document text"); err != nil {
 			return Document{}, 0, err
 		}
@@ -1124,7 +1203,14 @@ func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error
 	if err != nil {
 		return Document{}, 0, err
 	}
-	if vn > 0 {
+	if vn > 0 && want == wantLinks {
+		// Stepped over four bytes at a time without reading any of them. vn is
+		// already bounded by the payload that remains, so the multiply cannot
+		// overflow the int it lands in. See skipn for what this gives up.
+		if err := r.skipn("vector", 4*vn); err != nil {
+			return Document{}, 0, err
+		}
+	} else if vn > 0 {
 		d.Vector = make([]float32, vn)
 		for j := range d.Vector {
 			bits, err := r.u32("vector component")
@@ -1143,7 +1229,7 @@ func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error
 	if err != nil {
 		return Document{}, 0, err
 	}
-	if ln > 0 && vectorOnly {
+	if ln > 0 && want == wantVector {
 		for range ln {
 			if _, err := r.skipStr("link key"); err != nil {
 				return Document{}, 0, err
@@ -1172,6 +1258,12 @@ func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error
 	}
 	d.Time = time.Unix(sec, int64(nsec)).UTC()
 
+	if r.version >= 5 {
+		if err := decodeDocFieldList(r, i, &d, want); err != nil {
+			return Document{}, 0, err
+		}
+	}
+
 	// Seeded with i, so this both proves the bytes are intact and proves the
 	// record is the one asked for. Reading document 2's record as document 1 —
 	// which is all a damaged docoff entry amounts to — fails here rather than
@@ -1180,6 +1272,78 @@ func decodeDocFields(r *segReader, i int, vectorOnly bool) (Document, int, error
 		return Document{}, 0, err
 	}
 	return d, dl, nil
+}
+
+// decodeDocFieldList reads version 5's field block and refuses the names Add
+// refuses.
+//
+// The three checks are not tidiness and they are not a second opinion about the
+// write path: a segment's bytes are a trust boundary, and every one of these
+// names a term space no lookup could reach. An empty name puts a field's tokens
+// where Text's live; a name holding the separator makes two different fields
+// produce one term; a repeated name merges two texts into one space with no way
+// to ask for either. A reader that accepted them would answer queries about
+// fields that do not exist, which is a plausible wrong answer rather than an
+// error. Add refuses all three, and a restored index must not hold what a live
+// one cannot.
+//
+// What it does **not** check is that the field's terms are actually in the
+// postings. That is the same rule decodePostings states for Text — nothing
+// re-tokenizes a record to compare it against the term dictionary, because a
+// segment records what was indexed and not what this build's tokenizer would
+// index today.
+//
+// In wantVector and wantLinks mode the names are still read, because a duplicate
+// or a malformed one is a fact about the record and not about what the caller
+// asked for; only the copying out is skipped.
+func decodeDocFieldList(r *segReader, i int, d *Document, want docPart) error {
+	// One field is at least two bytes on disk, so the payload that remains is
+	// the ceiling — the same discipline the link count uses.
+	n, err := r.intn("field count", len(r.b)-r.off)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	var seen map[string]struct{}
+	if n > 1 {
+		seen = make(map[string]struct{}, min(n, 1<<12))
+	}
+	if want == wantAll {
+		// Same ceiling as the link list and for the same reason: a field is two
+		// bytes on disk and a Field is two string headers in a slice.
+		d.Fields = make([]Field, 0, min(n, 1<<12))
+	}
+	for j := range n {
+		name, err := r.str("field name")
+		if err != nil {
+			return err
+		}
+		if name == "" || strings.Contains(name, fieldSep) {
+			return fmt.Errorf("%s: document %d field %d is named %q, which Add refuses: %w",
+				r.name, i, j, name, ErrCorrupt)
+		}
+		if seen != nil {
+			if _, dup := seen[name]; dup {
+				return fmt.Errorf("%s: document %d names field %q twice, which Add refuses: %w",
+					r.name, i, name, ErrCorrupt)
+			}
+			seen[name] = struct{}{}
+		}
+		if want != wantAll {
+			if _, err := r.skipStr("field text"); err != nil {
+				return err
+			}
+			continue
+		}
+		text, err := r.str("field text")
+		if err != nil {
+			return err
+		}
+		d.Fields = append(d.Fields, Field{Name: name, Text: text})
+	}
+	return nil
 }
 
 // decodeTermIndex reads the whole terms section into a term -> postings offset
@@ -1268,6 +1432,123 @@ func decodeTermIndex(terms *segReader, postEnd int) (map[string]termSpan, error)
 // the next term's entry is the witness the count itself does not carry.
 type termSpan struct{ off, end int }
 
+// decodeBlock reads one posting block from wherever r is positioned, yields its
+// postings, and re-derives every field the block records about itself.
+//
+// It is a function rather than the body of decodeTermPostings' loop because two
+// readers walk blocks and they must not be two decoders: the eager one reads a
+// term's blocks in sequence, and Index.BlockCursor reads one block at a time
+// from a remembered offset, so that a document-at-a-time scorer holds one block
+// per query term instead of one posting list per query term. Two implementations
+// of a format is how a format drifts, and this one carries every check.
+//
+// prev is the last DocID decoded, carried across blocks: deltas restart at each
+// block boundary — that is what makes a block decodable on its own — but the
+// *ascending* rule still spans them, and a block whose first id does not exceed
+// the previous block's last is a delta chain that was continued instead of
+// restarted. A cursor entering a term at block b passes the maxDocID of block
+// b-1, which is the same number by a different route.
+//
+// nblocks is needed for one rule and one only: every block but the last holds
+// exactly blockSize postings.
+func decodeBlock(post *segReader, term string, b, nblocks, docCount int, offs docOffsets, prev *uint64, yield func(Posting)) (int, error) {
+	blockStart := post.off
+	cnt, err := post.intn("block posting count", blockSize)
+	if err != nil {
+		return 0, err
+	}
+	if cnt == 0 || (b < nblocks-1 && cnt != blockSize) {
+		return 0, fmt.Errorf("%s: term %q block %d holds %d postings: %w", post.name, term, b, cnt, ErrCorrupt)
+	}
+	maxDoc, err := post.uvarint("block maxDocID")
+	if err != nil {
+		return 0, err
+	}
+	maxTF, err := post.intn("block maxTF", maxInt)
+	if err != nil {
+		return 0, err
+	}
+	// Re-derived like the two beside it, not read and dropped. D-001 wrote
+	// these three fields before any query used them, and the standing hazard
+	// of that trade is a field that rots unread — the answer being that every
+	// decoder rebuilds them from the block's own contents. This one was the
+	// exception: advancing the reader past it was all decoding took, so a
+	// block whose minimum disagreed with the documents its postings name
+	// stayed wrong through every Lookup and Merge that touched it. docoff
+	// makes the token count arithmetic, and the frequency bound below reads
+	// it anyway.
+	minDL, err := post.intn("block minDocLen", maxInt)
+	if err != nil {
+		return 0, err
+	}
+
+	gotMaxTF, gotMinDL := 0, maxInt
+	for j := range cnt {
+		delta, err := post.uvarint("posting docID delta")
+		if err != nil {
+			return 0, err
+		}
+		var id uint64
+		switch {
+		case j > 0:
+			if delta == 0 {
+				return 0, fmt.Errorf("%s: term %q repeats a docID; postings are strictly ascending: %w", post.name, term, ErrCorrupt)
+			}
+			if delta > math.MaxUint64-*prev {
+				return 0, fmt.Errorf("%s: term %q docID delta %d overflows past %d: %w", post.name, term, delta, *prev, ErrCorrupt)
+			}
+			id = *prev + delta
+		case b == 0:
+			id = delta
+		default:
+			id = delta
+			if id <= *prev {
+				return 0, fmt.Errorf("%s: term %q block %d starts at document %d, block %d ended at %d; postings are strictly ascending: %w",
+					post.name, term, b, id, b-1, *prev, ErrCorrupt)
+			}
+		}
+		if id >= uint64(docCount) {
+			return 0, fmt.Errorf("%s: term %q names document %d of a %d-document segment: %w", post.name, term, id, docCount, ErrCorrupt)
+		}
+		*prev = id
+		freq, err := post.intn("posting frequency", maxInt)
+		if err != nil {
+			return 0, err
+		}
+		if freq == 0 {
+			return 0, fmt.Errorf("%s: term %q in document %d has frequency 0, which Add never writes: %w", post.name, term, id, ErrCorrupt)
+		}
+		// Every occurrence of this term was one of the document's tokens, so
+		// its length is the ceiling. Read from docoff, which is arithmetic
+		// on a mapped table — the record itself stays on disk.
+		dl := offs.docLen(DocID(id))
+		if freq > dl {
+			return 0, fmt.Errorf("%s: term %q occurs %d times in document %d, which holds %d tokens: %w",
+				post.name, term, freq, id, dl, ErrCorrupt)
+		}
+		yield(Posting{Doc: DocID(id), Freq: freq})
+		gotMaxTF = max(gotMaxTF, freq)
+		gotMinDL = min(gotMinDL, dl)
+	}
+	// prev is the last posting this block decoded — every iteration above
+	// assigns it and a block holds at least one posting. The accumulated
+	// slice this used to index into never said anything else.
+	if *prev != maxDoc {
+		return 0, fmt.Errorf("%s: term %q block %d records maxDocID %d, contents end at %d: %w", post.name, term, b, maxDoc, *prev, ErrCorrupt)
+	}
+	if gotMaxTF != maxTF {
+		return 0, fmt.Errorf("%s: term %q block %d records maxTF %d, contents say %d: %w", post.name, term, b, maxTF, gotMaxTF, ErrCorrupt)
+	}
+	if gotMinDL != minDL {
+		return 0, fmt.Errorf("%s: term %q block %d records minDocLen %d, contents say %d: %w", post.name, term, b, minDL, gotMinDL, ErrCorrupt)
+	}
+	if err := post.unit(fmt.Sprintf("term %q block %d", term, b), blockStart, uint64(segHeaderLen+blockStart)); err != nil {
+		return 0, err
+	}
+
+	return cnt, nil
+}
+
 // decodeTermPostings reads one term's postings from wherever r is positioned.
 //
 // It is decodePostings' inner loop with the corpus-wide checks left out, and
@@ -1313,100 +1594,11 @@ func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, 
 	n := 0
 	prev := uint64(0)
 	for b := range nblocks {
-		blockStart := post.off
-		cnt, err := post.intn("block posting count", blockSize)
+		cnt, err := decodeBlock(post, term, b, nblocks, docCount, offs, &prev, yield)
 		if err != nil {
 			return 0, err
 		}
-		if cnt == 0 || (b < nblocks-1 && cnt != blockSize) {
-			return 0, fmt.Errorf("%s: term %q block %d holds %d postings: %w", post.name, term, b, cnt, ErrCorrupt)
-		}
-		maxDoc, err := post.uvarint("block maxDocID")
-		if err != nil {
-			return 0, err
-		}
-		maxTF, err := post.intn("block maxTF", maxInt)
-		if err != nil {
-			return 0, err
-		}
-		// Re-derived like the two beside it, not read and dropped. D-001 wrote
-		// these three fields before any query used them, and the standing hazard
-		// of that trade is a field that rots unread — the answer being that every
-		// decoder rebuilds them from the block's own contents. This one was the
-		// exception: advancing the reader past it was all decoding took, so a
-		// block whose minimum disagreed with the documents its postings name
-		// stayed wrong through every Lookup and Merge that touched it. docoff
-		// makes the token count arithmetic, and the frequency bound below reads
-		// it anyway.
-		minDL, err := post.intn("block minDocLen", maxInt)
-		if err != nil {
-			return 0, err
-		}
-
-		gotMaxTF, gotMinDL := 0, maxInt
-		for j := range cnt {
-			delta, err := post.uvarint("posting docID delta")
-			if err != nil {
-				return 0, err
-			}
-			var id uint64
-			switch {
-			case j > 0:
-				if delta == 0 {
-					return 0, fmt.Errorf("%s: term %q repeats a docID; postings are strictly ascending: %w", post.name, term, ErrCorrupt)
-				}
-				if delta > math.MaxUint64-prev {
-					return 0, fmt.Errorf("%s: term %q docID delta %d overflows past %d: %w", post.name, term, delta, prev, ErrCorrupt)
-				}
-				id = prev + delta
-			case b == 0:
-				id = delta
-			default:
-				id = delta
-				if id <= prev {
-					return 0, fmt.Errorf("%s: term %q block %d starts at document %d, block %d ended at %d; postings are strictly ascending: %w",
-						post.name, term, b, id, b-1, prev, ErrCorrupt)
-				}
-			}
-			if id >= uint64(docCount) {
-				return 0, fmt.Errorf("%s: term %q names document %d of a %d-document segment: %w", post.name, term, id, docCount, ErrCorrupt)
-			}
-			prev = id
-			freq, err := post.intn("posting frequency", maxInt)
-			if err != nil {
-				return 0, err
-			}
-			if freq == 0 {
-				return 0, fmt.Errorf("%s: term %q in document %d has frequency 0, which Add never writes: %w", post.name, term, id, ErrCorrupt)
-			}
-			// Every occurrence of this term was one of the document's tokens, so
-			// its length is the ceiling. Read from docoff, which is arithmetic
-			// on a mapped table — the record itself stays on disk.
-			dl := offs.docLen(DocID(id))
-			if freq > dl {
-				return 0, fmt.Errorf("%s: term %q occurs %d times in document %d, which holds %d tokens: %w",
-					post.name, term, freq, id, dl, ErrCorrupt)
-			}
-			yield(Posting{Doc: DocID(id), Freq: freq})
-			n++
-			gotMaxTF = max(gotMaxTF, freq)
-			gotMinDL = min(gotMinDL, dl)
-		}
-		// prev is the last posting this block decoded — every iteration above
-		// assigns it and a block holds at least one posting. The accumulated
-		// slice this used to index into never said anything else.
-		if prev != maxDoc {
-			return 0, fmt.Errorf("%s: term %q block %d records maxDocID %d, contents end at %d: %w", post.name, term, b, maxDoc, prev, ErrCorrupt)
-		}
-		if gotMaxTF != maxTF {
-			return 0, fmt.Errorf("%s: term %q block %d records maxTF %d, contents say %d: %w", post.name, term, b, maxTF, gotMaxTF, ErrCorrupt)
-		}
-		if gotMinDL != minDL {
-			return 0, fmt.Errorf("%s: term %q block %d records minDocLen %d, contents say %d: %w", post.name, term, b, minDL, gotMinDL, ErrCorrupt)
-		}
-		if err := post.unit(fmt.Sprintf("term %q block %d", term, b), blockStart, uint64(segHeaderLen+blockStart)); err != nil {
-			return 0, err
-		}
+		n += cnt
 	}
 	// The blocks have to fill the entry. A count that names fewer than were
 	// written leaves every block it does name intact and verifying, so nothing

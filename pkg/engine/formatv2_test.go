@@ -110,7 +110,10 @@ func TestDocOffsetsLandOnRecordStarts(t *testing.T) {
 		// The offset is absolute into the file; the reader's payload starts
 		// segHeaderLen bytes in. Landing anywhere but a record start makes the
 		// decode below fail or return the wrong document, which is the point.
-		r := &segReader{name: docsFile, b: docsR.b, off: off - segHeaderLen}
+		// The version comes with the reader: a version 5 record carries a field
+		// block after its timestamp, and a reader that did not expect one would
+		// stop short of it and fail the record's checksum.
+		r := &segReader{name: docsFile, b: docsR.b, off: off - segHeaderLen, version: docsR.version}
 		d, _, err := decodeDocRecord(r, id)
 		if err != nil {
 			t.Fatalf("document %d at offset %d: %v", id, off, err)

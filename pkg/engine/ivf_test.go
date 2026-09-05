@@ -551,6 +551,10 @@ func downgradeToV2(t *testing.T, dir string) {
 		t.Fatalf("no segment directories under %s", dir)
 	}
 	for _, seg := range segs {
+		// Before the restamping, because it reads docoff to find record
+		// boundaries and writes both files back — see stripFieldBlocks for why
+		// version 5 is the one downgrade that is not a trailing varint.
+		stripFieldBlocks(t, seg)
 		if err := os.Remove(filepath.Join(seg, ivfFile)); err != nil {
 			t.Fatal(err)
 		}
@@ -620,6 +624,8 @@ func downgradeToV3(t *testing.T, dir string) {
 		t.Fatalf("no segment directories under %s", dir)
 	}
 	for _, seg := range segs {
+		// Before the restamping, for the reason downgradeToV2 gives.
+		stripFieldBlocks(t, seg)
 		for _, s := range segSections {
 			p := filepath.Join(seg, s.name)
 			if _, err := os.Stat(p); err != nil {

@@ -1,12 +1,19 @@
+func FieldTerm(string, string) string
 func New(...Option) *Index
+func NewCollector(int) *Collector
 func Open(string, ...Option) (*Index, error)
 func Scrub(string) error
 func Search(context.Context, Query, int, Fuser, ...Scorer) ([]Candidate, error)
 func Tokenize(string) []string
 func TopK([]Candidate, int) []Candidate
 func WithTokenizer(Tokenizer) Option
+method BlockCursor.Err() error
+method BlockCursor.Next([]Posting) []Posting
+method Collector.Offer(DocID, float64)
+method Collector.Take() []Candidate
 method Index.Add(Document) (DocID, error)
 method Index.AvgDocLen() float64
+method Index.BlockCursor(string) *BlockCursor
 method Index.Close() error
 method Index.Commit(context.Context, string) error
 method Index.Delete(string) bool
@@ -17,15 +24,22 @@ method Index.Lookup(string) []Posting
 method Index.LookupInto(string, []Posting) []Posting
 method Index.Merge() error
 method Index.Nearest([]float32, int) []DocID
+method Index.Neighbors(DocID) ([]DocID, bool)
+method Index.PostingCount(string) int
 method Index.Resolve(string) (DocID, bool)
 method Index.Stats() (int, float64)
+method Index.Terms(string, int) []string
 method Index.Tokenize(string) []string
 method Index.Update(Document) (DocID, error)
 method Index.Vector(DocID) ([]float32, bool)
 package engine
+type BlockCursor struct
+BlockCursor has unexported fields
 type Candidate struct
 field Candidate.Doc DocID
 field Candidate.Score float64
+type Collector struct
+Collector has unexported fields
 type DocID uint32
 type Document struct
 field Document.Key string
@@ -33,6 +47,10 @@ field Document.Text string
 field Document.Vector []float32
 field Document.Links []string
 field Document.Time time.Time
+field Document.Fields []Field
+type Field struct
+field Field.Name string
+field Field.Text string
 type Fuser func([][]Candidate, int) []Candidate
 type Index struct
 Index has unexported fields
@@ -48,6 +66,7 @@ type Scorer interface
 method Scorer.Name() string
 method Scorer.Candidates(context.Context, Query, int) ([]Candidate, error)
 type Tokenizer func(string) []string
+var ErrBadField = errors.New("engine: field name is empty, contains a separator, or is repeated")
 var ErrBadVersion = errors.New("engine: unsupported index format version")
 var ErrCorrupt = errors.New("engine: index file is corrupt")
 var ErrDimMismatch = errors.New("engine: vector width differs from the corpus")

@@ -229,6 +229,21 @@ func (ix *Index) vectorAt(id DocID) ([]float32, bool) {
 	return v, len(v) > 0
 }
 
+func (ix *Index) linksAt(id DocID) ([]string, bool) {
+	if ix.dead.has(id) {
+		return nil, false
+	}
+	if s := ix.segFor(id); s != nil {
+		return s.links(id)
+	}
+	if uint64(id) < uint64(ix.base) || uint64(id) >= uint64(ix.base)+uint64(len(ix.docs)) {
+		return nil, false
+	}
+	// A pending document is held as the caller passed it, so this aliases rather
+	// than copies — the same contract docAt has.
+	return ix.docs[uint64(id)-uint64(ix.base)].Links, true
+}
+
 func (ix *Index) docLenAt(id DocID) int {
 	// Zero, which is what an unassigned id already answers and what DocLen
 	// documents BM25 must read as "no normalization". Delete reads the length
@@ -520,6 +535,73 @@ func Tokenize(s string) []string {
 	})
 }
 
+// ErrBadField rejects a Field that no lookup could reach or that would collide
+// with another.
+//
+// Three shapes, and each is a term space nobody can name rather than a matter of
+// taste. An empty name puts a field's tokens into Text's own term space, where
+// nothing distinguishes them from Text's; a name holding the separator byte
+// makes `a\x00b` as a field indistinguishable from field `a` holding tokens that
+// begin with `b`; and one document carrying a name twice merges two texts into
+// one term space with no way to ask for either.
+var ErrBadField = errors.New("engine: field name is empty, contains a separator, or is repeated")
+
+// tokenizeDoc splits every indexed text of d and returns the total token count
+// with the frequency of each term.
+//
+// One function, because four callers have to agree about what a document's terms
+// and length are and disagreeing is silent: Add and Update build the postings
+// from it, replacePending decides which postings to drop from the *old* text
+// with it, and checkTokenizer compares its count against what is on disk. A
+// second copy of "Text, then each field under FieldTerm" is a copy that stops
+// matching the first the day a field is added anywhere.
+//
+// The count includes every field's tokens. That is forced rather than chosen —
+// see Document.Fields — because Scrub adds a document's frequencies across all
+// terms and refuses a disagreement with its stored length, and field terms are
+// ordinary postings.
+//
+// It takes no lock and reads nothing but d, which is what lets Add call it
+// outside the exclusive lock. Names are not validated here; checkFields is, and
+// its caller runs it first.
+func (ix *Index) tokenizeDoc(d Document) (n int, freq map[string]int) {
+	toks := ix.Tokenize(d.Text)
+	freq = make(map[string]int, len(toks))
+	for _, t := range toks {
+		freq[t]++
+	}
+	n = len(toks)
+	for _, f := range d.Fields {
+		ft := ix.Tokenize(f.Text)
+		for _, t := range ft {
+			freq[FieldTerm(f.Name, t)]++
+		}
+		n += len(ft)
+	}
+	return n, freq
+}
+
+// checkFields refuses the field names no lookup could reach. See ErrBadField.
+//
+// Before anything is written, and before the tokenization that would otherwise
+// build a term space out of them.
+func checkFields(d Document, what string) error {
+	if len(d.Fields) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(d.Fields))
+	for _, f := range d.Fields {
+		if f.Name == "" || strings.Contains(f.Name, fieldSep) {
+			return fmt.Errorf("%s %q: field name %q: %w", what, d.Key, f.Name, ErrBadField)
+		}
+		if _, dup := seen[f.Name]; dup {
+			return fmt.Errorf("%s %q: field %q appears twice: %w", what, d.Key, f.Name, ErrBadField)
+		}
+		seen[f.Name] = struct{}{}
+	}
+	return nil
+}
+
 // Add stores d and returns its assigned DocID.
 //
 // Links are not resolved here: a document may reference a Key that has not been
@@ -543,11 +625,17 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// re-checking document vectors.
 	d.Vector = slices.Clone(d.Vector)
 	d.Links = slices.Clone(d.Links)
+	d.Fields = slices.Clone(d.Fields)
 
 	for i, c := range d.Vector {
 		if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
 			return 0, fmt.Errorf("add %q: vector component %d is %v: %w", d.Key, i, c, ErrNonFiniteVector)
 		}
+	}
+	// Before the tokenization below, which would otherwise build a term space out
+	// of names no lookup can reach.
+	if err := checkFields(d, "add"); err != nil {
+		return 0, err
 	}
 
 	// Tokenizing outside the lock. It is the dominant cost of Add — a 1 MB
@@ -556,14 +644,12 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// stalls every reader for the duration. A duplicate key wastes the work,
 	// which is the error path.
 	//
-	// Through ix.Tokenize, which is the same call the query side makes. Index
-	// time and query time sharing one function value is what makes a replaced
-	// tokenizer usable at all; see WithTokenizer.
-	toks := ix.Tokenize(d.Text)
-	freq := make(map[string]int, len(toks))
-	for _, t := range toks {
-		freq[t]++
-	}
+	// Through ix.tokenizeDoc, which reaches ix.Tokenize — the same function value
+	// the query side calls. Index time and query time sharing one tokenizer is
+	// what makes a replaced one usable at all; see WithTokenizer. It is also
+	// where Document.Fields become terms, which is why Update and checkTokenizer
+	// go through the same function rather than repeating the rule.
+	n, freq := ix.tokenizeDoc(d)
 
 	// wmu before mu, the order every mutator uses, and here it is what keeps the
 	// milestone 9 lock split working rather than merely tidy: an Add blocked in
@@ -598,7 +684,7 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// The id ceiling and the vector width are admit's, which appendPending asks
 	// before it appends. They used to be spelled out here; the reasoning moved
 	// with the code rather than being left behind as a second copy of it.
-	return ix.appendPending(d, toks, freq, "add")
+	return ix.appendPending(d, n, freq, "add")
 }
 
 // initMaps makes a zero-value Index usable. Requires ix.mu.
@@ -618,7 +704,7 @@ func (ix *Index) initMaps() {
 // not report itself as an Add. It is the whole of what the two callers differ by
 // down here, which is the point of them sharing this at all: two appends would be
 // two chances for the pending segment's six parallel structures to disagree.
-func (ix *Index) appendPending(d Document, toks []string, freq map[string]int, what string) (DocID, error) {
+func (ix *Index) appendPending(d Document, n int, freq map[string]int, what string) (DocID, error) {
 	if err := ix.admit(d, what); err != nil {
 		return 0, err
 	}
@@ -633,8 +719,8 @@ func (ix *Index) appendPending(d Document, toks []string, freq map[string]int, w
 		ix.postings[t] = append(ix.postings[t], Posting{Doc: id, Freq: f})
 	}
 
-	ix.docLen = append(ix.docLen, len(toks))
-	ix.totalLen += len(toks)
+	ix.docLen = append(ix.docLen, n)
+	ix.totalLen += n
 
 	return id, nil
 }
@@ -729,16 +815,16 @@ func (ix *Index) Update(d Document) (DocID, error) {
 	// the bytes that were validated have to be the bytes that get stored.
 	d.Vector = slices.Clone(d.Vector)
 	d.Links = slices.Clone(d.Links)
+	d.Fields = slices.Clone(d.Fields)
 	for i, c := range d.Vector {
 		if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
 			return 0, fmt.Errorf("update %q: vector component %d is %v: %w", d.Key, i, c, ErrNonFiniteVector)
 		}
 	}
-	toks := ix.Tokenize(d.Text)
-	freq := make(map[string]int, len(toks))
-	for _, t := range toks {
-		freq[t]++
+	if err := checkFields(d, "update"); err != nil {
+		return 0, err
 	}
+	n, freq := ix.tokenizeDoc(d)
 
 	// wmu before mu, the order every mutator uses. See Index.wmu.
 	ix.wmu.Lock()
@@ -761,7 +847,7 @@ func (ix *Index) Update(d Document) (DocID, error) {
 	// repeatedly between commits would otherwise burn an id and leave a dead
 	// record for each one.
 	if uint64(id) >= uint64(ix.base) {
-		if err := ix.replacePending(id, d, toks, freq); err != nil {
+		if err := ix.replacePending(id, d, n, freq); err != nil {
 			return 0, err
 		}
 		return id, nil
@@ -777,7 +863,7 @@ func (ix *Index) Update(d Document) (DocID, error) {
 	// The length comes off the index before the mark, the order Delete uses and
 	// for the same reason — docLenAt answers 0 for a tombstone.
 	ix.dead.mark(id, ix.docLenAt(id))
-	return ix.appendPending(d, toks, freq, "update")
+	return ix.appendPending(d, n, freq, "update")
 }
 
 // replacePending rewrites a pending document in place, keeping its DocID.
@@ -791,7 +877,7 @@ func (ix *Index) Update(d Document) (DocID, error) {
 // ix.mu.RLock, release, tokenize, reacquire exclusively to apply, all with wmu
 // held throughout so nothing can have moved. Owed when a caller updates
 // documents large enough for the tokenization to show up as read latency.
-func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[string]int) error {
+func (ix *Index) replacePending(id DocID, d Document, n int, freq map[string]int) error {
 	// Before anything is written, so a refused update leaves the document it
 	// could not replace exactly as it was.
 	if err := ix.adoptVecDim(d, "update"); err != nil {
@@ -800,19 +886,21 @@ func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[st
 	i := uint64(id) - uint64(ix.base)
 	old := ix.docs[i]
 
-	// The terms the old text held and the new one does not. Its postings have to
-	// go, or the document keeps answering a query for words it no longer
+	// The terms the old document held and the new one does not. Their postings
+	// have to go, or the document keeps answering a query for words it no longer
 	// contains — and a stale posting is invisible to any check that reads the
 	// record, because the record is right.
 	//
-	// Walked as tokens rather than reduced to a set first: dropPosting is a no-op
-	// for an id it does not find, so the second occurrence of a dropped term costs
-	// one binary search against the map insert and the hash a set would have cost
-	// it anyway.
-	// ix.Tokenize, not the package function: the old text has to be split the
-	// same way it was split when it was indexed, or the posting lists this drops
-	// from are not the ones that were written.
-	for _, t := range ix.Tokenize(old.Text) {
+	// Through tokenizeDoc, not ix.Tokenize on old.Text: the old document's fields
+	// were indexed under FieldTerm and a walk of its Text alone would leave every
+	// one of those postings behind. That is the whole reason the rule lives in one
+	// function — this call site is the one that reads it backwards, and a second
+	// copy of it here would have been the copy that forgot.
+	//
+	// Its keys rather than its counts: what is dropped is decided by presence in
+	// the new document's terms, and the old frequency says nothing about that.
+	_, oldFreq := ix.tokenizeDoc(old)
+	for t := range oldFreq {
 		if _, kept := freq[t]; !kept {
 			ix.dropPosting(t, id)
 		}
@@ -825,8 +913,8 @@ func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[st
 	// record's own count from ix.docLen, and Scrub adds a segment's postings back
 	// up and refuses a disagreement, so the two have to move together or the next
 	// commit writes a segment that will not scrub.
-	ix.totalLen += len(toks) - ix.docLen[i]
-	ix.docLen[i] = len(toks)
+	ix.totalLen += n - ix.docLen[i]
+	ix.docLen[i] = n
 	ix.docs[i] = d
 	return nil
 }
@@ -1070,6 +1158,57 @@ func (ix *Index) Vector(id DocID) ([]float32, bool) {
 	return ix.vectorAt(id)
 }
 
+// Neighbors returns the DocIDs a document's Links point at. The bool is false
+// for an id that was never assigned or has been deleted; a document with no
+// edges answers true and an empty slice, and a traversal needs that difference —
+// a missing document is not a leaf.
+//
+// Links are Keys, so this is Links plus Resolve, and it exists because doing
+// those two things separately costs a caller both halves of what a traversal
+// spends. Doc materialises the key, the text and the vector to reach a field
+// that is none of them: on the evaluation corpus that is a 768-wide vector per
+// node visited, 69% of the docs section, faulted in and dropped. And Resolve
+// takes the index-wide read lock once per link, so a high-degree node loses
+// throughput as cores are added. Here the whole document costs one acquisition
+// and touches no vector page. scorer/graph's ponytail note on bfs asked for
+// exactly this.
+//
+// What it drops, and what it does not:
+//
+//   - A Key no live document holds is skipped, not reported. A dangling link is
+//     ordinary — Links may name a document that has not been added yet, or one
+//     that has been deleted since — so a traversal reads the result as the edges
+//     that lead somewhere.
+//   - A Key repeated in Links yields its DocID twice, in Links order. This does
+//     not deduplicate: Links is the caller's list, a repeat may be information,
+//     and a traversal that cares keeps a visited set anyway. A weighting scheme
+//     that would double-count must deduplicate for itself.
+//   - A self-link is kept for the same reason.
+//
+// The result is freshly allocated and is the caller's to keep and to modify.
+func (ix *Index) Neighbors(id DocID) ([]DocID, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+
+	keys, ok := ix.linksAt(id)
+	if !ok {
+		return nil, false
+	}
+	if len(keys) == 0 {
+		return nil, true
+	}
+	out := make([]DocID, 0, len(keys))
+	for _, k := range keys {
+		// resolveLive, not resolve: an edge into a deleted document leads
+		// nowhere, and it is the same judgement Resolve makes for a caller who
+		// asks about that key directly.
+		if n, live := ix.resolveLive(k); live {
+			out = append(out, n)
+		}
+	}
+	return out, true
+}
+
 // Resolve maps a caller-supplied Key to its DocID. The bool is false for a Key
 // that was never added — which is exactly how dangling Links are detected.
 //
@@ -1153,6 +1292,124 @@ func (ix *Index) LookupInto(term string, buf []Posting) []Posting {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return ix.lookupInto(term, buf)
+}
+
+// PostingCount is how many postings Lookup would return for term, counted
+// without materialising any of them.
+//
+// It is the collection frequency BM25 needs before it can score anything, and a
+// scorer that walks a term with a BlockCursor cannot get it from the walk: IDF
+// has to be known before the first posting is scored, and a cursor cannot say
+// how long it is without being walked. So this is the one extra pass a
+// document-at-a-time scorer pays, and it is the cheap kind — the postings are
+// decoded and counted, never collected, so the cost is bytes read and nothing
+// held.
+//
+// **Exact, and deleted documents are not counted.** Both halves matter and the
+// second is why this is not the block arithmetic it looks like it could be: a
+// term's blocks are all full but the last, so a bound is one varint away — but a
+// bound is not a frequency, and IDF computed from one drifts every score in the
+// corpus by an amount that depends on where the block boundaries fell. Lookup
+// filters tombstones at read time, so a count that did not would disagree with
+// the list it is supposed to describe.
+//
+// Zero means no live document holds the term, which is also what a segment that
+// claims the term and cannot decode it reports — absence being the answer D-006
+// gives corruption on this path, and the same answer Lookup's nil is.
+func (ix *Index) PostingCount(term string) int {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+
+	// Hoisted for an index that has never deleted anything, which is both the
+	// common case and what every published figure was measured on.
+	filter := !ix.dead.empty()
+	n := 0
+	for _, s := range ix.segs {
+		if _, claimed := s.terms[term]; !claimed {
+			continue
+		}
+		// Counted per segment and added afterwards, because a segment that
+		// claims the term and fails to decode makes the whole count absent —
+		// and a partial count is not a smaller answer, it is a wrong IDF.
+		seen := 0
+		if s.scanPostings(term, nil, func(p Posting) {
+			if !filter || !ix.dead.has(p.Doc) {
+				seen++
+			}
+		}) == 0 {
+			return 0
+		}
+		n += seen
+	}
+	for _, p := range ix.postings[term] {
+		if !filter || !ix.dead.has(p.Doc) {
+			n++
+		}
+	}
+	return n
+}
+
+// Terms returns the indexed terms starting with prefix, ascending, at most
+// limit of them. An empty prefix asks for the whole vocabulary.
+//
+// It is the read a term *pattern* needs and Lookup cannot serve: a prefix, a
+// wildcard or an edit-distance query has to know which terms exist before it can
+// look any of them up, and nothing else here says. A limit of zero or less
+// returns nothing, which is the convention Search and every Candidates already
+// use for a non-positive k.
+//
+// **Sorted and then truncated, not truncated as it goes.** Which terms a limit
+// cuts must not depend on map iteration order, or the same query answers
+// differently on consecutive calls against an unchanged index — a wrong answer
+// that looks like a flaky test. So the limit bounds what is returned and not
+// what is examined; see the ponytail note below for what that costs.
+//
+// The result is freshly allocated and is the caller's to keep and to modify.
+// Terms from the committed segments and from the pending segment are merged and
+// deduplicated, so a term held by both appears once.
+//
+// ponytail: a linear scan of the vocabulary, and the prefix narrows the result
+// rather than the work. A segment's terms are a map here, though the `terms`
+// section they were decoded from is sorted on disk and a prefix is a range in
+// it — so the seek exists in the bytes and not in the reader. The vocabulary is
+// bounded by the language and not by the corpus, which is why this is affordable
+// at all: 2.7 MB of terms index against 626 MiB of documents on the milestone 4
+// corpus. Buy the ordered structure when a profile shows pattern queries
+// dominating, and note that it is a reader change and not a format change.
+func (ix *Index) Terms(prefix string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+
+	// A set, because a term held by two segments and by the pending one is one
+	// term. Lookup already merges their posting lists behind a single name.
+	seen := make(map[string]struct{})
+	for term := range ix.postings {
+		if strings.HasPrefix(term, prefix) {
+			seen[term] = struct{}{}
+		}
+	}
+	for _, s := range ix.segs {
+		for term := range s.terms {
+			if strings.HasPrefix(term, prefix) {
+				seen[term] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for term := range seen {
+		out = append(out, term)
+	}
+	slices.Sort(out)
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // Nearest returns the DocIDs worth scoring exactly for v, at least k of them

@@ -68,6 +68,20 @@ linters:
       min-len: 3
       min-occurrences: 3
     gocritic:
+      settings:
+        rangeValCopy:
+          # engine.Document is 128 bytes once it carries Fields, which is exactly
+          # the default threshold — so `for _, d := range docs` fired in nineteen
+          # places at once, every one of them a loop over a handful of documents
+          # in a test or a writer that encodes a whole record per iteration.
+          #
+          # Raised rather than silenced, and raised to a number rather than
+          # removed: a value type that outgrows a cache line is worth hearing
+          # about, and Document is meant to be passed by value — Add takes one,
+          # Doc returns one, and every scorer reads one. What the default is
+          # protecting against here does not exist; what it would protect against
+          # at 192 still would.
+          sizeThreshold: 192
       disabled-checks:
         - dupImport
         - ifElseChain

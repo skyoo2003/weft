@@ -1,0 +1,17 @@
+kind: Added
+body: '**`make bench-head` — a head-to-head against bleve that runs in under a
+  minute.** The existing `make bench` drives an open-loop load ladder against a
+  prepared TREC-COVID index: it needs a corpus that is not in the repository, it
+  takes about 90 minutes, and it has come back void three rounds running. This
+  asks the smaller question that one cannot be waited on for — for one query,
+  sequentially, how much work does each engine do — on a corpus it generates. It
+  lives in the `bench` module beside the ladder, so weft''s zero-dependency claim
+  is untouched. **It is not a tail, not a throughput figure, and not a quality
+  comparison**: bleve stems and removes stopwords where weft''s default tokenizer
+  does neither, so the two are not searching the same term space and no nDCG
+  figure may be derived from it. What it is for: a change to the query path can
+  now be checked against an engine that is not weft, before the ladder is
+  available to confirm it.'
+time: 2026-09-05T17:00:00.000000000+09:00
+custom:
+  Issue: 28

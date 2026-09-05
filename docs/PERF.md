@@ -961,3 +961,254 @@ machine with no other work on it and no preceding index load in the same session
 either side, and the pre-M13 commit measured on the same ladder in the same sitting — because
 the A/B above is what turned this from a reported regression into a void run, and it is
 cheaper than the argument it settles.
+
+**Milestone 14 is that attempt**, and what it registers first is the check that would have
+stopped this one: [§5.7](#57-milestone-14s-four-clauses--the-procedure-registered-before-the-run).
+
+### 5.7 Milestone 14's four clauses — the procedure registered before the run
+
+Milestone 14 has no code. Its outcome is the verdict on four numbers, and all four have now
+been left unjudged twice: [§5.5](#55-milestone-11s-invariance-clauses-judged--registered-before-they-are-measured)'s
+run A died during the index load, and [§5.6](#56-milestone-13s-invariance-clauses--attempted-and-the-instrument-had-nothing-to-say)'s
+came back void after 97 minutes. Neither failure was short of code. Both were short of
+**measuring conditions**.
+
+| clause | denominator | source |
+| --- | --- | --- |
+| shed 0 at 27.28 q/s | 0 | [FINDINGS milestone 8](FINDINGS.md) |
+| p50 ≤ 40 ms | 33.470 ms | same |
+| ladder peak RSS ≤ 120 MiB | 100.7 MiB | same; the reading is fixed by [D-014](DECISIONS.md) |
+| worst read inside a commit window ≤ 1 s | 61 ms | [FINDINGS milestone 9 §3](FINDINGS.md) |
+
+So what this round buys is not a run. It is **a procedure that does not produce a third void
+one**, which is [FINDINGS milestone 13 §8 item 2](FINDINGS.md) named as work: *a quiet-machine
+requirement is now a load-bearing part of the procedure and nothing enforces it — there is no
+check that would have caught it before 97 minutes were spent.*
+
+**The quality clause is not this round's**, and that is a subtraction rather than an omission.
+Milestone 13's run C reproduced nDCG@10 **0.5826 / 0.6211** to four decimals, so quality
+invariance is **already judged** ([FINDINGS milestone 13 §6](FINDINGS.md)). Re-running
+`make eval` would not buy a second verdict; it would put a 677 MiB index load into the same
+session as the ladder, which is precisely the condition §5.6 identified as what voided the
+last attempt. **`make eval` is therefore not in this round's run list.**
+
+#### The preflight, and why the unloaded median cannot be the gate
+
+The two-arm table in [FINDINGS milestone 13 §7](FINDINGS.md) narrows the choice of signal to
+one, because it says which readings the void machine got right:
+
+| reading | void run (M13 arm) | published | ratio |
+| --- | --- | --- | --- |
+| unloaded p50 | 34.072 ms | 32.231 ms | **1.06× — normal** |
+| p50 under load, 27.28 q/s | 2.616899 s | 33.470 ms | **78×** |
+| served / sent | 5,233 / 10,000 | 10,000 / 10,000 | 1.9× |
+| ladder peak RSS | 654.1 MiB | 100.7 MiB | 6.5× |
+
+**The unloaded median was normal on the machine that voided the run.** Any gate built on the
+figure `benchWarmup` already computes (§2.6, `cmd/weft-eval/bench.go:322`) therefore passes
+this void through. The one cheap signal that separates the two is **a short loaded probe at
+the top rate** — 1.04× on the good machine, 78× on the void one. There is nothing to tune in
+between.
+
+The probe runs as a **separate process**. Inside the ladder it would lift `ru_maxrss` to near
+its top-rung value before rung 1 reported, and the peak-RSS clause reads the ladder's high
+water mark (§2.7, [D-014](DECISIONS.md)). A separate process has its own mark.
+
+```bash
+# Preflight: top rate, 10 rotations (500 requests), about a minute.
+# These numbers are not published. They decide whether the ladder runs.
+make bench-preflight
+```
+
+**The pass line, fixed now**: the probe rung's p50 ≤ **twice the same process's unloaded p50**,
+and shed = 0. Twice is not an arbitrary threshold — it is the constant
+`loadgen.SaturationRate` already uses (`internal/loadgen/loadgen.go:406`): the first rung past
+twice the unloaded median *is* saturation, and 27.28 q/s was **not** saturation on the
+published ladder. A machine that saturates at the probe cannot reproduce that ladder.
+
+**This is a documented step, not an enforced one.** `-rates` and `-rotations` both already
+exist; what the preflight adds over `make bench` is a name in the procedure and a fixed flag
+pair. The two failures did not happen because a person could not compare two printed numbers.
+They happened because no probe was run at all before a 97-minute ladder. So the thing to fix
+is that **the step exists**, and a `ponytail:` comment on the target carries its ceiling: if a
+fourth run still comes back void, the probe becomes a `-preflight` flag with an exit code.
+
+**Two alternatives rejected, and the signal that revives each:**
+
+- **Record `getrusage`'s `ru_nivcsw` per rung.** `internal/loadgen/rusage_unix.go` already
+  calls `getrusage`, so one more field is a few lines, and involuntary context switches are a
+  **direct** measure of contention rather than a proxy. Rejected because there is no threshold:
+  this repository holds zero observations of what `nivcsw` reads on a quiet machine, so adding
+  it now yields one more number rather than a gate. **Revived by**: a run where the preflight
+  passes and the ladder is void anyway — that is the case where the probe cannot see what the
+  ladder feels, and per-rung machine state is what is then missing.
+- **Capture `uptime`'s load average around each run.** Zero lines, and a proxy.
+  **Partly adopted**: not a gate, but logged beside `date`, which is what item 2 asked for —
+  *recorded machine state beyond `date`*. It does not enter the verdict.
+
+#### The baseline is `700a178`, not `1eb2a44`
+
+§5.6 named `1eb2a44` as its baseline arm. That commit **is not an ancestor of `main`** — it
+sits on a side branch and was the M13 development base, so nobody else can check it out from
+this history:
+
+```console
+$ git merge-base --is-ancestor 1eb2a44 HEAD
+(exit 1 — not an ancestor)
+$ git diff --stat 1eb2a44 700a178 -- pkg/ internal/ cmd/ bench/
+(empty)
+```
+
+`700a178` is milestone 12's merge on `main` and **its code is byte-identical** across all four
+directories. Substituting it therefore does not change what is measured; it moves the
+measurement somewhere a reader can reproduce. §5.6's wording stands as written.
+
+The measured arm is **`eedc04a`** (`HEAD`), which has an empty `pkg/`/`internal/`/`cmd/` diff
+against the `9d05c16` §5.6 measured — the same code.
+
+#### Both arms in one sitting, baseline first
+
+§5.6's "same sitting" requirement is this round's load. Any other work between the arms
+removes what the A/B is for.
+
+**What is not matched, and which way it biases** (§4's form): the first arm maps the index and
+leaves the page cache warm, and the second inherits it. **So the order is baseline first** —
+
+- HEAD regresses anyway → it regressed *with* the cache on its side, so **the regression is
+  real**.
+- HEAD looks better → a live cache is the competing explanation, and **that sentence is
+  written beside the figure**. No improvement is claimed.
+
+Running both orders turns 3.2 hours into 6.4. At n=1 randomisation buys nothing, so the bias
+is **named rather than removed**.
+
+**Correction, made before the baseline arm was run rather than after.** This section first
+wrote the baseline probe as `make -C ../weft-m12-baseline bench-preflight`, and **that target
+does not exist on `700a178`** — it is added by this milestone, so a worktree at milestone 12's
+merge has no rule for it. The probe on the baseline arm is therefore spelled as the flags the
+target hardcodes. Nothing measured changes: `bench-preflight` *is*
+`bench -rates 27.28 -rotations 10`, and the pass line above is unchanged. It is recorded here
+because the step existing is what this round buys, and a step whose command fails on one of
+two arms is the same class of defect as no step at all.
+
+**The lid stays open, and `caffeinate` is not enough on its own.** Added after two arms were
+discarded for it. `caffeinate -dimsu` holds `PreventUserIdleSystemSleep`, which stops *idle*
+sleep and has no power over **clamshell sleep** — closing the lid sleeps the machine on AC at
+full charge, and the monotonic clock stops with it, which is what `Elapsed` in
+`internal/loadgen/clock.go` reads as unaccounted time. This file has prescribed
+`caffeinate -dimsu` as the way to keep a ladder awake since [§5.1](#51-the-campaign-in-order),
+and `clock.go` cites *thirteen hours of clamshell sleep* as the failure its suspension check
+exists to detect, so the remedy has not covered the named failure mode for nine milestones.
+`sudo pmset disablesleep 1` would enforce it and is rejected: it needs root, and it leaves a
+machine that never sleeps if the operator forgets to unset it.
+
+```bash
+# The baseline arm is a worktree. The index is shared — the same bytes read by both
+# arms is the premise of the A/B.
+git worktree add ../weft-m12-baseline 700a178
+
+# Preflight both arms first. Either one failing is reading 1 below. The baseline is
+# spelled out because `bench-preflight` postdates 700a178 — see the correction above.
+make bench-preflight
+make -C ../weft-m12-baseline bench EVAL_DATA=$PWD/.eval-data \
+  BENCHFLAGS='-rates 27.28 -rotations 10'
+
+# The ladder, baseline first. About 92 minutes each.
+date; uptime; caffeinate -dimsu make -C ../weft-m12-baseline bench \
+  EVAL_DATA=$PWD/.eval-data BENCHFLAGS='-rates 3.41,6.82,13.64,27.28'; uptime; date
+date; uptime; caffeinate -dimsu make bench \
+  BENCHFLAGS='-rates 3.41,6.82,13.64,27.28'; uptime; date
+
+# Milestone 9's clause. First to be cut.
+date; uptime; caffeinate -dimsu make bench BENCHFLAGS='-writes -writedocs 20000'; uptime; date
+```
+
+#### The four readings, fixed now
+
+1. **The preflight misses its pass line** → **the ladder does not run.** A minute was spent
+   and 97 were saved, and that is recorded. This is **not executed**, not void, and the two
+   are different results.
+2. **Both arms reproduce the published figures and HEAD passes all four clauses** → **the four
+   clauses are met.** What milestone 11 opened and milestone 13 re-opened closes. One
+   observation, and that is written beside the numbers.
+3. **Both arms reproduce the published figures and HEAD alone misses a clause** → **a
+   regression attributable to milestone 13.** A blocking reading, on §5.5 reading 2's grounds:
+   the milestone's own metric table calls performance an invariant, so a regression here is a
+   defect rather than a result. Find the cause and fix it.
+4. **Both arms miss the published figures by the same margin** → drift that is not this
+   round's. **Publish both numbers and say so explicitly**; a shared miss must not read as a
+   pass. But this time it arrives *after* a passing preflight, so reading 4 also publishes
+   **"there is a condition the probe cannot see"** and revives `ru_nivcsw` above.
+
+Readings 1 and 4 are new against §5.6. Reading 4 renames §5.5's reading 3; reading 1 exists
+for the first time because the preflight does.
+
+#### Budget and the cut order, fixed now
+
+| run | command | machine time | cut |
+| --- | --- | --- | --- |
+| preflight ×2 | `make bench-preflight` | ~2 min | **not cut** |
+| ladder — baseline | `-rates 3.41,6.82,13.64,27.28` @ `700a178` | ~92 min | **not cut** |
+| ladder — HEAD | the same ladder @ `eedc04a` | ~92 min | **not cut** |
+| write arm ×2 | `-writes -writedocs 20000` | ~90 min | **cut first** |
+
+**3.2 hours** for the core, **4.8** with the write arms.
+
+**Cut order**: the write arms go first — what is lost is milestone 9's read clause alone, and
+the other three clauses live on the ladder. The two ladder arms are not cut. **Running one arm
+is not a cut, it is void production** — that is exactly what §5.6 paid for, so the ladder
+**runs on both arms or on neither.**
+
+Not run at all, and each said so rather than left out: **`make eval`** (quality is judged —
+above), and **`-deletefrac` with §5.5's run B**, which is milestone 11's carried-forward item 3
+and half of the PRD's open question 2. It **stays open and is published as open**. Mixing two
+rounds into one sitting means a void in either cannot be attributed.
+
+**One observation each, and that is written beside the numbers.** [D-013](DECISIONS.md)
+applies unchanged: a single run is not a median and must not be called one. Three repetitions
+would cost the 4.9 hours D-013 priced, and this round does not buy them.
+
+#### Outcome, 2026-08-27/28: four probes passed, two ladder attempts, both void
+
+**The clauses are unjudged for the third round.** Recorded here against the readings above
+rather than in a commit message.
+
+| | what happened |
+| --- | --- |
+| preflight ×4 | **all passed** — 1.00× to 1.05× against a 2× line, shed 0 every time |
+| ladder attempt 1 | **SIGTERM at 46 min**, in rung 1 of the baseline arm. Nothing published |
+| ladder attempt 2 | **eight rungs completed, both arms printed `DISCARD this run`** |
+| write arms | **not reached** — the registered first cut, behind a discard |
+| `make eval` | **not run**, by design |
+
+**Which reading fired: none of the four, and the list is the thing that was wrong.** Reading 1
+needs a *failing* probe and the probe passed four times. Readings 2, 3 and 4 need arms whose
+figures can be read, and the instrument's own suspension check refused both. Two entries are
+therefore added to the list for the next attempt:
+
+- **Reading 5 — the window is known in advance to be unavailable** → *not executed.* One minute
+  spent, 97 saved. Distinct from void.
+- **Reading 6 — the run completes and the instrument discards it** → *void, with the cause
+  recorded in-band.* Distinct from reading 4, whose drift has to be inferred from an A/B; here
+  `SuspendTolerance` names the failure and the amount.
+
+**What voided it was not what the preflight was built to catch, and both detectors worked.**
+The probe measures contention; the failure was suspension, which `SuspendTolerance` caught on
+both arms with the duration attached — 22m39s at the baseline's second rung, 4h57m08s at HEAD's
+first. The mitigation is what failed, and the lid paragraph above is the fix.
+[D-024](DECISIONS.md)'s own falsification condition — *a ladder that comes back void after a
+probe that passed* — fired, and the refinement is recorded there rather than quietly dropped.
+
+**One thing the discarded data narrows, registered so the next attempt looks for it.** The top
+rung collapsed on **both** arms — 1.635754 s and 2.034673 s against a published 33.470 ms, with
+shed 1,811 and 3,323 and the ladder mark at 660.8 and 675.8 MiB against 100.7 — while rungs 1
+through 3 stayed in family, and while four lone-rung probes at the same rate returned 34–35 ms.
+§5.6 reported the same signature for milestone 13. **The baseline arm is pre-milestone-13 code
+and collapses identically, so the cause is not that milestone.** It is not read further here:
+both arms slept before reaching that rung, and that is exactly what the discard forbids reading
+through. [FINDINGS milestone 14 §5a](FINDINGS.md) holds the shape and the three surviving
+candidates.
+
+Whoever picks this up runs the block above unchanged, **with the lid open**. Nothing about the
+tree has to change first, the pass lines and the four readings still stand as written, and the
+worktree at `700a178` is already in place.

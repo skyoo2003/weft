@@ -4,14 +4,51 @@ func Fuse([][]engine.Candidate, int) []engine.Candidate
 func FuseWeighted(...float64) engine.Fuser
 package fusion
 
+# ../query
+const MaxEditDistance = 2
+const MaxTerms = 4096
+const PhraseOverfetch = 10
+func EncodeInt(int64) string
+func EncodeTime(time.Time) string
+func Fuzzy(*engine.Index, string, string, int) engine.Scorer
+func Glob(*engine.Index, string, string) engine.Scorer
+func Must(engine.Fuser, ...int) engine.Fuser
+func MustNot(engine.Fuser, ...int) engine.Fuser
+func Parse(*engine.Index, string) (Plan, error)
+func Phrase(*engine.Index, engine.Scorer, string) engine.Scorer
+func Range(*engine.Index, string, string, string) engine.Scorer
+method Plan.Fuse(engine.Fuser) engine.Fuser
+package query
+type Plan struct
+field Plan.Scorers []engine.Scorer
+Plan has unexported fields
+
 # ../scorer/graph
+const DefaultPrecision = 1e-4
+const DefaultRestart = 0.15
 const MaxDepth = 3
 const SeedN = 5
 func New(*engine.Index, engine.Scorer) *Scorer
+func NewAdjacency(context.Context, *engine.Index) (*Adjacency, error)
 func NewIncludingSeeds(*engine.Index, engine.Scorer) *Scorer
+func NewPPR(*Adjacency, engine.Scorer, ...Option) (*PPR, error)
+func WithPrecision(float64) Option
+func WithRestart(float64) Option
+method Adjacency.Degree(engine.DocID) int
+method Adjacency.Edges() int
+method Adjacency.In(engine.DocID) []engine.DocID
+method Adjacency.Len() int
+method Adjacency.Out(engine.DocID) []engine.DocID
+method PPR.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
+method PPR.Name() string
 method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
 method Scorer.Name() string
 package graph
+type Adjacency struct
+Adjacency has unexported fields
+type Option func(*PPR)
+type PPR struct
+PPR has unexported fields
 type Scorer struct
 Scorer has unexported fields
 
@@ -29,6 +66,7 @@ Scorer has unexported fields
 const B = 0.75
 const K1 = 1.2
 func New(*engine.Index) *Scorer
+func NewField(*engine.Index, string) *Scorer
 method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
 method Scorer.Name() string
 package text

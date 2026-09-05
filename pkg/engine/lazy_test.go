@@ -81,6 +81,31 @@ func assertReadAPIsAgree(t *testing.T, want, got *Index) {
 		if !slices.Equal(gv, wv) || !slices.Equal(gv, g.Vector) {
 			t.Errorf("Vector(%d) = %v, want %v and Doc's %v", id, gv, wv, g.Vector)
 		}
+		// Neighbors is a third decoder over the same record, and the one that
+		// steps over the vector by arithmetic instead of reading it. That skip is
+		// where a links walk stops touching vector pages and is also the one
+		// place a wrong byte count would land the reader in the middle of the
+		// link list — so it is checked against Doc's links resolved by hand, on
+		// both sides of a commit and on documents carrying a vector for it to
+		// step over.
+		wantIDs := make([]DocID, 0, len(w.Links))
+		for _, key := range w.Links {
+			if lid, live := want.Resolve(key); live {
+				wantIDs = append(wantIDs, lid)
+			}
+		}
+		wnb, wnok := want.Neighbors(id)
+		gnb, gnok := got.Neighbors(id)
+		if !wnok || !gnok {
+			t.Errorf("Neighbors(%d) present = %v/%v, want true/true", id, wnok, gnok)
+		}
+		if !slices.Equal(wnb, wantIDs) {
+			t.Errorf("Neighbors(%d) = %v, want %v from Doc's links %v", id, wnb, wantIDs, w.Links)
+		}
+		if !slices.Equal(gnb, wnb) {
+			t.Errorf("Neighbors(%d) = %v, want %v", id, gnb, wnb)
+		}
+
 		gid, ok := got.Resolve(w.Key)
 		if !ok || gid != id {
 			t.Errorf("Resolve(%q) = %d, %v; want %d, true", w.Key, gid, ok, id)

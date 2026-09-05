@@ -1815,3 +1815,138 @@ would mean the determinism contract is being broken in the field and the doc
 comment is not enough. Or a caller who wants the count check off because a
 one-document sample is too weak a signal to justify the refusal, which is the
 opposite complaint and would argue for widening the sample rather than removing it.
+
+## D-024 — The gate on a performance run is a loaded probe, not the unloaded median
+
+**Date**: 2026-08-27 · **Milestone**: 14 · **Status**: accepted
+
+### The question
+
+Two performance rounds in a row produced nothing. Milestone 11's run A died during
+the index load; milestone 13's spent 97 minutes and came back **void** — every
+clause missed by one to two orders of magnitude, and the commit *before* the
+milestone missing them the same way, so the instrument had been measuring the
+machine. [FINDINGS milestone 13 §8 item 2](FINDINGS.md) named the gap: *a
+quiet-machine requirement is now a load-bearing part of the procedure and nothing
+enforces it — no preflight, no recorded machine state beyond `date`.*
+
+This is a procedure decision rather than a code one, and it is recorded here because
+[PERF §5](PERF.md)'s campaign order is the thing it changes.
+
+### The decision
+
+**A short loaded probe at the top rate, run as its own process, before the ladder.**
+`make bench-preflight` is `bench -rates 27.28 -rotations 10` — 500 requests, under
+30 seconds in practice. Pass is the probe rung's p50 ≤ **twice the same process's
+unloaded p50**, and shed 0.
+
+Twice is `loadgen.SaturationRate`'s constant rather than a number chosen for this
+gate: the first rung past twice the unloaded median *is* saturation, and 27.28 q/s
+was **not** saturation on the published ladder. A machine that saturates at the
+probe cannot reproduce that ladder, and there is no version of the run worth
+starting on it.
+
+### Why not the unloaded median, which is the obvious gate
+
+**Because it was normal on the machine that voided the run.** 34.072 ms against a
+published 32.231, a 1.06× ratio, well inside the 8.8% machine-state band milestone 8
+documented for itself. `benchWarmup` already computes this figure and prints it, so a
+gate built on it is nearly free — and it passes the exact failure it would exist to
+catch.
+
+The readings that *did* separate the two machines all require load. The cheapest is
+the top rate: **1.04× published, 78× void**. Nothing needs tuning between those.
+
+| reading | void run | published | ratio |
+| --- | --- | --- | --- |
+| unloaded p50 | 34.072 ms | 32.231 ms | 1.06× — **passes** |
+| p50 under load, 27.28 q/s | 2.616899 s | 33.470 ms | **78×** |
+| ladder peak RSS | 654.1 MiB | 100.7 MiB | 6.5× |
+
+### Why a separate process
+
+`peakrss` is `ru_maxrss`, a high-water mark the kernel never lowers ([PERF
+§2.7](PERF.md)), and
+[D-014](#d-014--the-memory-pass-line-reads-the-processs-mark-milestone-8-misses-it-and-milestone-10-does-not-fire-on-that)
+fixed the memory clause as the **ladder's** peak. A probe folded into the ladder
+would raise the mark to near its top-rung value before rung 1 reported, changing what
+the clause reads. Its own process has its own mark.
+
+### A documented step, not an enforced one
+
+No Go code, no new flag: `-rates` and `-rotations` both already existed, so the
+target is six lines of Makefile and `pkg/` stays at zero. What was missing was never
+the arithmetic — nobody failed to compare two printed numbers. **Nobody ran a probe
+at all** before a 97-minute ladder. The fix is that the step exists in the procedure.
+
+The ceiling is on the target in a `ponytail:` comment: if a fourth ladder still comes
+back void, the probe becomes a `-preflight` flag with an exit code, about thirty lines
+in `cmd/weft-eval/bench.go`.
+
+### The rejected alternatives, and what revives each
+
+- **`ru_nivcsw` per rung.** `internal/loadgen/rusage_unix.go` already calls
+  `getrusage`, so one more field is a few lines, and involuntary context switches
+  measure contention **directly** instead of by proxy. Rejected for having no
+  threshold: this repository held **zero** observations of the figure, so it would
+  have added a number rather than a gate. The first two observations arrived with the
+  probes below and do not fix that — the machine passed the probe but was not quiet
+  in the registered sense, so they bound nothing. **Revived by** a run where the probe
+  passes and the ladder is void anyway, which is the case where the probe cannot see
+  what the ladder feels.
+- **`uptime` load average around each run.** Zero lines, and a proxy for the thing
+  rather than the thing. **Partly adopted**: logged beside `date`, which is what item
+  2 asked for, and excluded from the verdict.
+
+### The falsification condition fired on first use — 2026-08-28
+
+**Accepted, and amended by its own test.** The condition below said *a ladder that
+comes back void after a probe that passed* would show this wrong. Four probes passed —
+1.00× to 1.05×, shed 0 — and **two ladder attempts produced no verdict**: the first
+took SIGTERM at 46 minutes, the second completed eight rungs and both arms printed
+`DISCARD this run` after the laptop's lid was closed mid-ladder, twice.
+
+The naive conclusion is that the probe is worthless. That is wrong, and the correct
+reading is what makes this decision worth keeping:
+
+| failure mode | detector | worked? |
+| --- | --- | --- |
+| a **contended** machine | `bench-preflight`, this decision | untested — no attempt failed this way |
+| a **suspended** machine | `SuspendTolerance`, present since milestone 7 | **yes**, in-band, both arms, with durations |
+| a machine that **stays awake** | `caffeinate -dimsu`, prescribed since milestone 5 | **no** |
+
+**Both detectors behaved correctly; the mitigation is what failed.** The probe measures
+contention and the failure was suspension — different things, caught by different
+checks, and the second check did its job without help. So the amendment is not to the
+probe's pass line, which is untouched, but to two places around it:
+
+1. **The lid stays open.** `caffeinate -dimsu` holds `PreventUserIdleSystemSleep` and
+   has no power over clamshell sleep; the machine slept on AC at 100% charge. Nine
+   milestones prescribed a remedy that does not cover the failure mode `clock.go`'s own
+   comment names. Now stated beside the command in [PERF §5.7](PERF.md).
+   `sudo pmset disablesleep 1` rejected — root, and a machine that never sleeps if the
+   operator forgets to unset it.
+2. **The probe is necessary and not sufficient, for two reasons rather than one.** It
+   certifies the machine at the instant it runs and the ladder needs 3.1 hours; and it
+   measures one failure mode of at least three. [PERF §5.7](PERF.md) gains readings 5
+   and 6 — *window known unavailable* → not executed, and *instrument discarded the
+   completed run* → void with the cause in-band.
+
+**What the probe did buy, and it is not nothing.** Twelve independent readings of
+`alloc 10869.0 KiB/query` across probes and rungs, agreeing with the published figure
+to one decimal, which is the evidence that both arms run the same work. And the
+observation that 27.28 q/s as a **lone rung** returns 34–35 ms on this machine while
+27.28 q/s as a **ladder's fourth rung** collapses to 1.6–2.0 s — a second, sharper use
+for the distinction
+[D-014](#d-014--the-memory-pass-line-reads-the-processs-mark-milestone-8-misses-it-and-milestone-10-does-not-fire-on-that)
+drew for `peakrss`, and the reason a passing probe can never stand in for the clause.
+
+### What would still show this wrong
+
+A ladder that comes back void on a **quiet, awake** machine after a passing probe —
+the test the two attempts above did not get to run, because neither machine stayed
+awake. If that happens the probe is measuring something the ladder does not care
+about, and `ru_nivcsw` per rung becomes the next instrument rather than a rejected
+alternative. The opposite failure — a probe that fails on a machine which would in
+fact have reproduced the ladder — costs one minute and is the direction the threshold
+was chosen to err in.
