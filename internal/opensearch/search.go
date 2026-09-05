@@ -138,15 +138,7 @@ func parseSearch(ix *engine.Index, raw []byte) (plan, *apiError) {
 					"query, or raise the window in a build you control",
 				*req.Size, maxResultWindow)
 		}
-		// min as well as the refusal above, and the redundancy is deliberate.
-		// The refusal is the API's answer — a client learns its request was too
-		// large. The clamp is the memory bound, and it is written at the
-		// assignment because that is where the number stops being the client's:
-		// everything downstream reads plan.size, in another function and then in
-		// another package, and a guard that lives three frames up is a guard the
-		// next reader has to go and find. CodeQL cannot follow it either, which
-		// is how this whole defect was found.
-		p.size = min(*req.Size, maxResultWindow)
+		p.size = *req.Size
 	}
 
 	if len(req.Query) == 0 {
@@ -271,8 +263,21 @@ func matchText(field string, value json.RawMessage) (string, *apiError) {
 // total is exact.
 func runSearch(ctx context.Context, x *Index, p plan) (hits []hit, total int, exact bool, err error) {
 	ix := x.Engine()
+
+	// Bounded here as well as refused in parseSearch, and the repetition is the
+	// point. parseSearch answers the client; this answers the allocator.
+	// engine.NewCollector does make([]Candidate, 0, k) with whatever k it is
+	// handed, so the last place that can keep a request from choosing this
+	// process's heap is the frame that makes the call — not one three frames up,
+	// on the other side of a struct field. A reader checking this line should not
+	// have to go and find the guard, and neither should an analyser.
+	size := p.size
+	if size > maxResultWindow {
+		size = maxResultWindow
+	}
+
 	if p.matchAll {
-		hits, total = matchAllHits(x, p.size)
+		hits, total = matchAllHits(x, size)
 		return hits, total, true, nil
 	}
 	if len(p.scorers) == 0 {
@@ -281,7 +286,7 @@ func runSearch(ctx context.Context, x *Index, p plan) (hits []hit, total int, ex
 		return nil, 0, true, nil
 	}
 
-	cands, err := engine.Search(ctx, engine.Query{}, p.size, fusion.Fuse, p.scorers...)
+	cands, err := engine.Search(ctx, engine.Query{}, size, fusion.Fuse, p.scorers...)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -296,7 +301,7 @@ func runSearch(ctx context.Context, x *Index, p plan) (hits []hit, total int, ex
 	// Exact only when the cut did not bind. Search returns the top k, so a full
 	// page is a lower bound on how many documents matched, and calling that "eq"
 	// would be a number this server cannot stand behind.
-	return hits, len(hits), len(cands) < p.size, nil
+	return hits, len(hits), len(cands) < size, nil
 }
 
 // matchAllHits walks the id space.
