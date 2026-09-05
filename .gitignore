@@ -33,6 +33,11 @@ go.work.sum
 # /.eval-data/ above, at a smaller scale.
 /.weftd-data/
 
+# Per-milestone TDD plans. Working notes written before the tests, not the
+# evidence — that lives in the _test.go files and docs/FINDINGS.md.
+docs/testing/
+docs/tdd/
+
 # Local tooling, editor, and OS noise
 .claude/
 .ruff_cache/
