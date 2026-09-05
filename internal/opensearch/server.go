@@ -115,6 +115,15 @@ const (
 	keyClusterName = "cluster_name"
 )
 
+// The `result` a write reports. Spelled once because bulk.go answers with the
+// same three words and a client branches on them.
+const (
+	resultCreated = "created"
+	resultUpdated = "updated"
+	resultDeleted = "deleted"
+	resultMissing = "not_found"
+)
+
 // docResult answers a write or a delete. A struct rather than a map literal
 // because the same five keys are spelled in three handlers, and a typo in one
 // of them is a field a client silently does not find.
@@ -477,9 +486,9 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
-	result, status := "updated", http.StatusOK
+	result, status := resultUpdated, http.StatusOK
 	if created {
-		result, status = "created", http.StatusCreated
+		result, status = resultCreated, http.StatusCreated
 	}
 	writeJSON(w, status, docResult{Index: x.Name(), ID: id, Version: 1, Result: result, Shards: oneShard})
 	return nil
@@ -528,9 +537,9 @@ func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
-	result, status := "deleted", http.StatusOK
+	result, status := resultDeleted, http.StatusOK
 	if !found {
-		result, status = "not_found", http.StatusNotFound
+		result, status = resultMissing, http.StatusNotFound
 	}
 	writeJSON(w, status, docResult{Index: x.Name(), ID: id, Version: 1, Result: result, Shards: oneShard})
 	return nil

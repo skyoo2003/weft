@@ -268,12 +268,12 @@ func itemFor(a *bulkAction, index string, err error) map[string]bulkItem {
 		}
 		return failedItem(a, index, status, kind, err.Error())
 	}
-	result, status := "updated", http.StatusOK
+	result, status := resultUpdated, http.StatusOK
 	switch {
 	case a.op == opDelete:
-		result = "deleted"
+		result = resultDeleted
 	case a.created:
-		result, status = "created", http.StatusCreated
+		result, status = resultCreated, http.StatusCreated
 	}
 	shards := oneShard
 	return map[string]bulkItem{a.op: {

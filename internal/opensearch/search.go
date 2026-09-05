@@ -180,7 +180,15 @@ const (
 	boundLTE = "lte"
 	boundLT  = "lt"
 
-	clauseBool = "bool"
+	// The clause names this file both dispatches on and quotes back in an error.
+	// Two spellings of one name is how a clause comes to be routed under one and
+	// refused under the other.
+	clauseBool     = "bool"
+	clauseMatchAll = "match_all"
+	clauseHybrid   = "hybrid"
+	clauseKnn      = "knn"
+	clausePrefix   = "prefix"
+	clauseWildcard = "wildcard"
 
 	occMust    = "must"
 	occMustNot = "must_not"
@@ -275,7 +283,7 @@ func parseSearch(x *Index, raw []byte) (plan, *apiError) {
 
 	c := &compiler{ix: x.Engine(), m: x.Mapping(), p: &p}
 	for name, body := range req.Query {
-		if name == "match_all" {
+		if name == clauseMatchAll {
 			p.matchAll = true
 			return p, nil
 		}
@@ -285,7 +293,7 @@ func parseSearch(x *Index, raw []byte) (plan, *apiError) {
 			}
 			return p, nil
 		}
-		if name == "hybrid" {
+		if name == clauseHybrid {
 			if err := c.hybridQuery(body); err != nil {
 				return plan{}, err
 			}
@@ -383,7 +391,7 @@ func (c *compiler) clause(name string, body json.RawMessage) (compiled, *apiErro
 		return c.term(body)
 	case "terms":
 		return c.terms(body)
-	case "prefix", "wildcard":
+	case clausePrefix, clauseWildcard:
 		return c.pattern(body, name)
 	case "fuzzy":
 		return c.fuzzy(body)
@@ -391,11 +399,11 @@ func (c *compiler) clause(name string, body json.RawMessage) (compiled, *apiErro
 		return c.rangeQuery(body)
 	case "exists":
 		return c.exists(body)
-	case "knn":
+	case clauseKnn:
 		return c.knn(body)
 	case "function_score":
 		return c.functionScore(body)
-	case "hybrid":
+	case clauseHybrid:
 		return compiled{}, badRequest("parsing_exception",
 			"a hybrid inside another clause is not supported: hybrid *is* the fusion of the whole query, so "+
 				"nesting one would be asking for a fusion of fusions. Put it at the top level")
@@ -405,7 +413,7 @@ func (c *compiler) clause(name string, body json.RawMessage) (compiled, *apiErro
 				"of streams with an intersection and a difference over it, which is pkg/query's argument, and "+
 				"nesting would need a query tree and an evaluator over it. That is a different engine. "+
 				"Flatten the clauses into the outer bool")
-	case "match_all":
+	case clauseMatchAll:
 		return compiled{}, badRequest("parsing_exception",
 			"match_all is a whole query and not a clause: inside a bool it would be a stream naming every "+
 				"document, and no scorer here does that — a Glob over everything stops at query.MaxTerms. "+
@@ -730,7 +738,7 @@ func (c *compiler) pattern(body json.RawMessage, kind string) (compiled, *apiErr
 
 	space := termSpace(field)
 	pattern := text
-	if kind == "prefix" {
+	if kind == clausePrefix {
 		pattern = termLiteral(text) + "*"
 	}
 	// A wildcard's `*` and `?` are meant, so its value goes through unescaped.
@@ -885,7 +893,7 @@ func (c *compiler) exists(body json.RawMessage) (compiled, *apiError) {
 // because fusion.Fuse cannot tell them apart, which is milestone 1's claim being
 // re-run on the other side of a process boundary.
 func (c *compiler) knn(body json.RawMessage) (compiled, *apiError) {
-	field, value, apiErr := oneField("knn", body)
+	field, value, apiErr := oneField(clauseKnn, body)
 	if apiErr != nil {
 		return compiled{}, apiErr
 	}
