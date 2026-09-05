@@ -4219,3 +4219,125 @@ the commit boundary where the block structure appears.
    document-at-a-time answered the same question by needing the length once. It is still a lock
    per document and still unmeasured under concurrency.
 4. **The ladder is owed by four rounds.** Every figure here is sequential.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 24 — An OpenSearch surface, and the line under `pkg/` it cost
+
+## 1. What was claimed, and what it cost
+
+`cmd/weftd` speaks a subset of the OpenSearch REST API and `opensearch-py` drives it
+unmodified. The milestone's own mechanical definition was **zero lines under `pkg/`**, and
+[D-025](DECISIONS.md) registered the opposite as its falsification condition: *a line needed
+under `pkg/` … gets written into `docs/FINDINGS.md` before the line is written into the code.*
+
+**The condition fired.** This section is that entry, and it is committed before the change it
+describes.
+
+## 2. What needed the line, and it was not the API
+
+Nothing about the HTTP surface required `Scorer`, `Search` or `Fuse` to widen. The whole
+milestone landed with both golden API files unchanged, `go list -m all` at one module, and
+`pkg/fusion` still unable to name a scorer. The architecture claim survived the process
+boundary intact, which is the result the condition existed to test.
+
+What did not survive was an **allocation**.
+
+CodeQL failed the pull request with `go/uncontrolled-allocation-size`, high severity, at
+`pkg/engine/topk.go:128` — a line the branch never touched:
+
+```go
+return &Collector{k: k, best: make([]Candidate, 0, k)}
+```
+
+`NewCollector` has always preallocated for the `k` it is handed. That was safe for every caller
+this project had, because every caller was a program that chose its own `k`. The HTTP surface
+introduced the first caller who **does not own the number**: a search body of
+`{"size": 2000000000}` asks this process for roughly 32 GB before a document is scored.
+
+The bug is therefore not in the server and never was. It is in a function that trusts its
+argument, and it was reachable from a library user the whole time — `NewCollector` is exported,
+and `engine.Search`'s `k` reaches it through `scorer/text`. What the server changed is who can
+supply the argument.
+
+## 3. Three fixes in the server, and why all three were the wrong place
+
+The first three attempts stayed inside `internal/opensearch`, and the alert survived all three:
+
+| Attempt | Shape | Result |
+| --- | --- | --- |
+| Refuse in `parseSearch` | `if *req.Size > maxResultWindow { return 400 }` | alert open |
+| Clamp at the assignment | `p.size = min(*req.Size, maxResultWindow)` | alert open |
+| Bound in the calling frame | `size := p.size; if size > maxResultWindow { size = maxResultWindow }` | alert open |
+
+The SARIF says why, and it is worth reading rather than working around. The reported flow steps
+straight from `search.go`'s `selection of size` to the `engine.Search` call and on through
+`scorer/text` into `topk.go`, crossing a struct field, two functions and two packages. A guard
+that far from the allocation is a guard neither an analyser nor the next reader can be expected
+to find.
+
+**The analyser was making an engineering point, not a tooling complaint.** Three guards spread
+over two packages, each of which has to hold for the program to be safe, is worse than one
+bound written where the memory is actually requested.
+
+## 4. The line, and what it is not
+
+```go
+// Preallocated only up to a ceiling this package sets, and grown by append past
+// it. k is the caller's number, and since milestone 24 a caller can be an HTTP
+// handler relaying a request body.
+if k > maxPrealloc {
+    return &Collector{k: k}
+}
+return &Collector{k: k, best: make([]Candidate, 0, k)}
+```
+
+`maxPrealloc` is 4096, which is 64 KiB — the largest single allocation any `k` can now ask for.
+Past it the slice grows by `append`, bounded by the documents that actually arrive rather than
+by the number the caller named.
+
+Three things this is **not**:
+
+- **Not an API change.** `NewCollector`'s signature, `Collector`'s behaviour and every score are
+  unchanged. `engine_api.txt` and `public_api.txt` are both untouched, and `make arch` passes.
+- **Not a performance regression.** The published `k` is 10. See §5.
+- **Not a new constraint on callers.** A `k` above 4096 still keeps the best `k`; it simply is
+  not preallocated for.
+
+## 5. The measurement, because milestone 23 is what this could have broken
+
+`Collector` is the structure milestone 23 built the document-at-a-time path around, and its one
+production caller is `scorer/text`. Removing the preallocation outright would have cost four
+allocations a query on a shape whose whole budget is five. `make bench-head`, 50,000 documents,
+top 10, Apple M4:
+
+| Query shape | Before | After |
+| --- | --- | --- |
+| absent | 327.5 ns, 152 B, 5 allocs | see below |
+| rare | 1100 ns, 2873 B, 17 allocs | |
+| mid | 28102 ns, 4322 B, 62 allocs | |
+| common | 1345558 ns, 61673 B, 2630 allocs | |
+| mixed | 1428380 ns, 67822 B, 2692 allocs | |
+
+The ceiling is what keeps the after column equal to the before column: every published shape
+uses `k = 10`, which is far below 4096, so the preallocation still happens exactly as it did.
+**The change is invisible at the sizes this project measures and only binds at the sizes it
+never intended to serve** — which is the shape a security fix should have.
+
+## 6. Carried forward
+
+1. **The server's three guards stay.** `parseSearch` still returns 400 above the result window,
+   because a client that asked for too much has to be told, and a silent clamp would be the
+   quietly-wrong answer this milestone is otherwise arranged against. Defence in depth here is
+   two answers to two different audiences, not redundancy.
+2. **`pkg/` is no longer at zero lines for milestone 24, and the number is 6.** The claim that
+   survives is the narrower and more interesting one: *the HTTP surface required no change to
+   the library's API*. The change it did require was a hardening of an allocation that was
+   always reachable and never guarded.
+3. **Every local check passed over this.** `go vet`, golangci-lint including gosec, `-race`, 48
+   tests. The taint source and the allocation live in different packages, and nothing in
+   `make all` crosses that gap. That is an argument for keeping CodeQL required, and it is the
+   first time in this project that CI found something the local gate could not.
+4. **`Index.Nearest` and `TopK` take a caller's `k` too.** Neither preallocates on it the way
+   `NewCollector` did, but neither has been read with this question in mind. Unmeasured.
