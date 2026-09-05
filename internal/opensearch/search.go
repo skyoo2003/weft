@@ -110,6 +110,11 @@ type plan struct {
 	// depth overrides from+size when a clause asks every stream for more
 	// candidates than the page needs. A knn clause's k is the one that does.
 	depth int
+
+	// fuse replaces everything fuser() would have assembled, and only one caller
+	// sets it: /_weft/query, whose constraints were fixed by pkg/query.Parse over
+	// the very stream list it produced. nil everywhere else.
+	fuse engine.Fuser
 }
 
 // fuser assembles this plan's constraints over fusion.Fuse.
@@ -136,6 +141,13 @@ type plan struct {
 // carrying weights has no must_not positions. TestHybridWeightsAndMustNotDoNotMeet
 // is what holds that rather than this comment.
 func (p plan) fuser() engine.Fuser {
+	// A route that brought its own Fuser wins outright. /_weft/query is the one
+	// that does: pkg/query.Parse hands back the constraints as a Fuser over the
+	// positions it just fixed, and rebuilding those from must and mustNot here
+	// would be this file holding a second opinion about a query it did not parse.
+	if p.fuse != nil {
+		return p.fuse
+	}
 	base := engine.Fuser(fusion.Fuse)
 	if p.weights != nil {
 		base = fusion.FuseWeighted(p.weights...)

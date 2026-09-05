@@ -419,6 +419,44 @@ func (x *Index) Commit(ctx context.Context) error {
 	})
 }
 
+// Merge rewrites the segment set and commits the result.
+//
+// On the writer goroutine, like every other mutation: Merge replaces the
+// segments under the index, and a commit racing it would be writing a manifest
+// for a set that is being taken apart.
+//
+// The commit is not optional. engine.Merge changes what is in memory, and a
+// merged index never committed leaves the directory holding exactly the segments
+// the merge existed to replace — so a client would be told the merge happened
+// and find the old layout after a restart.
+func (x *Index) Merge(ctx context.Context) error {
+	return x.write(func() error {
+		if err := x.ix.Merge(); err != nil {
+			return fmt.Errorf("merge %q: %w", x.name, err)
+		}
+		if err := x.ix.Commit(ctx, x.dir); err != nil {
+			return fmt.Errorf("commit the merge of %q: %w", x.name, err)
+		}
+		return nil
+	})
+}
+
+// Scrub verifies what is committed in this index's directory.
+//
+// On the writer goroutine as well, for a reason the read-only signature hides:
+// engine.Scrub walks the files a commit replaces, so one running alongside a
+// commit reads half of each generation and reports the damage that reading
+// caused. It checks the committed generation and nothing else — writes since the
+// last commit are not on disk to be checked.
+func (x *Index) Scrub() error {
+	return x.write(func() error {
+		if err := engine.Scrub(x.dir); err != nil {
+			return fmt.Errorf("scrub %q: %w", x.name, err)
+		}
+		return nil
+	})
+}
+
 // close stops the writer and releases the index's mappings.
 func (x *Index) close() error {
 	select {
