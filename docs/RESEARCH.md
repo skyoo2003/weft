@@ -52,6 +52,8 @@ So a graph, recency or popularity signal cannot join bleve's rank fusion as a fi
 
 **Lucene is the finding that matters.** Adding a ranking signal in embeddable Lucene = index a doc-values field + edit an expression — no engine code touched. The capability weft is building is not novel; it has existed for years, in Java. What does not exist is the Go equivalent: bleve is closed (§1), bluge is unmaintained (custom-score example exists, repo dormant since ~2022), riot archived, zinc/blast/phalanx are servers.
 
+**weft now ships a server too, and that last clause still stands.** Milestone 24 added `cmd/weftd`, which speaks a subset of the OpenSearch REST API. What "zinc/blast/phalanx are servers" rejects is not the existence of a server but a *server as the only way in*: a deployment to run, a wire protocol to speak, and no way to add a ranking signal without touching the engine. `weftd` is a `cmd/` over a library that is still `go get`-able, and the boundary is checked rather than asserted — milestone 24 changed **zero lines under `pkg/`**, and a fifth scorer is still a constructor an embedder writes. If a capability ever lands in `internal/opensearch` that a library user cannot reach, this paragraph is wrong, and [D-025](DECISIONS.md) registers that as its own falsification condition.
+
 ## 4. What this changes for weft
 
 1. **The architecture bet survives, sharpened.** Honest positioning: *"Lucene-Expressions-class open ranking, in Go, with fusion-native signals"* — a language-and-design gap, not a capability-first invention. The PRD's Problem statement ("fusion is always the special case") is now backed by bleve's actual source, not assumption.

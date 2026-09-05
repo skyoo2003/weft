@@ -52,6 +52,21 @@ The demo fuses with `FuseWeighted(1, 1, 0.1, 1)`, discounting the graph stream t
 
 Minimal embedding: [`examples/basic`](examples/basic/main.go). Godoc example: `Example` in `pkg/engine`.
 
+### Or over HTTP, without writing Go
+
+```bash
+go run ./cmd/weftd                                  # 127.0.0.1:9200
+curl -XPUT localhost:9200/papers
+curl -XPUT 'localhost:9200/papers/_doc/1?refresh=true' \
+  -H 'Content-Type: application/json' -d '{"text":"reciprocal rank fusion"}'
+curl -XPOST localhost:9200/papers/_search \
+  -H 'Content-Type: application/json' -d '{"query":{"match":{"text":"fusion"}}}'
+```
+
+`weftd` speaks a subset of the OpenSearch REST API, and `opensearch-py` drives it unmodified — `make compat` is that check. `GET /` reports OpenSearch 2.19.0, which is untrue and is the **only** untrue thing it says: past the handshake, a query weft cannot express returns 400 or 501 with a reason rather than 200 with an empty hit list. [DECISIONS](docs/DECISIONS.md) D-025 and D-026 argue both halves.
+
+The library is still the product. The server is a `cmd/`, and adding it changed **zero lines under `pkg/`** — which is the assertion rather than the aspiration. The production warning above applies to it unchanged, and it binds to loopback because there is no authentication and no TLS.
+
 ## Documentation
 
 Each document answers one question, and only that one.

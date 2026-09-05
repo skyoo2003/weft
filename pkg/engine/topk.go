@@ -119,11 +119,31 @@ type Collector struct {
 	best []Candidate
 }
 
+// maxPrealloc caps what one Collector reserves up front: 4096 candidates, 64 KiB.
+//
+// The ceiling exists because k is the *caller's* number, and since milestone 24 a
+// caller can be an HTTP handler relaying a request body — `{"size": 2000000000}`
+// asked this constructor for roughly 32 GB before a document was scored. Every
+// caller before that chose its own k and could not be a threat to itself, which
+// is why the allocation stood unguarded for twenty-three milestones and why the
+// server, not the engine, is where the hazard arrived.
+//
+// It is not a limit on k. A Collector still keeps the best k of any size; past
+// this it grows by append, bounded by the documents that actually arrive rather
+// than by the number the caller named. 4096 is above every k this project
+// measures — the published benchmarks use 10 — so the reservation still happens
+// exactly as it did wherever it was ever worth having: docs/FINDINGS.md
+// milestone 24.
+const maxPrealloc = 4096
+
 // NewCollector returns a Collector keeping the best k. A k of zero or less
 // keeps nothing, which is the convention every Candidates already uses.
 func NewCollector(k int) *Collector {
 	if k <= 0 {
 		return &Collector{}
+	}
+	if k > maxPrealloc {
+		return &Collector{k: k}
 	}
 	return &Collector{k: k, best: make([]Candidate, 0, k)}
 }

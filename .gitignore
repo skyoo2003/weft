@@ -27,6 +27,12 @@ go.work.sum
 # internal/eval/testdata/ are deliberately NOT here — those are the evidence.
 /.eval-data/
 
+# weftd's default -data directory. One subdirectory per index, holding committed
+# segments and the _source store — the server's working state, reproducible by
+# re-indexing and never something to carry in the history. Same reasoning as
+# /.eval-data/ above, at a smaller scale.
+/.weftd-data/
+
 # Local tooling, editor, and OS noise
 .claude/
 .ruff_cache/

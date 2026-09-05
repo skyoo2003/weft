@@ -1,0 +1,15 @@
+kind: Added
+body: '`cmd/weftd` serves weft over a subset of the OpenSearch REST API, so trying it no
+  longer requires writing a Go program: `GET /`, `_cluster/health`, index create/delete/exists,
+  the `_doc` create-read-update-delete round trip, and `_search` speaking `match` and
+  `match_all`. `opensearch-py` drives it unmodified — `make compat` is that check, and it
+  skips rather than fails when the client is absent so `make all` still needs nothing but
+  the Go toolchain. The handshake reports OpenSearch 2.19.0, which is untrue and is the
+  only untrue thing the server says: past it, a query weft cannot express returns 400 or
+  501 with a reason and never 200 with an empty hit list. A `match` becomes one term stream
+  per token fused by `fusion.Fuse`, because rank fusion is already the union of votes an
+  OR-ed match means. The server lives in `cmd/` and `internal/`, and this release changes
+  **zero lines under `pkg/`** — see docs/DECISIONS.md D-025 and D-026.'
+time: 2026-09-05T12:00:00.000000000+09:00
+custom:
+  Issue: 24
