@@ -134,6 +134,30 @@ tests that closed that gap found a second real defect: **`refresh=maybe` returne
 400 over a document that was already indexed.** `parseRefresh` now runs before the
 write. Coverage after: **87.1%**.
 
+### Task 9 — the defect CI found, and the one the local gate could not
+
+`make all` passed locally and in CI. **CodeQL failed the pull request**, and it
+was right: `go/uncontrolled-allocation-size`, high severity, at
+`pkg/engine/topk.go:128` — a line this branch does not touch.
+
+That is the interesting part. `engine.NewCollector` does
+`make([]Candidate, 0, k)` with the `k` `engine.Search` was handed, and it has
+always done so. What the HTTP surface added was **a caller who does not own the
+number**: `{"size": 2000000000}` in a search body asks this process for roughly
+32 GB before a document is scored. An embedder passing its own `k` is not a
+threat to itself; a request body is.
+
+Fixed at the boundary rather than in `pkg/`, because the cap is a policy about
+requests and not about the library — `maxResultWindow = 10000`, which is
+OpenSearch's own `index.max_result_window`, so a client that already handles that
+error handles this one. RED first: `size: 2000000000` returned **200** before the
+fix. Coverage after: **87.2%**, 49 tests.
+
+**The lesson worth keeping is about the gate, not the bug.** Every local check —
+`go vet`, golangci-lint including gosec, `-race`, 48 tests — passed over this. The
+allocation and the taint source are in different packages, and only whole-program
+taint analysis crosses that gap.
+
 ## Test specification
 
 | # | What is guaranteed | Test | Type | Result |
@@ -149,11 +173,12 @@ write. Coverage after: **87.1%**.
 | 9 | Every long-form `match` option is named rather than dropped, 8 shapes | `mapping_test.go:TestMatchAcceptsTheLongFormAndRefusesItsOptions` | integration | PASS |
 | 10 | Scalars are indexed, structures are stored only, a field is its own term space | `mapping_test.go:TestScalarsAreIndexedAndStructuresAreOnlyStored`, 5 subtests | integration | PASS |
 | 11 | A mapping is refused rather than accepted and dropped | `mapping_test.go:TestCreateIndexRefusesAMappingItCannotHonour` | integration | PASS |
-| 12 | **The library stays the product: zero lines under `pkg/`** — J4 | `git diff --stat main -- pkg/`, `make arch`, `make deps` | invariant | PASS |
+| 12 | A `size` large enough to exhaust the heap is refused before it is allocated | `mapping_test.go:TestASizeThatWouldAllocateTheHeapIsRefused` | integration | PASS |
+| 13 | **The library stays the product: zero lines under `pkg/`** — J4 | `git diff --stat main -- pkg/`, `make arch`, `make deps` | invariant | PASS |
 
 ```console
-$ go test -race ./internal/opensearch/     # 48 tests and subtests
-ok  github.com/skyoo2003/weft/internal/opensearch  3.085s
+$ go test -race ./internal/opensearch/     # 49 tests and subtests
+ok  github.com/skyoo2003/weft/internal/opensearch  3.012s
 
 $ make compat PYTHON=/tmp/weft-compat-venv/bin/python
 PASS: opensearch-py drove weftd unmodified.        # opensearch-py 3.2.0, 21 checks
@@ -169,7 +194,7 @@ OK: fusion imports no scorer package
 
 ## Coverage and known gaps
 
-`internal/opensearch` statements: **87.1%**. `cmd/weftd` has no test file; what it
+`internal/opensearch` statements: **87.2%**. `cmd/weftd` has no test file; what it
 holds is flag parsing, a listener and a banner, and the handler it wires is the
 one the 48 tests above drive.
 
@@ -201,6 +226,8 @@ af6f08a  refactor: named response types, lint gate green
 (head)   fix: validate refresh before the write, not after
 ```
 
-If these are squashed, the two findings worth carrying into the squash body are
-the ones the tests bought rather than confirmed: **a send on a closed channel
-panics inside a `select`**, and **`refresh` was validated after the write**.
+If these are squashed, the three findings worth carrying into the squash body are
+the ones the checks bought rather than confirmed: **a send on a closed channel
+panics inside a `select`**; **`refresh` was validated after the write**; and
+**a request-supplied `size` reached an allocation in `pkg/engine` that no local
+check could see, because the source and the sink are in different packages**.

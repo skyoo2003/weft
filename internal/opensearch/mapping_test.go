@@ -194,3 +194,32 @@ func TestRefreshRefusesAValueItCannotMean(t *testing.T) {
 		t.Errorf("after a refused refresh the document exists: status %d, want 404 (body %s)", status, raw)
 	}
 }
+
+// CodeQL found this before a user did: engine.NewCollector does
+// make([]Candidate, 0, k) with the k Search was given, so a size taken straight
+// from a request body is a remote allocation primitive — {"size": 2000000000}
+// asks this process for about 32 GB. The cap belongs here rather than in pkg/:
+// it is a policy about requests, not about the library, and OpenSearch answers
+// the same question the same way with index.max_result_window.
+func TestASizeThatWouldAllocateTheHeapIsRefused(t *testing.T) {
+	srv, _ := newTestServer(t)
+	do(t, srv, http.MethodPut, "/papers", "")
+	do(t, srv, http.MethodPut, "/papers/_doc/1", `{"text":"a"}`)
+
+	for _, size := range []string{"10001", "1000000", "2000000000"} {
+		body := `{"query":{"match":{"text":"a"}},"size":` + size + `}`
+		status, raw := do(t, srv, http.MethodPost, "/papers/_search", body)
+		if status != http.StatusBadRequest {
+			t.Errorf("size %s: status %d, want 400 (body %s)", size, status, raw)
+		}
+	}
+	// match_all reaches the same allocation by a different route.
+	if status, raw := do(t, srv, http.MethodPost, "/papers/_search", `{"size":2000000000}`); status != http.StatusBadRequest {
+		t.Errorf("match_all with size 2000000000: status %d, want 400 (body %s)", status, raw)
+	}
+	// The window itself is still allowed.
+	if status, raw := do(t, srv, http.MethodPost, "/papers/_search",
+		`{"query":{"match":{"text":"a"}},"size":10000}`); status != http.StatusOK {
+		t.Errorf("size at the window: status %d, want 200 (body %s)", status, raw)
+	}
+}

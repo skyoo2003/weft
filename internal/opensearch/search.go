@@ -29,6 +29,22 @@ const textField = "text"
 // hits it would get from OpenSearch.
 const defaultSize = 10
 
+// maxResultWindow caps size, and it is a security boundary rather than a
+// preference.
+//
+// engine.NewCollector does make([]Candidate, 0, k) with the k engine.Search was
+// handed, so a size read straight out of a request body is a remote allocation
+// primitive: {"size": 2000000000} asks this process for roughly 32 GB before a
+// single document is scored. CodeQL's go/uncontrolled-allocation-size found that
+// path the day the HTTP surface created it — the allocation is in pkg/engine and
+// unchanged, and what was new is a caller who does not own the number.
+//
+// The cap lives here rather than in pkg/ because it is a policy about requests
+// and not about the library: an embedder passing its own k is not a threat to
+// itself. 10,000 is OpenSearch's index.max_result_window, so a client that
+// already handles that error handles this one.
+const maxResultWindow = 10000
+
 // searchRequest is the part of the search DSL this server reads.
 //
 // Every field here exists to be *refused* except Query and Size. That is not
@@ -114,6 +130,13 @@ func parseSearch(ix *engine.Index, raw []byte) (plan, *apiError) {
 	if req.Size != nil {
 		if *req.Size < 0 {
 			return plan{}, badRequest("illegal_argument_exception", "size must not be negative, got %d", *req.Size)
+		}
+		if *req.Size > maxResultWindow {
+			return plan{}, badRequest("illegal_argument_exception",
+				"size %d is over the result window of %d: the top-k collector allocates for the size it is "+
+					"given, so this is refused before it is allocated rather than after. Page with a narrower "+
+					"query, or raise the window in a build you control",
+				*req.Size, maxResultWindow)
 		}
 		p.size = *req.Size
 	}
