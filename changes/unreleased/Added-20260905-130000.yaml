@@ -1,24 +1,27 @@
 kind: Added
-body: '**Named fields, so a query can ask about one part of a document.**
-  `engine.Document` gains `Fields []Field`, each a `{Name, Text}` indexed beside
-  `Text`, and `text.NewField(ix, "title")` is a BM25 scorer that reads one of
-  them. A field is a **term space, not a section**: every field is split by the
-  same `Tokenizer` and its terms go into the same postings under
-  `name + NUL + token`, which `engine.FieldTerm` spells and exports so a scorer
-  written outside the module can build the same key. So nothing in the index
-  learned what a field means, no new section or table was added, and searching two
-  fields is two scorers and fusion between them rather than a feature of one. A
-  term in `Text` and the same term in a field are **different terms** — that is
-  what makes a scoped query mean anything, and a caller wanting a word findable
-  both ways puts it in both places. `ErrBadField` refuses a name that is empty,
-  holds the separator, or repeats within one document; each is a term space no
-  lookup could reach, and a segment carrying one is refused as corrupt.
-  **The field-scoped scorer does not normalize by length**, and that is a
-  decision rather than an omission: a document''s stored token count is Text plus
-  every field with no record of which was which, so normalizing a five-token
-  title by a five-thousand-token body would rank by brevity. B is 0 there. What
-  it gives up is separating two equally good field matches by field length; a
-  per-field count is a format v6 and is not bought before something measures it.'
+body: '**Hybrid search over HTTP, and the fourth signal that measures what the wire
+  charges for one.** `knn` becomes a `scorer/vector` stream, `hybrid` fuses any
+  number of sub-queries through `fusion.Fuse`, and an optional `weights` array —
+  weft''s, not OpenSearch''s, which puts the weighting in a search pipeline —
+  becomes `fusion.FuseWeighted`. A weight attaches to a **position** and never to a
+  name, so `go list -deps ./pkg/fusion` still names no scorer package: that is
+  D-005''s repayment reaching the wire, where a client can now turn down a stream
+  with nothing to say without the fusion learning what the stream holds.
+  `search_pipeline` is refused with a 400 that states the thesis — normalizing two
+  streams onto a common scale is the step this server does not have, because rank
+  fusion reads position and never score. `function_score` with a `gauss`, `exp` or
+  `linear` decay becomes a `scorer/recency` stream, on the date field a mapping
+  marks with `"recency": true`; the decay''s *parameters* are refused, because
+  `scorer/recency` has a fixed half-life and reading `scale` to ignore it would rank
+  by a curve nobody asked for. **What the round bought is a number.** Adding that
+  fourth signal changed **0 lines** of fusion code — asserted structurally, not by
+  eye — and cost 57 lines in its query clause, inside milestone 1''s hundred-line
+  budget. Counted the way milestone 1 counted, the whole change is 127 lines and
+  over budget, and the 27-line difference is one sentence: **the wire has no place
+  to say "this date is the document''s time."** In a Go program filling
+  `Document.Time` is a field assignment; over HTTP the binding has to be carried by
+  a mapping. The query half is as cheap as the architecture promised; the surcharge
+  is the protocol.'
 time: 2026-09-05T13:00:00.000000000+09:00
 custom:
-  Issue: 24
+  Issue: 26

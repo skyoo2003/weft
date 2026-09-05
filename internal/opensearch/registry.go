@@ -128,7 +128,7 @@ func (r *Registry) Create(name string) (*Index, error) {
 		return nil, fmt.Errorf("commit the empty index %q: %w", name, err)
 	}
 
-	x := newIndex(name, dir, ix, NewSource())
+	x := newIndex(name, dir, ix, NewSource(), NewMapping())
 	r.idx[name] = x
 	return x, nil
 }
@@ -212,18 +212,20 @@ type Index struct {
 	dir  string
 	ix   *engine.Index
 	src  *Source
+	m    *Mapping
 
 	ops    chan op
 	closed chan struct{}
 	wg     sync.WaitGroup
 }
 
-func newIndex(name, dir string, ix *engine.Index, src *Source) *Index {
+func newIndex(name, dir string, ix *engine.Index, src *Source, m *Mapping) *Index {
 	x := &Index{
 		name:   name,
 		dir:    dir,
 		ix:     ix,
 		src:    src,
+		m:      m,
 		ops:    make(chan op),
 		closed: make(chan struct{}),
 	}
@@ -244,7 +246,16 @@ func openIndex(root, name string) (*Index, error) {
 		ix.Close() //nolint:errcheck // the source error is the one to report
 		return nil, err
 	}
-	return newIndex(name, dir, ix, src), nil
+	// After the source, because a mapping that will not load is the same class of
+	// startup failure and reporting the first one found keeps the two messages
+	// from racing. A directory written before milestone 25 has no mapping file
+	// and loads as no declared fields, which is what it was.
+	m, err := LoadMapping(dir)
+	if err != nil {
+		ix.Close() //nolint:errcheck // the mapping error is the one to report
+		return nil, err
+	}
+	return newIndex(name, dir, ix, src, m), nil
 }
 
 // serve runs every mutation for this index, one at a time.
@@ -286,8 +297,59 @@ func (x *Index) Engine() *engine.Index { return x.ix }
 // Source is the JSON body store.
 func (x *Index) Source() *Source { return x.src }
 
+// Mapping is what this server knows about a field that the index does not.
+func (x *Index) Mapping() *Mapping { return x.m }
+
 // Name is the index name a response echoes back as _index.
 func (x *Index) Name() string { return x.name }
+
+// Remap adds field declarations and publishes them.
+//
+// On the writer goroutine, and that is not decoration: a mapping decides what
+// term a value becomes, so a declaration landing between the read of the mapping
+// and the write of a document would index that document by neither rule. Nothing
+// else in this package can put those two on the same lock.
+//
+// Published before the call returns, rather than at the next commit. A client
+// that was told its mapping was accepted and then lost it to a crash would index
+// its next thousand documents by the wrong rule.
+func (x *Index) Remap(doc mappingDoc) error {
+	return x.write(func() error {
+		if err := x.m.merge(doc); err != nil {
+			return err
+		}
+		return x.m.save(x.dir)
+	})
+}
+
+// Apply runs a whole batch of actions under one hold of the writer.
+//
+// One hold, not one per action, which is the point of _bulk here: docs/D-017
+// prices a commit at eleven seconds for twenty thousand documents, and a batch
+// that reacquired the writer between items would interleave with every other
+// client's writes for the whole of that.
+//
+// Returns one error per action, in order. A bulk request reports per-item status
+// and does not fail as a unit — one malformed document out of a thousand is the
+// client's to fix and not a reason to refuse the other nine hundred and
+// ninety-nine.
+func (x *Index) Apply(actions []*bulkAction) []error {
+	errs := make([]error, len(actions))
+	err := x.write(func() error {
+		for i, a := range actions {
+			errs[i] = a.apply(x)
+		}
+		return nil
+	})
+	if err != nil {
+		// The batch never ran — the index is closed. Every action gets that same
+		// answer rather than a nil that would read as success.
+		for i := range errs {
+			errs[i] = err
+		}
+	}
+	return errs
+}
 
 // Put indexes a document and stores its body, reporting whether the document is
 // new.
@@ -298,30 +360,45 @@ func (x *Index) Name() string { return x.name }
 // on the writer goroutine and nothing else mutates the index.
 func (x *Index) Put(d engine.Document, body json.RawMessage) (created bool, err error) {
 	err = x.write(func() error {
-		_, exists := x.ix.Resolve(d.Key)
-		created = !exists
-		if exists {
-			if _, err := x.ix.Update(d); err != nil {
-				return fmt.Errorf("update %q in %q: %w", d.Key, x.name, err)
-			}
-		} else if _, err := x.ix.Add(d); err != nil {
-			return fmt.Errorf("index %q in %q: %w", d.Key, x.name, err)
-		}
-		x.src.Put(d.Key, body)
-		return nil
+		created, err = x.putLocked(d, body)
+		return err
 	})
 	return created, err
+}
+
+// putLocked is Put's body, and it runs on the writer goroutine.
+//
+// Split out so _bulk can do many of these under one hold of the writer without
+// either path growing its own copy of the create-or-replace rule.
+func (x *Index) putLocked(d engine.Document, body json.RawMessage) (created bool, err error) {
+	_, exists := x.ix.Resolve(d.Key)
+	created = !exists
+	if exists {
+		if _, err := x.ix.Update(d); err != nil {
+			return false, fmt.Errorf("update %q in %q: %w", d.Key, x.name, err)
+		}
+	} else if _, err := x.ix.Add(d); err != nil {
+		return false, fmt.Errorf("index %q in %q: %w", d.Key, x.name, err)
+	}
+	x.src.Put(d.Key, body)
+	return created, nil
 }
 
 // DeleteDoc removes a document from the index and its body from the store,
 // reporting whether it was there.
 func (x *Index) DeleteDoc(id string) (found bool, err error) {
 	err = x.write(func() error {
-		found = x.ix.Delete(id)
-		x.src.Delete(id)
+		found = x.deleteLocked(id)
 		return nil
 	})
 	return found, err
+}
+
+// deleteLocked is DeleteDoc's body, on the writer goroutine.
+func (x *Index) deleteLocked(id string) bool {
+	found := x.ix.Delete(id)
+	x.src.Delete(id)
+	return found
 }
 
 // Commit makes everything written so far durable: the segments, then the bodies.

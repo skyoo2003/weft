@@ -78,6 +78,12 @@ type benchOpts struct {
 	memprofile  string
 	writes      bool
 	writedocs   int
+	// http is the address of a running weftd. Empty is the in-process arm every
+	// milestone before 27 measured. Set, the ladder drives the server through a
+	// socket and reads *its* counters rather than this process's — see
+	// benchhttp.go for why there is no fallback if that read fails.
+	http      string
+	httpIndex string
 }
 
 // benchFlags parses and validates, so that every "this value cannot be measured"
@@ -97,6 +103,9 @@ func benchFlags(args []string) (benchOpts, error) {
 			"it says what the rung's KiB/query line cannot, which call sites the bytes came from")
 		fs.BoolVar(&o.writes, "writes", false, "instead of the ladder, drop one Commit into a read load and price the write lock (copies the index first)")
 		fs.IntVar(&o.writedocs, "writedocs", 1, "documents the -writes commit adds; past ivfMinDocs the commit trains a partition, which is the expensive case")
+		fs.StringVar(&o.http, "http", "", "drive a running weftd at this address instead of searching in-process; "+
+			"memory and collector figures then come from the server's GET /_nodes/stats")
+		fs.StringVar(&o.httpIndex, "http-index", "papers", "index name to search when -http is set")
 		snapshotFlag(fs, &o.anySnapshot)
 	})
 	if flagErr != nil {
@@ -155,6 +164,15 @@ func benchFlags(args []string) (benchOpts, error) {
 	if o.writedocs < 1 {
 		return o, fmt.Errorf("-writedocs=%d: a commit needs at least one document to be a commit", o.writedocs)
 	}
+	// The write-lock probe copies the index and commits into it from this process.
+	// Over HTTP the index belongs to the server, so the probe would be timing a
+	// commit nobody's reads contend with — a number that looks like the published
+	// 61 ms and measures nothing.
+	if o.writes && o.http != "" {
+		return o, errors.New("-writes and -http together: the write-lock probe commits into its own copy of " +
+			"the index from this process, so over HTTP it would time a commit the measured reads never " +
+			"contend with. Run -writes in-process, or drive writes at the server through _bulk")
+	}
 	// Here rather than only in benchScorers, which cannot run until the index is
 	// open: a typo in -arm otherwise costs a snapshot hash over the 980 KB qrels and
 	// a mapping of the whole evaluation index before it is reported.
@@ -175,11 +193,19 @@ func bench(ctx context.Context, args []string) error {
 		}
 	}
 
-	ix, err := openIndex(o.data, o.anySnapshot)
-	if err != nil {
-		return err
+	// The index is opened only on the in-process arm. Over HTTP the server holds
+	// it, and mapping it here as well would put 626 MiB of the evaluation corpus
+	// into a process that never searches it — and would do so *before* the address
+	// is checked, so a typo in -http would cost the mapping before it was reported.
+	// -data is still required either way: the query set comes from it.
+	var ix *engine.Index
+	if o.http == "" {
+		ix, err = openIndex(o.data, o.anySnapshot)
+		if err != nil {
+			return err
+		}
+		defer ix.Close() //nolint:errcheck // nothing left to do about it on the way out
 	}
-	defer ix.Close() //nolint:errcheck // nothing left to do about it on the way out
 	qs, err := loadQueries(o.data)
 	if err != nil {
 		return err
@@ -196,9 +222,11 @@ func bench(ctx context.Context, args []string) error {
 		return fmt.Errorf("-rotations=%d over %d queries is %d requests: the product overflowed",
 			o.rotations, len(qs), n)
 	}
-	scorers, err := benchScorers(ix, o.arm)
-	if err != nil {
-		return err
+	var scorers []engine.Scorer
+	if ix != nil {
+		if scorers, err = benchScorers(ix, o.arm); err != nil {
+			return err
+		}
 	}
 
 	stopProfile, err := startCPUProfile(o.cpuprofile)
@@ -208,7 +236,10 @@ func bench(ctx context.Context, args []string) error {
 	defer stopProfile()
 
 	var failed atomic.Int64
-	do := benchDo(ctx, qs, scorers, &failed)
+	do, meter, err := benchArm(ctx, o, qs, scorers, &failed)
+	if err != nil {
+		return err
+	}
 
 	unloaded, err := benchWarmup(ctx, qs, do, &failed)
 	if err != nil {
@@ -224,20 +255,15 @@ func bench(ctx context.Context, args []string) error {
 	}
 	rates, ruleLadder := benchRates(o.rate, o.rates, unloaded)
 
-	fmt.Printf("\nweft  %s  warm  n=%d/rung  inflight=%d  GOMAXPROCS=%d\n",
-		o.arm, n, o.inflight, runtime.GOMAXPROCS(0))
+	// The subject is printed because it decides what every memory column means. A
+	// report that does not say which process it measured is one somebody will read
+	// as the other one.
+	fmt.Printf("\nweft  %s  warm  n=%d/rung  inflight=%d  GOMAXPROCS=%d  measuring=%s\n",
+		o.arm, n, o.inflight, runtime.GOMAXPROCS(0), meter.subject())
 
-	p50s := make([]time.Duration, 0, len(rates))
-	reports := make([]benchReport, 0, len(rates))
-	for _, r := range rates {
-		rep := benchRung(ctx, r, n, o.inflight, do)
-		rep.rate = r
-		reports = append(reports, rep)
-		p50s = append(p50s, rep.all.P50)
-		rep.print(os.Stdout)
-		if ctx.Err() != nil {
-			break
-		}
+	reports, p50s, err := benchLadder(ctx, o, rates, n, do, meter)
+	if err != nil {
+		return err
 	}
 
 	// The full `rates`, not rates[:len(p50s)]. Trimming them here is what made an
@@ -254,6 +280,38 @@ func bench(ctx context.Context, args []string) error {
 		return err
 	}
 	return ctx.Err()
+}
+
+// benchLadder runs every rung and prints each report as it lands.
+//
+// Printed as they land rather than at the end, because a three-hour ladder that is
+// interrupted at the fourth rung should still have said what the first three were.
+//
+// A rung whose counters could not be read ends the run. Not skipped and not
+// softened: such a rung has no memory or collector figures, and the only way to
+// print one anyway is to substitute this process's — which on the HTTP arm is the
+// load generator. Stopping costs the rungs after it; printing would cost the
+// meaning of the ones before it.
+func benchLadder(ctx context.Context, o benchOpts, rates []float64, n int,
+	do func(int), meter counters,
+) (reports []benchReport, p50s []time.Duration, err error) {
+	p50s = make([]time.Duration, 0, len(rates))
+	reports = make([]benchReport, 0, len(rates))
+	for _, r := range rates {
+		rep := benchRung(ctx, r, n, o.inflight, do, meter)
+		if rep.statsErr != nil {
+			return nil, nil, fmt.Errorf("reading counters for the %.2f q/s rung from %s: %w",
+				r, meter.subject(), rep.statsErr)
+		}
+		rep.rate = r
+		reports = append(reports, rep)
+		p50s = append(p50s, rep.all.P50)
+		rep.print(os.Stdout)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return reports, p50s, nil
 }
 
 // benchDo is the request the driver sends: one Search, with errors counted rather
@@ -278,6 +336,29 @@ func bench(ctx context.Context, args []string) error {
 // context.Canceled, and counting those would end a deliberately interrupted ladder
 // with a WARNING naming thousands of errors that were the interruption. Same
 // condition bench/ applies on the bleve side.
+// benchArm picks which process is measured: this one, or a weftd over a socket.
+//
+// Both halves move together and that is why they are chosen in one place. Driving
+// the server while reading this process's counters would produce a report whose
+// latency column is the server's and whose memory column is the load generator's,
+// and nothing in the output would say so.
+func benchArm(ctx context.Context, o benchOpts, qs []eval.Query, scorers []engine.Scorer,
+	failed *atomic.Int64,
+) (func(int), counters, error) {
+	if o.http == "" {
+		return benchDo(ctx, qs, scorers, failed), localCounters{}, nil
+	}
+	target, err := newHTTPTarget(ctx, o.http, o.httpIndex, frozenK)
+	if err != nil {
+		return nil, nil, err
+	}
+	do, err := target.driver(ctx, qs, failed)
+	if err != nil {
+		return nil, nil, err
+	}
+	return do, httpCounters{ctx: ctx, t: target}, nil
+}
+
 func benchDo(ctx context.Context, qs []eval.Query, scorers []engine.Scorer, failed *atomic.Int64) func(int) {
 	return func(i int) {
 		q := qs[i%len(qs)].Query
@@ -522,6 +603,12 @@ type benchReport struct {
 	rssRaised int64
 	elapsed   time.Duration
 
+	// statsErr is a counter read that failed. A rung carrying one is not a
+	// measurement: on the HTTP arm the numbers would have to come from the load
+	// generator instead of the server, and that substitution is the one this
+	// design exists to prevent. The run stops rather than printing it.
+	statsErr error
+
 	// unaccounted is wall time this rung cannot account for — the process was not
 	// running for it. Past loadgen.SuspendTolerance the rung is not a measurement and
 	// the summary refuses to quote it. loadgen.Elapsed says why this is not derivable
@@ -530,27 +617,32 @@ type benchReport struct {
 }
 
 // benchRung applies one arrival rate and collects everything measured around it.
-func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int)) benchReport {
+func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int), meter counters) benchReport {
 	var progress loadgen.Progress
 	do = progress.Count(do)
 
-	faultsBefore, cyclesBefore := loadgen.ProcFaults(), loadgen.GCCycles()
-	pausesBefore := loadgen.GCPauseTotal()
-	// Read here for the same reason the fault counters are: it is a running total, so
-	// the only per-rung statement available is the difference. It cannot be reset.
-	rssBefore := loadgen.MaxRSS()
-	// One stop-the-world per rung, and outside the measured window on both sides: this
-	// read is before `start` and its pair is after `elapsed` has been taken. The same
-	// sentence internal/loadgen applies to ReadMemStats — an instrument that stops the
-	// world to answer must not be on the per-request path — with the per-rung reads it
-	// leaves room for. TotalAlloc and Mallocs are cumulative and monotonic, so a
-	// collection landing inside the rung cannot move either difference.
-	var memBefore runtime.MemStats
-	runtime.ReadMemStats(&memBefore)
-	// Both CPU totals, not their ratio: the ratio of two running totals cannot be
-	// subtracted, and by the fifth rung it is dominated by the index mapping and the
-	// four rungs before this one rather than by what the collector is doing now.
-	gcCPU0, totalCPU0 := loadgen.GCCPUSeconds()
+	// One read of every counter, from whichever process the ladder is measuring.
+	// The reads used to be six package-level calls here; they are one call now
+	// because over HTTP they have to arrive together — six round trips would put
+	// five request latencies between the fault count and the pause total, and the
+	// rung would be charged with the difference.
+	//
+	// It is still outside the measured window on both sides: this is before
+	// `start` and its pair is after `elapsed` has been taken. That is the sentence
+	// internal/loadgen applies to ReadMemStats — an instrument that stops the world
+	// to answer must not be on the per-request path — with the per-rung reads it
+	// leaves room for. TotalAlloc, Mallocs, the cycle count and the pause total are
+	// all cumulative and monotonic, so a collection landing inside the rung cannot
+	// move any of the differences. The resident set is the exception and is a
+	// high-water mark rather than a difference; see rssRaised.
+	//
+	// A failed read is fatal and is not softened into a zero. benchhttp.go's
+	// opening comment is the argument: on the HTTP arm the fallback would be this
+	// process's counters, which are precise, stable and about the wrong program.
+	before, err := meter.snapshot()
+	if err != nil {
+		return benchReport{statsErr: err}
+	}
 	start := time.Now()
 	stopProgress := progress.Report(os.Stdout, n, loadgen.ProgressEvery)
 
@@ -571,28 +663,24 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int))
 	// provoked, while gcCPU1 — captured first — excluded all of it: one report whose
 	// GC CPU share and GC cycle count described different intervals.
 	elapsed, unaccounted := loadgen.Elapsed(start)
-	gcCPU1, totalCPU1 := loadgen.GCCPUSeconds()
-	faultsAfter, cyclesAfter := loadgen.ProcFaults(), loadgen.GCCycles()
-	pausesAfter, peakRSS := loadgen.GCPauseTotal(), loadgen.MaxRSS()
-	// Last in the block, because it is the only read here that stops the world: the
-	// cycle, pause and fault counters above would otherwise be charged with this
-	// instrument's own stop.
-	var memAfter runtime.MemStats
-	runtime.ReadMemStats(&memAfter)
+	after, err := meter.snapshot()
+	if err != nil {
+		return benchReport{statsErr: err}
+	}
 
 	raw, exGC := loadgen.SplitByGC(samples)
 	return benchReport{
 		all:         loadgen.Summarize(raw),
 		exGC:        loadgen.Summarize(exGC),
 		shed:        shed,
-		faults:      faultsAfter.Sub(faultsBefore),
-		gcCycles:    cyclesAfter - cyclesBefore,
-		pause:       pausesAfter - pausesBefore,
-		gcCPU:       loadgen.GCCPUShareBetween(gcCPU0, totalCPU0, gcCPU1, totalCPU1),
-		allocBytes:  memAfter.TotalAlloc - memBefore.TotalAlloc,
-		allocs:      memAfter.Mallocs - memBefore.Mallocs,
-		peakRSS:     peakRSS,
-		rssRaised:   peakRSS - rssBefore,
+		faults:      after.faults.Sub(before.faults),
+		gcCycles:    after.gcCycles - before.gcCycles,
+		pause:       after.pause - before.pause,
+		gcCPU:       loadgen.GCCPUShareBetween(before.gcCPU, before.cpu, after.gcCPU, after.cpu),
+		allocBytes:  after.totalAlloc - before.totalAlloc,
+		allocs:      after.mallocs - before.mallocs,
+		peakRSS:     after.maxRSS,
+		rssRaised:   after.maxRSS - before.maxRSS,
 		elapsed:     elapsed,
 		unaccounted: unaccounted,
 	}

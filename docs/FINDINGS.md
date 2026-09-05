@@ -4352,3 +4352,205 @@ query on a shape whose whole budget is five.
    first time in this project that CI found something the local gate could not.
 4. **`Index.Nearest` and `TopK` take a caller's `k` too.** Neither preallocates on it the way
    `NewCollector` did, but neither has been read with this question in mind. Unmeasured.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 25 — The DSL subset, and the rate that decides a word
+
+**Verdict: three clauses met.** Every row of the PRD's query-DSL table has a test; every
+refusing row answers 4xx or 501 and never 200 with an empty hit list; and the refusal rate is
+**8 of 25 rows, 32.0%** — under the 50% at which the falsification clause would have fired and
+"OpenSearch compatible" would have had to become "OpenSearch wire subset". `pkg/` diff **0
+lines**, `go list -m all` one line, both golden API files byte-identical.
+
+## 1. The rate is counted, not asserted
+
+`TestTheRefusalRateIsCounted` holds the table as data and runs every row against a live index.
+It fails two ways: a row marked refusing that answers 200, and a row marked working that does
+not. So the number published here is one a test produced, and a row that quietly changed
+behaviour in either direction breaks the build rather than the documentation.
+
+Three of the eight refusals were milestone 26's and are now gone; the count above is **after**
+milestone 26, so the five that remain are the five that are structural: nested `bool`, `aggs`,
+`sort`, `highlight`, `scroll`/PIT. Each of them refuses for a reason in the format rather than a
+reason in the schedule, which is what makes 32% a floor and not a snapshot.
+
+## 2. What the round actually spent its time on, and it was not the DSL
+
+Two thirds of the clause code is refusal. `match` reads three options and names every other one;
+`range` reads four bounds and names every other key; `knn` refuses five things it cannot honour.
+That ratio is the milestone: mapping a query type onto `pkg/query` is three or four lines —
+`prefix` is `Glob(ix, field, literal+"*")` — and the rest is the work of not answering
+approximately.
+
+The clearest case is `gt`/`lt`. `query.Range` is inclusive on both sides and has no exclusive
+form. On a mapped integer or date the exclusive bound is the *next representable value*, which
+is exact; on a text or keyword field there is no next byte string, so the clause is refused with
+the sentence that says which mapping would fix it. The alternative — widening the range by
+whatever sits on the boundary — is a wrong answer with a 200 on it, and it would have been two
+characters of code.
+
+## 3. The mapping exists for exactly one reason, and it is `query.EncodeInt`
+
+Five types: `text`, `keyword`, `date`, `integer`/`long`, `knn_vector`. Each earns itself twice —
+once deciding what term a value becomes at index time, once deciding what a bound becomes at
+query time — and a type that changed neither answer would be `text` under another name.
+
+**`keyword` is the one that does not fully arrive.** One index has one tokenizer (D-022: there
+is no `SetTokenizer` and no per-field analyser), so a `keyword` value is tokenized like every
+other field, and a keyword holding two tokens is found as a *conjunction* of them rather than as
+one indivisible term. For single-token keywords — ids, statuses, tags, which is what a keyword
+field usually holds — this is exactly right. For `"New York"` it matches documents holding both
+words in that field in any order, which is broader than OpenSearch. Priced in
+`docs/LIMITATIONS.md` rather than fixed, because fixing it is a per-field analyser and that is a
+`pkg/` change this milestone's mechanical definition forbids.
+
+## 4. The finding the plan did not have: a required clause needs one stream
+
+`query.Must` intersects the positions it is given. A `match` over two tokens is two streams. So
+`bool.must` holding a two-word match, wired the obvious way, silently becomes `operator: and` —
+narrower than the client wrote, with no error and no way to notice.
+
+The fix is twelve lines in the server (`anyOf`) and **zero in `pkg/`**: a scorer that unions its
+inner scorers' candidates, so a disjunctive clause can be *one* position. What makes it the
+right layer is that `pkg/query`'s constraint vocabulary did not have to grow a disjunction for
+the HTTP surface to have one — the position convention was already general enough, and what was
+missing was a scorer, which is the extension point the whole project is built on.
+
+`bool.filter` is the mirror image and the trap PRD section 4 registered in advance: a filter has
+to narrow without voting, and the shorter-looking spelling — weight 0 in `fusion.FuseWeighted` —
+**excludes everything it was meant to keep**, because 0 removes the document from the fused
+result entirely. What works is emptying the filter streams *after* `Must` has intersected on
+them, which is `blank`, ten lines, and depends on `query.Must` and `query.MustNot` each handing
+on a slice of the same length and order. That property was not documented and is now tested.
+
+## 5. Two things the fuzzers said
+
+`FuzzParseDSL` and `FuzzParseBulk` ran 5.8 million and 3.6 million executions with no crash.
+Neither found a panic, which is the outcome that was hoped for and not the outcome that was
+expected: the position arithmetic between `must`, `filter` and `must_not` is the thing this
+package can get wrong, and `FuzzParseDSL` executes the plan rather than only parsing it, so an
+out-of-range stream index would have surfaced. `query.Must` and `query.MustNot` answer an
+out-of-range index with nil rather than a panic, which is now asserted rather than assumed.
+
+`FuzzParseBulk` asserts the invariant the line-oriented format rests on: one target per action.
+An action line with no source line after it is a parse failure for the **whole** batch, because
+every pair after it would be read off by one and the documents would land under each other's
+ids — a data-loss shape with a 200 on it.
+
+## 6. Carried forward
+
+1. **`terms` loses a multi-token value's conjunction.** Each value's tokens go in as separate
+   streams, so `{"terms":{"tag":["new york","paris"]}}` matches a document holding "new" and
+   "paris". The fix is one `anyOf` per value, and it would make `terms` rank by value count
+   rather than by term rarity — a ranking change that wants a measurement before it is made.
+2. **`wildcard` reads `[` as a character class and OpenSearch reads it literally.** `query.Glob`
+   borrows `path.Match`, and rewriting the pattern here would make the server and the library
+   disagree about what a pattern means. Published, not fixed.
+3. **Deep paging is linear and capped at 10,000.** A page is the whole prefix fetched and cut,
+   because the top-k collector has no notion of an offset.
+4. **`_source` and the mapping are two side stores now, published on different schedules** —
+   bodies at commit, mapping the moment it changes. `writeAtomic` is shared so the half-written
+   file rule is written once, but the drift check `LoadSource` performs has no equivalent for
+   the mapping: a mapping file lost while segments survive is an index that silently indexes
+   the next document by a different rule. Unmeasured and not guarded.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 26 — A fourth signal over HTTP, and what the wire charges for it
+
+**Verdict: the claim holds, and the price is higher than in a Go program — by exactly the
+amount the wire cannot say.**
+
+`knn` and `hybrid` land on `fusion.Fuse` and `fusion.FuseWeighted`. The fourth signal — recency,
+as `function_score` with a decay — was then added and measured. Three readings of its cost:
+
+| reading | lines | budget |
+| --- | --- | --- |
+| the clause function alone (`functionScore`) | **57** | 100 — met |
+| code only, no comments or blanks | **96** | 100 — met |
+| every line the signal cost to write (milestone 1's counting rule) | **127 net** | 100 — **missed** |
+
+And the invariant it was paired with holds outright: **the fusion code changed 0 lines.**
+`fuser`, `blank`, `unit`, `weigh` and `anyOf.Candidates` are byte-identical across the change,
+and `TestTheFusionCodeDoesNotKnowAboutTheFourthSignal` holds that structurally — none of them
+may contain `vector.New`, `recency.New`, `knn`, `gauss`, `.Vector` or `.Time`.
+
+## 1. Where the 27 extra lines went, and it is one sentence
+
+The wire has no place to say *"this date is the document's time."*
+
+In a Go program the fourth signal cost 99 lines and none of them were about *plumbing a value
+in*: `engine.Document.Time` already existed, and a caller filling it is a struct field
+assignment. Over HTTP a JSON body has no such field, so something has to carry the binding from
+the client to `documentFrom` — and the only thing that knows a field's type at both index time
+and query time is the mapping. That is 33 net lines: a `recency` flag on a property, a
+one-per-index guard for it, the lookup, and the branch in `documentFrom`.
+
+So the milestone's honest result is not "cheaper than expected" or "as expected". It is: **the
+query half was as cheap as milestone 1 promised (57 lines, and the `knn` clause is 74), and the
+index half is a cost that only exists because the protocol is a wire format.** A fifth signal
+needing no per-document input would cost the query half alone.
+
+That the total misses milestone 1's budget is reported rather than argued around. The budget was
+set for a scorer package and is being applied to a clause plus a binding; either the budget
+travels or it does not, and deciding after seeing the number would make it not a budget.
+
+## 2. What the round bought that 24 and 25 did not
+
+Milestone 1's claim was that fusion is invariant to scorer count and a fourth signal costs what
+the first did. It was proved inside one process, where the caller assembling the scorers and the
+caller running the fusion are the same code. The open question was whether that survives a
+process boundary — whether a stranger's query, arriving as JSON, can add a signal without the
+fusion learning what a signal is.
+
+It does, and the mechanism is that **a weight is a position and never a name**. `hybrid`'s
+`weights` array attaches to stream positions, so `fusion.FuseWeighted` takes a `[]float64` and
+still cannot name a single scorer; `go list -deps ./pkg/fusion` prints no scorer package after
+this milestone exactly as before it. `TestHybridWeightsMoveTheRankingWithoutNamingASignal` shows
+the ranking moving between text-led and vector-led on the same corpus with the same eligible
+set, which is what a weight is for and is the whole of D-005's repayment reaching the wire.
+
+## 3. Two design consequences that were not in the plan
+
+**A hybrid cannot nest and a bool inside one can.** `hybrid` *is* the fusion of the whole query,
+so nesting one would be a fusion of fusions — refused. A `bool` inside a hybrid is compiled in
+place and contributes positions to the same plan, which is the one nesting this engine allows,
+and it allows it because a bool is a constraint rather than a fusion.
+
+**Weights and `must_not` are structurally unable to meet**, and that is load-bearing rather than
+lucky. Weights are positions in the original stream list; `query.MustNot` is the one wrapper
+that hands on a *shorter* list. If a hybrid could sit inside a `bool.must_not`, every weight
+after the removed stream would silently shift by one and the client would get a ranking it did
+not ask for, with no error. It cannot, because a hybrid is a whole query — asserted by
+`TestHybridWeightsAndMustNotDoNotMeet` rather than trusted to the comment that says so.
+
+## 4. What was refused, and the refusal that is the interesting one
+
+`search_pipeline` gets a 400. That is the clause OpenSearch users go to a normalization
+processor for, and refusing it is the thesis stated as a status code: **normalizing two streams
+onto a common scale is the step this server does not have, because rank fusion reads position
+and never score.** PRD section 1 argued that the pipeline is the thing weft exists to make
+unnecessary; this is the same argument, addressed to a client.
+
+`script_score`, `neural`, `rank_feature` and `distance_feature` are refused together and for one
+reason: each scores by evaluating an expression per document, and `engine.Candidate.Score` is
+not comparable across streams, so there is nothing for the result to be compared against. A
+signal that needs its own scoring is a scorer, and a scorer is a stream — which is the sentence
+the refusal tells the client to act on.
+
+Decay parameters are refused too. `scorer/recency` is an exponential with a fixed half-life;
+reading `scale` and ignoring it would rank by a curve nobody asked for.
+
+## 5. Carried forward
+
+1. **Weights repeat per stream and are not divided by the stream count.** A three-token match
+   weighted 1 votes three times at weight 1, which is what an unweighted hybrid already did.
+   Dividing would be a different fusion, and the place to decide that is a measurement.
+2. **The three published nDCG figures are untouched and unre-measured.** `pkg/` diff is 0 lines
+   across milestones 25 and 26, so they cannot have moved; nothing re-ran them.
+3. **Nothing here is measured under load.** Every judgment in milestones 24, 25 and 26 is
+   functional. Milestone 27 is what points `internal/loadgen` at the HTTP surface, and it is
+   blocked on the same 3.1-hour quiet window milestones 11, 13 and 14 did not get.

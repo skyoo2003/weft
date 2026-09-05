@@ -46,6 +46,12 @@ const (
 	// http.MaxBytesReader, so a client cannot make this process allocate more
 	// than this per request whatever Content-Length claims.
 	DefaultMaxBody = 100 << 20
+
+	// kindIllegalArgument is the error type a client branches on when it asked
+	// for something this server will not do. Named once because it is spelled in
+	// four files, and a typo in one of them is a type a client silently does not
+	// recognise — which turns an honest refusal back into an unexplained failure.
+	kindIllegalArgument = "illegal_argument_exception"
 )
 
 // apiError is a refusal with the three things a client needs: a status, a type
@@ -101,8 +107,13 @@ type shardInfo struct {
 var oneShard = shardInfo{Total: 1, Successful: 1}
 
 // clusterName is what a single-node weft calls itself, in the three places a
-// client looks for it.
-const clusterName = "weft"
+// client looks for it. keyClusterName is the field it is reported under, spelled
+// once because three handlers spell it and a typo in one is a field a client
+// silently does not find.
+const (
+	clusterName    = "weft"
+	keyClusterName = "cluster_name"
+)
 
 // docResult answers a write or a delete. A struct rather than a map literal
 // because the same five keys are spelled in three handlers, and a typo in one
@@ -141,20 +152,60 @@ func NewServer(reg *Registry, maxBody int64) *Server {
 
 	s.mux.HandleFunc("GET /{$}", s.handle(s.root))
 	s.mux.HandleFunc("GET /_cluster/health", s.handle(s.health))
+	// The literal route only. `GET /_nodes/{node}/stats` is the other spelling
+	// OpenSearch accepts and it cannot be registered here: it collides with
+	// `GET /{index}/_doc/{id}`, and ServeMux refuses a pair where neither pattern
+	// is more specific — `/_nodes/_doc/stats` matches both. One node exists, so
+	// the general form would name it and no other.
+	s.mux.HandleFunc("GET /_nodes/stats", s.handle(s.nodeStats))
 
 	s.mux.HandleFunc("PUT /{index}", s.handle(s.createIndex))
 	s.mux.HandleFunc("HEAD /{index}", s.handle(s.headIndex))
 	s.mux.HandleFunc("DELETE /{index}", s.handle(s.deleteIndex))
+
+	s.mux.HandleFunc("GET /{index}/_mapping", s.handle(s.getMapping))
+	s.mux.HandleFunc("PUT /{index}/_mapping", s.handle(s.putMapping))
+	s.mux.HandleFunc("POST /{index}/_mapping", s.handle(s.putMapping))
 
 	s.mux.HandleFunc("PUT /{index}/_doc/{id}", s.handle(s.putDoc))
 	s.mux.HandleFunc("POST /{index}/_doc/{id}", s.handle(s.putDoc))
 	s.mux.HandleFunc("GET /{index}/_doc/{id}", s.handle(s.getDoc))
 	s.mux.HandleFunc("DELETE /{index}/_doc/{id}", s.handle(s.deleteDoc))
 
+	s.mux.HandleFunc("POST /_bulk", s.handle(s.bulk))
+	s.mux.HandleFunc("PUT /_bulk", s.handle(s.bulk))
+	s.mux.HandleFunc("POST /{index}/_bulk", s.handle(s.bulk))
+	s.mux.HandleFunc("PUT /{index}/_bulk", s.handle(s.bulk))
+
 	s.mux.HandleFunc("POST /{index}/_search", s.handle(s.search))
 	s.mux.HandleFunc("GET /{index}/_search", s.handle(s.search))
 
+	// Routed so they are refused by name rather than by the catch-all 404. A 404
+	// on /_search/scroll reads as "wrong URL" and sends a client looking for a
+	// typo; a 501 says the engine has no way to do it and why, which is D-026's
+	// rule applied to a route instead of to a query clause.
+	for _, p := range []string{
+		"POST /_search/scroll", "GET /_search/scroll", "DELETE /_search/scroll",
+		"POST /{index}/_pit", "DELETE /_search/point_in_time",
+	} {
+		s.mux.HandleFunc(p, s.handle(s.noCursor))
+	}
+
 	return s
+}
+
+// noCursor refuses every route that would hand a client a cursor over one
+// snapshot of the index.
+//
+// There is no snapshot to hand out. A commit swaps the segment set under every
+// reader and nothing holds the previous one open, so a scroll id could only ever
+// name a set of documents that has already moved.
+func (s *Server) noCursor(_ http.ResponseWriter, r *http.Request) error {
+	return &apiError{status: http.StatusNotImplemented, kind: kindIllegalArgument,
+		reason: fmt.Sprintf("%s %s is not implemented: scroll and point-in-time hand out a cursor over one "+
+			"snapshot of the index, and a commit replaces the segment set under every reader with nothing "+
+			"holding the previous one open. Page with from and size, up to %d",
+			r.Method, r.URL.Path, maxResultWindow)}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
@@ -199,6 +250,12 @@ func (s *Server) writeError(w http.ResponseWriter, err error) {
 	})
 }
 
+// acknowledge is the answer to a request that changed an index's shape and has
+// nothing else to report.
+func acknowledge(w http.ResponseWriter) {
+	writeJSON(w, http.StatusOK, map[string]any{"acknowledged": true})
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(status)
@@ -212,7 +269,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func (s *Server) root(w http.ResponseWriter, _ *http.Request) error {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":         clusterName,
-		"cluster_name": clusterName,
+		keyClusterName: clusterName,
 		"cluster_uuid": "weft-single-node",
 		"tagline":      "The weft thread. One weft crosses and binds them all.",
 		"version": map[string]any{
@@ -251,30 +308,56 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) error {
 
 func (s *Server) createIndex(w http.ResponseWriter, r *http.Request) error {
 	name := r.PathValue("index")
-	// The body is read and inspected rather than ignored: a client that sent
-	// mappings has to get them refused, because accepting and dropping them
-	// means a range query later matching nothing with nothing to report.
-	body, err := io.ReadAll(r.Body)
+	// The body is read and inspected rather than ignored: a key this server does
+	// not honour has to be refused, because accepting and dropping a mapping means
+	// a range query later matching nothing with nothing to report.
+	body, err := readAll(r)
 	if err != nil {
 		return err
 	}
+	var mappings mappingDoc
+	hasMappings := false
 	if len(body) > 0 {
-		var settings map[string]json.RawMessage
-		if err := json.Unmarshal(body, &settings); err != nil {
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(body, &top); err != nil {
 			return badRequest("parsing_exception", "the create-index body did not decode as JSON: %v", err)
 		}
-		for key := range settings {
-			if key == "settings" {
-				continue // shards and replicas have nowhere to land; accepted and ignored
+		for key, raw := range top {
+			switch key {
+			case "settings":
+				// Shards and replicas have nowhere to land: accepted and ignored,
+				// which is honest because there is one shard and the response says
+				// so on every request.
+			case "mappings":
+				if err := json.Unmarshal(raw, &mappings); err != nil {
+					return badRequest("mapper_parsing_exception", "the mappings did not decode: %v", err)
+				}
+				hasMappings = true
+			case "aliases":
+				return badRequest(kindIllegalArgument,
+					"aliases are not supported: an alias is a second name for an index, and routing one here "+
+						"would mean two paths to a directory that only one of them can delete")
+			default:
+				return badRequest(kindIllegalArgument,
+					"%q on create index is not supported: this server reads settings and mappings", key)
 			}
-			return badRequest("illegal_argument_exception",
-				"%q on create index is not supported yet: field mappings land in milestone 25, and accepting them "+
-					"now would mean a range query silently matching nothing", key)
 		}
 	}
 
-	if _, err := s.reg.Create(name); err != nil {
+	x, err := s.reg.Create(name)
+	if err != nil {
 		return err
+	}
+	if hasMappings {
+		if err := x.Remap(mappings); err != nil {
+			// The index is removed again. A client that was told its mapping was
+			// refused and then found an index without it would index a thousand
+			// documents by the wrong rule before noticing.
+			if dropErr := s.reg.Drop(name); dropErr != nil {
+				return fmt.Errorf("the mapping was refused (%w) and removing the index failed too: %w", err, dropErr)
+			}
+			return badRequest("mapper_parsing_exception", "%v", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"acknowledged":        true,
@@ -283,6 +366,54 @@ func (s *Server) createIndex(w http.ResponseWriter, r *http.Request) error {
 	})
 	return nil
 }
+
+// getMapping reports what this server knows about the index's fields.
+func (s *Server) getMapping(w http.ResponseWriter, r *http.Request) error {
+	x, err := s.index(r)
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		x.Name(): map[string]any{"mappings": x.Mapping().doc()},
+	})
+	return nil
+}
+
+// putMapping adds field declarations to an index that already exists.
+//
+// Adding only. A field that already has a type keeps it — see ErrMappingConflict:
+// the documents holding it were indexed by the old rule, and re-declaring it would
+// leave one field with two encodings in it and a range query reading half.
+func (s *Server) putMapping(w http.ResponseWriter, r *http.Request) error {
+	x, err := s.index(r)
+	if err != nil {
+		return err
+	}
+	body, err := readAll(r)
+	if err != nil {
+		return err
+	}
+	var doc mappingDoc
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return badRequest("mapper_parsing_exception", "the mapping body did not decode: %v", err)
+	}
+	if len(doc.Properties) == 0 {
+		return badRequest("mapper_parsing_exception",
+			"the mapping names no properties; it is {\"properties\": {\"<field>\": {\"type\": \"<type>\"}}}")
+	}
+	if err := x.Remap(doc); err != nil {
+		if errors.Is(err, ErrMappingConflict) {
+			return badRequest(kindIllegalArgument, "%v", err)
+		}
+		return badRequest("mapper_parsing_exception", "%v", err)
+	}
+	acknowledge(w)
+	return nil
+}
+
+// readAll drains a request body, which is already wrapped in an
+// http.MaxBytesReader by handle.
+func readAll(r *http.Request) ([]byte, error) { return io.ReadAll(r.Body) }
 
 func (s *Server) headIndex(w http.ResponseWriter, r *http.Request) error {
 	if _, ok := s.reg.Get(r.PathValue("index")); !ok {
@@ -297,7 +428,7 @@ func (s *Server) deleteIndex(w http.ResponseWriter, r *http.Request) error {
 	if err := s.reg.Drop(r.PathValue("index")); err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"acknowledged": true})
+	acknowledge(w)
 	return nil
 }
 
@@ -319,7 +450,7 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) error {
 	}
 	id := r.PathValue("id")
 	if id == "" {
-		return badRequest("illegal_argument_exception",
+		return badRequest(kindIllegalArgument,
 			"a document id is required: weft keys documents by the id you give them and generates none")
 	}
 	commit, apiErr := parseRefresh(r)
@@ -327,11 +458,11 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) error {
 		return apiErr
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readAll(r)
 	if err != nil {
 		return err
 	}
-	d, err := documentFrom(id, body)
+	d, err := documentFrom(id, body, x.Mapping())
 	if err != nil {
 		return badRequest("mapper_parsing_exception", "%v", err)
 	}
@@ -426,7 +557,7 @@ func parseRefresh(r *http.Request) (commit bool, err *apiError) {
 	case "true", "wait_for":
 		return true, nil
 	default:
-		return false, badRequest("illegal_argument_exception",
+		return false, badRequest(kindIllegalArgument,
 			"refresh takes true, false or wait_for, got %q", v)
 	}
 }
@@ -440,12 +571,18 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	body, err := io.ReadAll(r.Body)
+	if v := r.URL.Query().Get("scroll"); v != "" {
+		return &apiError{status: http.StatusNotImplemented, kind: kindIllegalArgument,
+			reason: "scroll is not implemented: it hands out a cursor over one snapshot of the index, and a " +
+				"commit replaces the segment set under every reader with nothing holding the previous one " +
+				"open. Page with from and size"}
+	}
+	body, err := readAll(r)
 	if err != nil {
 		return err
 	}
 
-	p, apiErr := parseSearch(x.Engine(), body)
+	p, apiErr := parseSearch(x, body)
 	if apiErr != nil {
 		return apiErr
 	}

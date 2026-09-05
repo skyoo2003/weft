@@ -135,16 +135,34 @@ func (s *Source) Save(dir string) error {
 	if err != nil {
 		return fmt.Errorf("encode the _source store: %w", err)
 	}
+	return writeAtomic(dir, sourceFile, raw)
+}
 
+// writeAtomic publishes raw as dir/name, atomically against process death.
+//
+// Temporary file then rename, which is what engine.Index.Commit does with a
+// manifest and for the same reason: a reader either sees the whole previous file
+// or the whole new one. Durability past that stops at fsync, exactly as
+// docs/FORMAT.md section 6 says it does for the index these sit beside.
+//
+// Shared by the two side stores rather than written twice. They are published on
+// different schedules — the bodies at commit, the mapping the moment it changes —
+// but the way a half-written file is kept from ever being read is one rule, and
+// two copies of it would be two places for the temp-file cleanup to be forgotten.
+//
+// name is a constant in this package and dir is a directory this process chose;
+// no part of either comes from a request. Registry.validName is what keeps the
+// directory half of that true, and it is tested.
+func writeAtomic(dir, name string, raw []byte) error {
 	// In dir rather than in TMPDIR, because rename is only atomic within one
 	// filesystem and TMPDIR is routinely on another.
-	tmp, err := os.CreateTemp(dir, sourceFile+".*")
+	tmp, err := os.CreateTemp(dir, name+".*")
 	if err != nil {
 		return fmt.Errorf("create a temporary file in %s: %w", dir, err)
 	}
 	// Removed on every failure path below. A leftover would be a file the next
-	// LoadSource has to know to ignore, which is a second rule where there
-	// should be none.
+	// load has to know to ignore, which is a second rule where there should be
+	// none.
 	defer os.Remove(tmp.Name()) //nolint:errcheck // best effort; the rename below is what matters
 
 	if _, err := tmp.Write(raw); err != nil {
@@ -158,8 +176,8 @@ func (s *Source) Save(dir string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", tmp.Name(), err)
 	}
-	if err := os.Rename(tmp.Name(), filepath.Join(dir, sourceFile)); err != nil { //nolint:gosec // same: a constant name under an owned directory
-		return fmt.Errorf("publish %s: %w", sourceFile, err)
+	if err := os.Rename(tmp.Name(), filepath.Join(dir, name)); err != nil { //nolint:gosec // a constant name under a directory this process owns
+		return fmt.Errorf("publish %s: %w", name, err)
 	}
 	return nil
 }

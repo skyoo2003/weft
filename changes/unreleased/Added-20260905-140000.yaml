@@ -1,25 +1,27 @@
 kind: Added
-body: '**Numeric and date ranges, fuzzy matching, and field scoping for every
-  pattern query.** `query.Range(ix, field, lo, hi)` selects documents whose field
-  holds a term in an inclusive byte range, either bound empty for unbounded. There
-  is no numeric index and none was added: `query.EncodeInt` returns sixteen hex
-  digits with the sign bit flipped, so the string sorts exactly as the number does
-  — fixed width removes the short-string problem, the flip puts negatives below
-  positives, and hex survives the default tokenizer where punctuation would be
-  split. `query.EncodeTime` is that over `UnixNano` (valid 1678–2262). The caller
-  indexes with it and queries with it; a value encoded one way and queried another
-  matches nothing, which is why these are named functions rather than advice.
-  **The cost scales with how many distinct values a field holds, not with how many
-  documents hold them** — a field of a thousand price points is cheap however
-  large the corpus. `query.Fuzzy(ix, field, term, dist)` is Levenshtein within
-  `MaxEditDistance` (2), with a length filter in front of the quadratic part and
-  an early exit once a row exceeds the budget; **bytes, not runes**, so it is
-  accurate for Latin text and poor for CJK, and it says so. And `Glob`, `Range`
-  and `Fuzzy` all take a **field** as their second argument — empty for
-  `Document.Text` — so a caller never has to know that a field''s terms are
-  spelled with a separator, which is the wart milestone 18 recorded as carried
-  forward. An inverted range and an out-of-range edit distance are both errors
-  rather than queries that quietly return nothing.'
+body: '**The load ladder can now be aimed through a socket, and it reports the
+  server''s memory rather than its own.** `weft-eval bench -http 127.0.0.1:9200`
+  drives a running `weftd` with the same open loop, the same rung structure, the
+  same saturation rule and the same suspension tolerance the in-process ladder has
+  used since milestone 5, so the difference between the two runs is the HTTP
+  surface and the second process and nothing else. `make bench-http` starts the
+  server, waits for it to listen, runs the ladder and stops it. **The part that
+  decides whether such a run means anything is where the numbers come from.** A
+  load generator can only read its own counters, and over HTTP that process holds
+  the in-flight requests and no index at all — printing its resident set in the RSS
+  column would be a number that is precise, stable, reproducible and about the
+  wrong program. So `weftd` answers `GET /_nodes/stats` with its own peak RSS, page
+  faults, GC cycles, pause total, GC CPU share and allocation counters, read from
+  the same instruments `internal/loadgen` reads in-process, and the ladder reads
+  them between rungs. If that read fails the run **ends** rather than falling back
+  to the local counters, because the fallback would be wrong in exactly the way
+  nobody checks for. The HTTP arm also does not open the local index — mapping 626
+  MiB into a process that never searches it would cost that mapping before a typo
+  in the address was even reported — and `-writes` with `-http` is refused, since
+  the write-lock probe commits into its own copy and would time a commit the
+  measured reads never contend with. **No judgment is published yet**: the run
+  needs the same quiet three-hour window every ladder needs, and this is the
+  harness, not the measurement.'
 time: 2026-09-05T14:00:00.000000000+09:00
 custom:
-  Issue: 25
+  Issue: 27

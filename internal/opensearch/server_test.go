@@ -270,13 +270,21 @@ func TestAnUnsupportedQueryIsNotAnEmptyResult(t *testing.T) {
 		{"aggregations", `{"aggregations":{"x":{"terms":{"field":"text"}}}}`},
 		{"highlight", `{"query":{"match":{"text":"document"}},"highlight":{"fields":{"text":{}}}}`},
 		{"sort", `{"query":{"match":{"text":"document"}},"sort":[{"text":"asc"}]}`},
-		{"from", `{"query":{"match":{"text":"document"}},"from":10}`},
-		{"bool", `{"query":{"bool":{"must":[{"match":{"text":"document"}}]}}}`},
-		{"term", `{"query":{"term":{"text":"document"}}}`},
 		{"knn", `{"query":{"knn":{"v":{"vector":[1,0],"k":2}}}}`},
-		{"prefix", `{"query":{"prefix":{"text":"doc"}}}`},
-		{"range", `{"query":{"range":{"n":{"gte":1}}}}`},
 		{"two query types at once", `{"query":{"match":{"text":"a"},"term":{"text":"b"}}}`},
+		// Milestone 25 implemented bool, term, prefix, range and from. What stayed
+		// refused is the part of each this engine has no way to express, and that
+		// is what these rows check instead.
+		{"nested bool", `{"query":{"bool":{"must":[{"bool":{"must":[{"match":{"text":"a"}}]}}]}}}`},
+		{"minimum_should_match", `{"query":{"bool":{"should":[{"match":{"text":"a"}}],"minimum_should_match":1}}}`},
+		{"boost", `{"query":{"bool":{"must":[{"match":{"text":"a"}}],"boost":2}}}`},
+		{"deep paging", `{"query":{"match":{"text":"document"}},"from":10000,"size":10}`},
+		{"ids", `{"query":{"ids":{"values":["1"]}}}`},
+		{"query_string", `{"query":{"query_string":{"query":"document"}}}`},
+		{"search_after", `{"query":{"match":{"text":"a"}},"search_after":[1]}`},
+		{"numeric range on an unmapped field", `{"query":{"range":{"n":{"gte":1}}}}`},
+		{"range format", `{"query":{"range":{"n":{"gte":"a","format":"epoch_millis"}}}}`},
+		{"match_phrase on a named field", `{"query":{"match_phrase":{"title":"a b"}}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, raw := do(t, srv, http.MethodPost, "/papers/_search", tc.body)
