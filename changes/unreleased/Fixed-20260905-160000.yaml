@@ -1,0 +1,25 @@
+kind: Fixed
+body: '**`engine.TopK` sorted every candidate to return ten of them.** It is the
+  one selection path every scorer and the fuser share, and `scorer/text` emits one
+  candidate per matching document — so a query for a term held by every document
+  in a 50,000-document corpus arrived with 50,000 candidates, asked for ten, and
+  paid a full `n·log₂n` sort for the other 49,990. A profile of that query put the
+  sort and its comparator at the largest single share of work that was not the
+  posting walk. It now takes a k-sized heap whose root is the **worst** of the best
+  k so far, so each remaining candidate is rejected in one comparison: roughly 50
+  thousand comparisons against 780 thousand. `BenchmarkTopK` over 50,000
+  candidates: **k=10 goes from 3,956 µs to 168 µs (23.6×)** and k=100 to 130 µs,
+  with zero allocations — the heap is `cands[:k]` itself. `k >= n` keeps the full
+  sort, because there is nothing to select; that is the path `pkg/query`''s scorers
+  take and it is unchanged. End to end in `scorer/text`, a query for a term in
+  every document goes from **5,871 µs to 2,112 µs (2.78×)**, and one in a
+  fiftieth of them from 85 µs to 35 µs. **The answer is identical**: the
+  comparator is a total order, so "the best k" is a unique set and sorting it
+  gives a unique sequence — `TestTopKSelectsExactlyWhatSortingWouldHaveChosen`
+  checks the two paths against each other over every combination of n and k that
+  exercises the boundary, and the nDCG and BM25 reference tests are unmoved. The
+  `ponytail:` note that stood on this function named this exact condition as the
+  one that would justify buying it.'
+time: 2026-09-05T16:00:00.000000000+09:00
+custom:
+  Issue: 27

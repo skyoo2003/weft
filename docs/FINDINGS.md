@@ -3880,3 +3880,113 @@ removed entirely.
    was raised to 192 with the reason named in `.golangci.yaml` rather than nineteen loops being
    rewritten to index. The next field on `Document` crosses it again, and that is the point of
    leaving the check on.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 21 — The sort nobody had measured
+
+[Milestone 17](#milestone-17--the-floor-under-every-query-found-and-removed) removed
+the per-query allocation floor and left the expensive query — a term held by every document —
+at 5.87 ms, unchanged. This round profiled that query instead of reasoning about it, and found
+the cost somewhere neither the code comments nor the earlier findings had put it.
+
+## 1. What the profile said, against what the notes predicted
+
+`scorer/text` carries a `ponytail:` note, standing since milestone 3, saying `Index.DocLen` takes
+the index-wide read lock once per posting and that this gets *worse* as cores are added. A term
+held by 50,000 documents is 50,000 lock acquisitions, so that was the obvious suspect and
+[milestone 17 §6](#milestone-17--the-floor-under-every-query-found-and-removed)
+carried it forward as the next thing to measure.
+
+The profile puts `DocLen` at **2.4%**. What it puts at the top, discounting the collector and
+the scheduler, is `slices.SortFunc`, its comparator, and `insertionSortCmpFunc` — `engine.TopK`,
+together about 13% of *sampled* time and, once the idle samples are discounted, most of the real
+work.
+
+`TopK` also carried a `ponytail:` note, and that one named its own trigger exactly:
+
+> full sort, O(n log n). A bounded container/heap is O(n log k) and worth it once a scorer
+> produces candidate sets far larger than k — none does in milestone 1
+
+`scorer/text` emits one candidate per matching document. The condition had been true since the
+corpus got large and nobody had gone back to read the note.
+
+## 2. What it is now
+
+A k-sized heap ordered so its **root is the worst** of the best k found so far, which is the
+inversion that makes bounded selection work: a heap with the best at the root answers "what is
+the best so far", which nothing needs, where selection needs "what is the first thing to throw
+away". Every remaining candidate is compared against the root once and discarded unless it beats
+it. That is n comparisons plus a sift per survivor against n·log₂n for the sort — on the query
+above, roughly 50 thousand against 780 thousand.
+
+The heap is `cands[:k]` itself, so this still sorts in place, still returns a prefix of the
+input, and allocates nothing. `k >= n` keeps the full sort, because there is nothing to select;
+that is the path `pkg/query`'s scorers take, which return every match rather than truncating.
+
+The note also warned against buying it before the cursor interface was settled, on the grounds
+that early termination maintains a threshold rather than a heap. That reading was wrong and is
+worth correcting rather than quietly stepping around: block-max WAND maintains a top-k heap
+*and* uses its minimum as the threshold. The heap is the thing WAND wants, not a detour from it.
+
+## 3. Measured
+
+`BenchmarkTopK`, 50,000 candidates, darwin/arm64, Apple M4. The `k=n` row is the unchanged full
+sort and is what the others are bought against.
+
+| k | ns/op | allocs |
+| --- | --- | --- |
+| 10 | **167,777** | 0 |
+| 100 | **130,180** | 0 |
+| 1000 | 446,699 | 0 |
+| 50000 (`k=n`) | 3,955,998 | 0 |
+
+**23.6× at k=10.** The figure includes an 800 KB copy of the input per iteration, so the
+selection itself is faster than the ratio says.
+
+End to end, `BenchmarkCandidates` on 50,000 committed documents, against milestone 17's numbers:
+
+| Query | ns before | ns after |
+| --- | --- | --- |
+| a term in every document | 5,870,612 | **2,111,504** |
+| three terms, one in every document | 5,841,230 | **2,109,801** |
+| a term in one document in fifty | 84,655 | **35,465** |
+| a term in three documents | 982 | 858 |
+| a term no document holds | 151 | 120 |
+
+**2.78× on the expensive query**, which means the sort was around 64% of what that query did —
+five times what the sampled profile suggested, because half the samples were the collector and
+the scheduler rather than the query.
+
+## 4. Why this is a substitution and not a change
+
+The two paths return the same answer, and the argument is short enough to check: the comparator
+is a **total order** — score descending, then DocID ascending, and no two candidates name one
+document — so "the best k" is a unique *set* and sorting that set gives a unique *sequence*.
+Selection cannot pick a different ten.
+
+That argument is worth nothing without the test, because the failure it protects against is
+invisible downstream. A comparator inversion or an off-by-one in the sift returns a ranking that
+is ordered, is the right length, and is missing a document; fusion consumes ranks and cannot
+know what was left out. `TestTopKSelectsExactlyWhatSortingWouldHaveChosen` runs both paths over
+every n and k that touches a boundary and demands they agree exactly, and
+`TestTopKAgreesWithSortingOnTies` does the case random scores never generate — every score
+equal, so the DocID tiebreak decides the whole answer.
+
+`internal/eval`'s BM25 and nDCG reference tests are unmoved, which is the independent statement
+that no published number changed.
+
+## 5. Carried forward
+
+1. **`DocLen`'s lock is still there and is still unmeasured under concurrency.** 2.4% of a
+   single-threaded profile is not the claim the ponytail note makes — it says the cost grows
+   with cores. That needs a concurrent benchmark, not a sequential one, and this round did not
+   write it.
+2. **Block-max WAND is now the next lever and is unblocked.** The metadata has been on disk
+   since version 1 ([D-001](DECISIONS.md)), nothing reads it, and §2 corrects the note that
+   argued for waiting. What it needs is a block-level cursor on `Index`, which is an API
+   question rather than a format one.
+3. **Neither this nor milestone 17 has been measured on the ladder.** Both are Go microbenchmarks
+   on one machine. Whether the arrival rate at which p50 goes from 39 ms to 1.27 s has moved is
+   still unrun, and is now owed by two rounds rather than one.
