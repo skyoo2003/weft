@@ -3750,3 +3750,133 @@ rounds running ([milestone 14](#milestone-14--the-probe-passed-the-ladder-ran-tw
 4. **`PostingBound` is a bound and could be a count.** Making it exact means summing the last
    block's posting count, which is one more varint at a known offset per segment. Nothing needs
    the exact number yet; block-max WAND would.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 18 — Fields, and the cheapest place to put them
+
+[FORMAT.md §8](FORMAT.md) has carried the same line since milestone 3: *no fields — a document
+is one `Text`, tokenized into one term space*, with per-field term spaces priced as a format v5
+that was not planned. [ADOPTION §8](ADOPTION.md) records a trial subject reaching for it and
+being told to keep a side table. It is the largest single thing a bleve user has and weft did
+not.
+
+## 1. A field is a term space, not a section
+
+The obvious construction is a per-field index: a section on disk, a table to seek into it,
+per-field statistics. The construction taken is smaller by an order of magnitude and it starts
+from what the index already is.
+
+A field's text is split by the same `Tokenizer`, and its terms go into the same `postings`
+under `name + NUL + token`. That is all. `engine.FieldTerm` spells the rule and is exported so
+a scorer written outside the module can build the same key, which is the arrangement
+`Index.Tokenize` already makes for the tokenizer — the index owns the rule and a scorer asks
+rather than reimplementing.
+
+What that bought:
+
+- **No new section, no new table, no new seek structure.** `segSectionsFor` hands v3, v4 and v5
+  the same seven files.
+- **Nothing in `engine` learned what a field means.** A scoped query is an ordinary
+  `Lookup`. The whole of `scorer/text`'s field support is one struct field, one constructor,
+  and one loop that maps tokens through `FieldTerm` — the plain scorer passes an empty name and
+  gets the token back unchanged, so both forms take one code path.
+- **Searching two fields is two scorers and fusion between them**, not a feature of one. That
+  is the milestone 1 claim holding one level down, and `TestTwoFieldScorersAreTwoStreams` is
+  where it is asserted.
+
+**A term in `Text` and the same term in a field are different terms**, and that is the point
+rather than a limitation: it is what makes a scoped query mean anything. A caller wanting a
+word findable both ways puts it in both places and pays for its tokens twice.
+
+## 2. One invariant decided the design, and it was already written down
+
+A document's stored token count **includes every field's tokens**. That is not a preference. §5
+of FORMAT.md has refused, since version 1, a segment where a document's frequencies summed
+across every term fall short of its stored length — and field terms are ordinary postings. So
+the length has to count them or the writer produces segments that cannot be scrubbed.
+
+The consequence lands on BM25 and is the one genuinely awkward thing in this round: **there is
+no per-field length to normalize against.** A five-token title inside a five-thousand-token
+document would be normalized by five thousand, so every title match in a long document scores
+near zero and the ranking becomes a ranking of document brevity.
+
+`text.NewField` answers that by setting `B` to 0 — no length normalization at all, so the score
+is IDF times saturating term frequency. Not normalizing is worse than normalizing correctly and
+much better than normalizing by the wrong length.
+`TestAFieldScorerDoesNotRankByDocumentBrevity` asserts both halves: two identical titles score
+identically however different their bodies are, *and* the plain scorer still separates two
+documents that differ only in length — which is what makes the first a decision rather than an
+accident.
+
+What it gives up is separating two equally good field matches by field length. A per-field count
+in the record is a format v6 and is not bought before something measures that it is needed.
+
+## 3. What the append cost, and the rule it leaves for version 6
+
+§7.7 drew a lesson — *append a section rather than changing one* — and §7.8 sharpened it: *a
+root-level file costs less than a segment section*. **Version 5 is the other end of that
+scale**, and the round is worth recording mostly for that.
+
+A `docs` record is a **unit**: it carries its own CRC seeded with its `DocID`, and it sits
+inside a section whose per-record offsets live in a second file. So appending one field to a
+record moved three things at once — every record's checksum, every `docoff` entry behind it,
+and both files' frame checksums.
+
+Reading an older version stayed free, exactly as §7.7 predicted: a v4 record is a v5 record with
+the count absent, and the version already decides whether to look for one. What was *not* free
+is anything that has to **produce** older bytes. The test helper that downgrades a generation is
+a backwards walk over a trailing varint for versions 3 and 4; for version 5 it is a full
+re-encode of `docs` and `docoff`, and it refuses outright a segment that actually carries a
+field rather than producing bytes that lie.
+
+Two smaller things the append broke, both caught by checks that already existed and neither by
+a test written for this round:
+
+- **`checkTokenizer` compared `Text`'s tokens against a length that now counts fields.** Every
+  corpus using fields would have been refused at `Open` with `ErrTokenizerMismatch`, under the
+  right tokenizer. The fix is that the rule about what a document's terms are lives in **one**
+  function, `tokenizeDoc`, which `Add`, `Update`, `replacePending` and this check all reach.
+- **`cmd/weft-eval`'s own copy of the record layout drifted by one byte per record**, and its
+  witness — the sum of derived record sizes against the file size — refused to print rather than
+  publishing working-set figures that were wrong by an unknown amount. That guard was written in
+  milestone 3b for exactly this and this is the first time it has fired.
+
+**The rule this leaves: append to a section, not to a record, unless the field belongs to the
+record's identity.** A field's text does belong to it, which is why this was still the right
+trade. A corpus-derived statistic would not be.
+
+## 4. `Update` was the one place a second copy of the rule would have been silent
+
+`replacePending` decides which postings to drop by re-tokenizing the **old** document. A walk of
+its `Text` alone leaves every field posting behind — so the document keeps answering a title
+query for a title it no longer has, with the record right and the posting stale, which no check
+that reads the record can see.
+
+That call site reads the tokenizing rule backwards, and it is the one a second copy would have
+forgotten. `TestUpdateDropsTheOldFieldsPostings` pins it, including the case where the field is
+removed entirely.
+
+## 5. Carried forward
+
+1. **Per-field length is unbought and its cost is stated rather than measured.** §2 argues B=0
+   from the shape of the failure, not from an nDCG number. Nothing has measured how much a
+   properly normalized field match would be worth, and the corpus that could is the one
+   milestone 15 also could not run.
+2. **The field separator is not checked on the token side.** A field's terms are
+   `name + NUL + token`, and nothing verifies that a *token* holds no NUL. The default tokenizer
+   cannot produce one; a caller-supplied one could, and such a token could collide with some
+   field's term and share its posting list. Checking it is a byte scan of every token of every
+   document. FORMAT §8 records it.
+3. **A field costs the document its tokens twice if the caller wants the word findable both
+   ways**, and nothing warns about that. It is arithmetic a caller can do, and a warning would
+   have to guess at intent.
+4. **`pkg/query` does not know about fields.** `Glob` matches against raw terms, so
+   `Glob(ix, "title\x00go*")` works and reads badly; there is no `query.Field` helper. It is a
+   thin wrapper over `FieldTerm` and is worth writing alongside the query syntax rather than
+   before it.
+5. **`Document` is now 128 bytes and gocritic's `rangeValCopy` default is 128.** The threshold
+   was raised to 192 with the reason named in `.golangci.yaml` rather than nineteen loops being
+   rewritten to index. The next field on `Document` crosses it again, and that is the point of
+   leaving the check on.

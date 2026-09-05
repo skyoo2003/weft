@@ -535,6 +535,73 @@ func Tokenize(s string) []string {
 	})
 }
 
+// ErrBadField rejects a Field that no lookup could reach or that would collide
+// with another.
+//
+// Three shapes, and each is a term space nobody can name rather than a matter of
+// taste. An empty name puts a field's tokens into Text's own term space, where
+// nothing distinguishes them from Text's; a name holding the separator byte
+// makes `a\x00b` as a field indistinguishable from field `a` holding tokens that
+// begin with `b`; and one document carrying a name twice merges two texts into
+// one term space with no way to ask for either.
+var ErrBadField = errors.New("engine: field name is empty, contains a separator, or is repeated")
+
+// tokenizeDoc splits every indexed text of d and returns the total token count
+// with the frequency of each term.
+//
+// One function, because four callers have to agree about what a document's terms
+// and length are and disagreeing is silent: Add and Update build the postings
+// from it, replacePending decides which postings to drop from the *old* text
+// with it, and checkTokenizer compares its count against what is on disk. A
+// second copy of "Text, then each field under FieldTerm" is a copy that stops
+// matching the first the day a field is added anywhere.
+//
+// The count includes every field's tokens. That is forced rather than chosen —
+// see Document.Fields — because Scrub adds a document's frequencies across all
+// terms and refuses a disagreement with its stored length, and field terms are
+// ordinary postings.
+//
+// It takes no lock and reads nothing but d, which is what lets Add call it
+// outside the exclusive lock. Names are not validated here; checkFields is, and
+// its caller runs it first.
+func (ix *Index) tokenizeDoc(d Document) (n int, freq map[string]int) {
+	toks := ix.Tokenize(d.Text)
+	freq = make(map[string]int, len(toks))
+	for _, t := range toks {
+		freq[t]++
+	}
+	n = len(toks)
+	for _, f := range d.Fields {
+		ft := ix.Tokenize(f.Text)
+		for _, t := range ft {
+			freq[FieldTerm(f.Name, t)]++
+		}
+		n += len(ft)
+	}
+	return n, freq
+}
+
+// checkFields refuses the field names no lookup could reach. See ErrBadField.
+//
+// Before anything is written, and before the tokenization that would otherwise
+// build a term space out of them.
+func checkFields(d Document, what string) error {
+	if len(d.Fields) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(d.Fields))
+	for _, f := range d.Fields {
+		if f.Name == "" || strings.Contains(f.Name, fieldSep) {
+			return fmt.Errorf("%s %q: field name %q: %w", what, d.Key, f.Name, ErrBadField)
+		}
+		if _, dup := seen[f.Name]; dup {
+			return fmt.Errorf("%s %q: field %q appears twice: %w", what, d.Key, f.Name, ErrBadField)
+		}
+		seen[f.Name] = struct{}{}
+	}
+	return nil
+}
+
 // Add stores d and returns its assigned DocID.
 //
 // Links are not resolved here: a document may reference a Key that has not been
@@ -558,11 +625,17 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// re-checking document vectors.
 	d.Vector = slices.Clone(d.Vector)
 	d.Links = slices.Clone(d.Links)
+	d.Fields = slices.Clone(d.Fields)
 
 	for i, c := range d.Vector {
 		if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
 			return 0, fmt.Errorf("add %q: vector component %d is %v: %w", d.Key, i, c, ErrNonFiniteVector)
 		}
+	}
+	// Before the tokenization below, which would otherwise build a term space out
+	// of names no lookup can reach.
+	if err := checkFields(d, "add"); err != nil {
+		return 0, err
 	}
 
 	// Tokenizing outside the lock. It is the dominant cost of Add — a 1 MB
@@ -571,14 +644,12 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// stalls every reader for the duration. A duplicate key wastes the work,
 	// which is the error path.
 	//
-	// Through ix.Tokenize, which is the same call the query side makes. Index
-	// time and query time sharing one function value is what makes a replaced
-	// tokenizer usable at all; see WithTokenizer.
-	toks := ix.Tokenize(d.Text)
-	freq := make(map[string]int, len(toks))
-	for _, t := range toks {
-		freq[t]++
-	}
+	// Through ix.tokenizeDoc, which reaches ix.Tokenize — the same function value
+	// the query side calls. Index time and query time sharing one tokenizer is
+	// what makes a replaced one usable at all; see WithTokenizer. It is also
+	// where Document.Fields become terms, which is why Update and checkTokenizer
+	// go through the same function rather than repeating the rule.
+	n, freq := ix.tokenizeDoc(d)
 
 	// wmu before mu, the order every mutator uses, and here it is what keeps the
 	// milestone 9 lock split working rather than merely tidy: an Add blocked in
@@ -613,7 +684,7 @@ func (ix *Index) Add(d Document) (DocID, error) {
 	// The id ceiling and the vector width are admit's, which appendPending asks
 	// before it appends. They used to be spelled out here; the reasoning moved
 	// with the code rather than being left behind as a second copy of it.
-	return ix.appendPending(d, toks, freq, "add")
+	return ix.appendPending(d, n, freq, "add")
 }
 
 // initMaps makes a zero-value Index usable. Requires ix.mu.
@@ -633,7 +704,7 @@ func (ix *Index) initMaps() {
 // not report itself as an Add. It is the whole of what the two callers differ by
 // down here, which is the point of them sharing this at all: two appends would be
 // two chances for the pending segment's six parallel structures to disagree.
-func (ix *Index) appendPending(d Document, toks []string, freq map[string]int, what string) (DocID, error) {
+func (ix *Index) appendPending(d Document, n int, freq map[string]int, what string) (DocID, error) {
 	if err := ix.admit(d, what); err != nil {
 		return 0, err
 	}
@@ -648,8 +719,8 @@ func (ix *Index) appendPending(d Document, toks []string, freq map[string]int, w
 		ix.postings[t] = append(ix.postings[t], Posting{Doc: id, Freq: f})
 	}
 
-	ix.docLen = append(ix.docLen, len(toks))
-	ix.totalLen += len(toks)
+	ix.docLen = append(ix.docLen, n)
+	ix.totalLen += n
 
 	return id, nil
 }
@@ -744,16 +815,16 @@ func (ix *Index) Update(d Document) (DocID, error) {
 	// the bytes that were validated have to be the bytes that get stored.
 	d.Vector = slices.Clone(d.Vector)
 	d.Links = slices.Clone(d.Links)
+	d.Fields = slices.Clone(d.Fields)
 	for i, c := range d.Vector {
 		if f := float64(c); math.IsNaN(f) || math.IsInf(f, 0) {
 			return 0, fmt.Errorf("update %q: vector component %d is %v: %w", d.Key, i, c, ErrNonFiniteVector)
 		}
 	}
-	toks := ix.Tokenize(d.Text)
-	freq := make(map[string]int, len(toks))
-	for _, t := range toks {
-		freq[t]++
+	if err := checkFields(d, "update"); err != nil {
+		return 0, err
 	}
+	n, freq := ix.tokenizeDoc(d)
 
 	// wmu before mu, the order every mutator uses. See Index.wmu.
 	ix.wmu.Lock()
@@ -776,7 +847,7 @@ func (ix *Index) Update(d Document) (DocID, error) {
 	// repeatedly between commits would otherwise burn an id and leave a dead
 	// record for each one.
 	if uint64(id) >= uint64(ix.base) {
-		if err := ix.replacePending(id, d, toks, freq); err != nil {
+		if err := ix.replacePending(id, d, n, freq); err != nil {
 			return 0, err
 		}
 		return id, nil
@@ -792,7 +863,7 @@ func (ix *Index) Update(d Document) (DocID, error) {
 	// The length comes off the index before the mark, the order Delete uses and
 	// for the same reason — docLenAt answers 0 for a tombstone.
 	ix.dead.mark(id, ix.docLenAt(id))
-	return ix.appendPending(d, toks, freq, "update")
+	return ix.appendPending(d, n, freq, "update")
 }
 
 // replacePending rewrites a pending document in place, keeping its DocID.
@@ -806,7 +877,7 @@ func (ix *Index) Update(d Document) (DocID, error) {
 // ix.mu.RLock, release, tokenize, reacquire exclusively to apply, all with wmu
 // held throughout so nothing can have moved. Owed when a caller updates
 // documents large enough for the tokenization to show up as read latency.
-func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[string]int) error {
+func (ix *Index) replacePending(id DocID, d Document, n int, freq map[string]int) error {
 	// Before anything is written, so a refused update leaves the document it
 	// could not replace exactly as it was.
 	if err := ix.adoptVecDim(d, "update"); err != nil {
@@ -815,19 +886,21 @@ func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[st
 	i := uint64(id) - uint64(ix.base)
 	old := ix.docs[i]
 
-	// The terms the old text held and the new one does not. Its postings have to
-	// go, or the document keeps answering a query for words it no longer
+	// The terms the old document held and the new one does not. Their postings
+	// have to go, or the document keeps answering a query for words it no longer
 	// contains — and a stale posting is invisible to any check that reads the
 	// record, because the record is right.
 	//
-	// Walked as tokens rather than reduced to a set first: dropPosting is a no-op
-	// for an id it does not find, so the second occurrence of a dropped term costs
-	// one binary search against the map insert and the hash a set would have cost
-	// it anyway.
-	// ix.Tokenize, not the package function: the old text has to be split the
-	// same way it was split when it was indexed, or the posting lists this drops
-	// from are not the ones that were written.
-	for _, t := range ix.Tokenize(old.Text) {
+	// Through tokenizeDoc, not ix.Tokenize on old.Text: the old document's fields
+	// were indexed under FieldTerm and a walk of its Text alone would leave every
+	// one of those postings behind. That is the whole reason the rule lives in one
+	// function — this call site is the one that reads it backwards, and a second
+	// copy of it here would have been the copy that forgot.
+	//
+	// Its keys rather than its counts: what is dropped is decided by presence in
+	// the new document's terms, and the old frequency says nothing about that.
+	_, oldFreq := ix.tokenizeDoc(old)
+	for t := range oldFreq {
 		if _, kept := freq[t]; !kept {
 			ix.dropPosting(t, id)
 		}
@@ -840,8 +913,8 @@ func (ix *Index) replacePending(id DocID, d Document, toks []string, freq map[st
 	// record's own count from ix.docLen, and Scrub adds a segment's postings back
 	// up and refuses a disagreement, so the two have to move together or the next
 	// commit writes a segment that will not scrub.
-	ix.totalLen += len(toks) - ix.docLen[i]
-	ix.docLen[i] = len(toks)
+	ix.totalLen += n - ix.docLen[i]
+	ix.docLen[i] = n
 	ix.docs[i] = d
 	return nil
 }

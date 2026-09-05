@@ -781,7 +781,13 @@ func (ix *Index) checkTokenizer() error {
 				// question and a different sentinel.
 				continue
 			}
-			if got := len(ix.Tokenize(d.Text)); got != stored {
+			// tokenizeDoc, not Tokenize on d.Text: a document's stored length
+			// counts every field's tokens too, so comparing against Text alone
+			// would report ErrTokenizerMismatch on every corpus that uses fields,
+			// under the right tokenizer. The rule about what a document's terms
+			// are lives in one function precisely so this call site cannot hold a
+			// different opinion from the one Add wrote with.
+			if got, _ := ix.tokenizeDoc(d); got != stored {
 				return fmt.Errorf("document %q holds %d tokens on disk and %d under this tokenizer: %w",
 					d.Key, stored, got, ErrTokenizerMismatch)
 			}

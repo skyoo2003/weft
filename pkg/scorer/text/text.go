@@ -27,13 +27,66 @@ const (
 // Scorer ranks documents by BM25 over Query.Text.
 type Scorer struct {
 	ix *engine.Index
+
+	// field is the Document field this scorer reads, or "" for Document.Text.
+	//
+	// Bound at construction and never per query, which is the rule Query's own
+	// documentation states for any input that does not change between queries. A
+	// caller searching two fields builds two scorers and passes both to Search,
+	// where they are two streams and fusion decides between them — which is the
+	// same shape as text and vector, one level down.
+	field string
+
+	// b is the length-normalization coefficient, B for Text and 0 for a field.
+	// NewField argues that.
+	b float64
 }
 
 // New returns a text scorer reading ix.
-func New(ix *engine.Index) *Scorer { return &Scorer{ix: ix} }
+func New(ix *engine.Index) *Scorer { return &Scorer{ix: ix, b: B} }
 
-// Name implements engine.Scorer.
-func (s *Scorer) Name() string { return "text" }
+// NewField returns a text scorer reading one named Document field instead of
+// Document.Text.
+//
+// A field's tokens are indexed under engine.FieldTerm, so this looks up
+// `field\x00token` where New looks up `token`. Nothing else about the scoring
+// changes and nothing in engine had to learn what a field is — which is the
+// whole of why fields cost a term space rather than a section.
+//
+// # It does not normalize by length, and that is the interesting decision
+//
+// engine.Document.Fields records the constraint this works around: a document's
+// stored length counts **every field's tokens plus Text's**, because field terms
+// are ordinary postings and Scrub checks that a document's frequencies summed
+// across all terms equal its stored length. There is no per-field length on
+// disk to normalize against.
+//
+// Normalizing a title match by the whole document's length is worse than not
+// normalizing at all. A five-token title inside a five-thousand-token document
+// would be divided by a thousand times the length it actually has, so every
+// title match in a long document scores near zero and the ranking becomes a
+// ranking of document brevity. So B is 0 here: `1 - B + B·|D|/avgdl` collapses
+// to 1, and the score is IDF times saturating term frequency.
+//
+// What that costs is real and is not hidden: two documents whose fields match
+// equally well are not separated by the field being shorter in one of them. The
+// fix is a per-field length in the record, which is a **format v6** and is not
+// bought before something measures that it is needed.
+//
+// An empty name is New — engine.FieldTerm returns the token unchanged — so a
+// caller building scorers from configuration needs no branch.
+func NewField(ix *engine.Index, field string) *Scorer {
+	return &Scorer{ix: ix, field: field}
+}
+
+// Name implements engine.Scorer. A field-scoped scorer names its field, so a
+// caller fusing several of them can tell the streams apart in a diagnostic.
+func (s *Scorer) Name() string {
+	if s.field == "" {
+		return "text"
+	}
+	return "text:" + s.field
+}
 
 // Candidates implements engine.Scorer.
 //
@@ -76,6 +129,18 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 		return nil, nil
 	}
 	n := float64(docs)
+
+	// Scoped in place, before anything looks a term up. The plain scorer passes
+	// an empty field name and engine.FieldTerm hands the token back unchanged, so
+	// both forms take one path — and the scoping happens once rather than at each
+	// of the two places below that read a term, which is one place for it to be
+	// forgotten instead of two.
+	//
+	// In place is safe: Tokenize's contract is that the slice it returns becomes
+	// the caller's.
+	for i, tok := range terms {
+		terms[i] = engine.FieldTerm(s.field, tok)
+	}
 
 	// Duplicate query terms are summed twice, which is the formula taken
 	// literally: the sum is over occurrences in Q, not over the distinct set.
@@ -155,9 +220,12 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 			// gets slower as cores are added. Batch it — a length snapshot read
 			// under one lock, the same aliasing contract Lookup already has —
 			// when scorer throughput is measured rather than assumed.
+			// s.b, not B: a field-scoped scorer sets it to 0 because the only
+			// length on disk is the whole document's, and normalizing a title
+			// by it ranks by document brevity. NewField argues that.
 			norm := 1.0
-			if avgdl > 0 {
-				norm = 1 - B + B*float64(s.ix.DocLen(p.Doc))/avgdl
+			if avgdl > 0 && s.b > 0 {
+				norm = 1 - s.b + s.b*float64(s.ix.DocLen(p.Doc))/avgdl
 			}
 			acc[p.Doc] += idf * f * (K1 + 1) / (f + K1*norm)
 		}

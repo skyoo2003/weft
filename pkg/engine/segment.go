@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -32,7 +33,24 @@ import (
 // stable across versions: a future reader can only reject what it cannot
 // parse if the version is always in the same place.
 const (
-	// formatVersion 4 is milestone 11's: version 3 plus a `dead-<gen>` file at
+	// formatVersion 5 is milestone 18's: version 4 with named fields appended to
+	// each `docs` record, after the timestamp and before the record's checksum.
+	// No section is added and none moves, so segSectionsFor hands v3, v4 and v5
+	// the same seven.
+	//
+	// It is the shape FORMAT.md section 7.7 called the cheap one — append rather
+	// than change — and a v4 record needs no branch of its own beyond the count
+	// it does not carry: a document written before fields existed has none. What
+	// it could not avoid is the bump itself, and that is the point rather than
+	// the price. A field's tokens are ordinary postings under FieldTerm and they
+	// count toward the document's stored length, so a build that predates fields
+	// would read a v5 segment, find frequencies it cannot account for against
+	// that length, and refuse it as corrupt — the one failure that must not be
+	// reported as damage. Stamping the frame with 5 makes such a build refuse the
+	// directory at the version check instead, which is a sentence a caller can
+	// act on.
+	//
+	// formatVersion 4 was milestone 11's: version 3 plus a `dead-<gen>` file at
 	// the index root, and one uvarint on `MANIFEST`. Nothing inside a segment
 	// moved, so segSectionsFor hands v3 and v4 the same seven sections.
 	//
@@ -50,7 +68,7 @@ const (
 	// reading all of them, so neither a DocID nor a Key could reach its document
 	// without decoding every document in front of it — no arrangement of a lazy
 	// reader fixes that, only different bytes do.
-	formatVersion = 4
+	formatVersion = 5
 
 	// minFormatVersion is the oldest version this build reads.
 	//
@@ -619,6 +637,16 @@ func encodeDocs(w *segWriter, src segSource) (offs, lens []int, keys []string) {
 		}
 		w.varint(d.Time.Unix())
 		w.uvarint(uint64(d.Time.Nanosecond()))
+		// Version 5's, appended after everything version 4 wrote and before the
+		// unit checksum, so a v4 record is a v5 record with this count absent
+		// rather than a different layout. The names are written in the caller's
+		// order — Document.Fields is a slice for exactly this reason, since a map
+		// would make one index produce two different segments.
+		w.uvarint(uint64(len(d.Fields)))
+		for _, f := range d.Fields {
+			w.str(f.Name)
+			w.str(f.Text)
+		}
 		w.endUnit()
 	}
 	return offs, lens, keys
@@ -1230,6 +1258,12 @@ func decodeDocFields(r *segReader, i int, want docPart) (Document, int, error) {
 	}
 	d.Time = time.Unix(sec, int64(nsec)).UTC()
 
+	if r.version >= 5 {
+		if err := decodeDocFieldList(r, i, &d, want); err != nil {
+			return Document{}, 0, err
+		}
+	}
+
 	// Seeded with i, so this both proves the bytes are intact and proves the
 	// record is the one asked for. Reading document 2's record as document 1 —
 	// which is all a damaged docoff entry amounts to — fails here rather than
@@ -1238,6 +1272,78 @@ func decodeDocFields(r *segReader, i int, want docPart) (Document, int, error) {
 		return Document{}, 0, err
 	}
 	return d, dl, nil
+}
+
+// decodeDocFieldList reads version 5's field block and refuses the names Add
+// refuses.
+//
+// The three checks are not tidiness and they are not a second opinion about the
+// write path: a segment's bytes are a trust boundary, and every one of these
+// names a term space no lookup could reach. An empty name puts a field's tokens
+// where Text's live; a name holding the separator makes two different fields
+// produce one term; a repeated name merges two texts into one space with no way
+// to ask for either. A reader that accepted them would answer queries about
+// fields that do not exist, which is a plausible wrong answer rather than an
+// error. Add refuses all three, and a restored index must not hold what a live
+// one cannot.
+//
+// What it does **not** check is that the field's terms are actually in the
+// postings. That is the same rule decodePostings states for Text — nothing
+// re-tokenizes a record to compare it against the term dictionary, because a
+// segment records what was indexed and not what this build's tokenizer would
+// index today.
+//
+// In wantVector and wantLinks mode the names are still read, because a duplicate
+// or a malformed one is a fact about the record and not about what the caller
+// asked for; only the copying out is skipped.
+func decodeDocFieldList(r *segReader, i int, d *Document, want docPart) error {
+	// One field is at least two bytes on disk, so the payload that remains is
+	// the ceiling — the same discipline the link count uses.
+	n, err := r.intn("field count", len(r.b)-r.off)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	var seen map[string]struct{}
+	if n > 1 {
+		seen = make(map[string]struct{}, min(n, 1<<12))
+	}
+	if want == wantAll {
+		// Same ceiling as the link list and for the same reason: a field is two
+		// bytes on disk and a Field is two string headers in a slice.
+		d.Fields = make([]Field, 0, min(n, 1<<12))
+	}
+	for j := range n {
+		name, err := r.str("field name")
+		if err != nil {
+			return err
+		}
+		if name == "" || strings.Contains(name, fieldSep) {
+			return fmt.Errorf("%s: document %d field %d is named %q, which Add refuses: %w",
+				r.name, i, j, name, ErrCorrupt)
+		}
+		if seen != nil {
+			if _, dup := seen[name]; dup {
+				return fmt.Errorf("%s: document %d names field %q twice, which Add refuses: %w",
+					r.name, i, name, ErrCorrupt)
+			}
+			seen[name] = struct{}{}
+		}
+		if want != wantAll {
+			if _, err := r.skipStr("field text"); err != nil {
+				return err
+			}
+			continue
+		}
+		text, err := r.str("field text")
+		if err != nil {
+			return err
+		}
+		d.Fields = append(d.Fields, Field{Name: name, Text: text})
+	}
+	return nil
 }
 
 // decodeTermIndex reads the whole terms section into a term -> postings offset

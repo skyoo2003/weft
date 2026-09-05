@@ -1,4 +1,4 @@
-# On-disk format, version 4
+# On-disk format, version 5
 
 `pkg/engine/segment.go`, `pkg/engine/seek.go`, `pkg/engine/ivf.go` and
 `pkg/engine/persist.go` are what the bytes actually obey. Where this document and
@@ -6,11 +6,12 @@ those files disagree, the document is wrong.
 
 Milestone 2 wrote version 1; milestone 3a replaced it with version 2; milestone 3b
 appended one section and made it version 3; milestone 11 added a file at the index
-root and made it version 4. It is written down because a format is
+root and made it version 4; milestone 18 appended named fields to each document
+record and made it version 5. It is written down because a format is
 the one thing in weft that cannot be quietly rewritten — code is replaceable, a
 file on a user's disk demands a migration.
 
-**Versions 2, 3 and 4 are all read. Version 1 is refused, not migrated.** `Open`
+**Versions 2, 3, 4 and 5 are all read. Version 1 is refused, not migrated.** `Open`
 reports `ErrBadVersion` for v1. That reason is not technical: weft has no users,
 and the only v1 directory that existed was rebuildable from its sources. That
 argument rests on a user count and is therefore available exactly once —
@@ -60,6 +61,13 @@ version. A v3 segment missing `ivf` is damage, not an older segment; a v2 segmen
 with an `ivf` file beside it has a file nothing names. `meta` is opened first for
 exactly this reason — its frame is what says which list applies.
 
+**Version 5 added no section and no file.** It appends a field block to each
+`docs` record, after the timestamp and before the record's own checksum, so the
+section list is unchanged and a v4 record is a v5 record with the count absent.
+That is the cheapest shape §7 knows for a *record* and the most expensive one it
+knows overall — see §7.9, which is the entry arguing that a section would have
+been cheaper still.
+
 **Version 4 added no section to a segment.** What it added is `dead-<gen>`, beside
 `MANIFEST` rather than inside a generation, so a v3 segment and a v4 segment are
 identical in shape and a directory holding both is the ordinary state of one that
@@ -94,7 +102,7 @@ Every file, the manifest included, wears the same frame:
 | Field | Bytes | Notes |
 | --- | --- | --- |
 | magic | 4 | `weft` |
-| format version | uvarint | `3` when written, `2` or `3` when read; one byte until version 128 |
+| format version | uvarint | `5` when written, `2` through `5` when read; one byte until version 128 |
 | kind | 1 | see below |
 | payload | — | section-specific, below |
 | checksum | 4 | CRC-32 Castagnoli, little-endian, over everything above |
@@ -222,6 +230,10 @@ per document:
   link          string × count
   time seconds  varint      Unix seconds
   time nanos    uvarint     0 … 999,999,999
+  field count   uvarint     0 when the document has no fields          ← v5
+  per field:                                                          ← v5
+    name        string      non-empty, no NUL, unique in this document
+    text        string
 ```
 
 Four decisions here are load-bearing:
@@ -242,6 +254,21 @@ Four decisions here are load-bearing:
 - **Links are keys, not DocIDs** ([FINDINGS §4.2](FINDINGS.md)). Lazy resolution
   is what makes forward references and dangling edges free, and milestone 4's
   evaluation joins an external citation graph by key.
+- **A field is a term space, not a section.** Every field's text is split by the
+  same tokenizer and its terms go into the same `postings` under
+  `name + NUL + token`, which is what `engine.FieldTerm` spells. So a query
+  scoped to a field is an ordinary term lookup, nothing in the index learns what
+  a field means, and adding fields cost no new section, no new table and no new
+  rejection rule beyond the three on the names.
+- **A document's stored token count includes every field's tokens.** That is
+  forced rather than chosen: field terms are ordinary postings, and §5 already
+  refuses a segment whose per-document frequencies do not sum to its stored
+  length. What it costs is that there is no per-field length to normalize BM25
+  against — §8 prices it, and `scorer/text`'s field-scoped form answers it by not
+  normalizing at all.
+- **Fields are a slice, not a map.** `Commit` is byte-deterministic and a map has
+  no order, so two indexes holding the same documents would produce different
+  segments.
 - **Time carries no presence flag.** The zero `time.Time`'s own Unix seconds
   decode back to a value that `IsZero` again, so "no timestamp" — which the
   recency scorer reads as "no opinion" — survives by arithmetic rather than by
@@ -449,6 +476,7 @@ plausible but breaks an invariant a scorer relies on.
 | The version written in more than one byte | `binary.Uvarint` decodes `0x82 0x00` as 2 too. The header would be seven bytes while `segHeaderLen`, and every offset the terms index records against it, still says six |
 | A section file the manifest names but that is not on disk | Damage, reported as `ErrCorrupt` and never as `fs.ErrNotExist`, so a caller's "nothing committed yet" branch cannot overwrite a damaged index |
 | Empty or duplicate key | `Add` refuses both; a restored index must not hold what a live one cannot |
+| A field name that is empty, holds a NUL, or repeats within one document | Each is a term space no lookup could reach, so a reader that accepted one would answer queries about a field that does not exist. `Add` refuses all three, and the same rule applies here — a restored index must not hold what a live one cannot |
 | NaN or infinite vector component | `scorer/vector` skips re-checking documents because `ErrNonFiniteVector` promised this |
 | Mixed vector widths | Mixed embedding models |
 | meta disagreeing with docs | The BM25 snapshot must describe its own corpus |
@@ -647,6 +675,28 @@ Two things that follows from, and one it does not:
    `MANIFEST` with 4 makes such a build refuse the whole directory at the first
    frame it reads.
 
+9. **Version 5 appended to a *record*, and that was the expensive kind of
+   append.** §7.7 and §7.8 drew a lesson about appending a section rather than
+   changing one, and §7.8 sharpened it: a root-level file costs less than a
+   segment section. Version 5 is the other end of that scale. A `docs` record is
+   a **unit** — it carries its own checksum, seeded with its `DocID` — inside a
+   section whose per-record offsets live in a second file. So one appended field
+   moved three things at once: every record's checksum, every `docoff` entry
+   behind it, and both files' frame checksums. Reading an older version stayed
+   free, because a v4 record is a v5 record with the count absent and the version
+   already decides whether to look for it. What was not free is anything that has
+   to *produce* older bytes: the test helper that downgrades a generation is a
+   backwards walk over a trailing varint for versions 3 and 4, and a full
+   re-encode of `docs` and `docoff` for version 5.
+
+   The alternative was a `fields` section with an offset table of its own, which
+   is a new file, a new entry in the section list, a new fixed-width table and
+   its own rejection rules — more code, and it would have left the record
+   untouched. **The rule this leaves for a version 6: append to a section, not to
+   a record, unless the field belongs to the record's identity.** A field's text
+   does belong to it, which is why this was still the right trade; a
+   corpus-derived statistic would not.
+
 ## 8. Known limits
 
 | Limit | Value | Where it goes |
@@ -657,7 +707,9 @@ Two things that follows from, and one it does not:
 | `Nearest` weakens under deletion | It promised at least k candidates when k vectors exist; tombstones are filtered after the segment widened its probe, so fewer may come back | Recall falls as the deleted fraction rises. The widening loop would have to know about tombstones |
 | A corpus-walking scorer still walks tombstones | `Len` is the id bound, so `scorer/recency` visits deleted ids and skips them | The cost of keeping `Len` meaning what a scorer needs it to mean ([FINDINGS milestone 11 §2](FINDINGS.md)) |
 | No term positions | A posting is `{DocID, Freq}`; where in the document a term occurred is not stored | So no phrase or proximity constraint can be decided from the index. A caller decides one from `Document.Text` instead, at a record decode per candidate. Storing positions widens the postings block encoding, which is a **format v5** and is not planned ([ADOPTION §8](ADOPTION.md)) |
-| No fields | A document is one `Text`, tokenized into one term space | So "match in the title only" is a caller-side convention — a side table keyed by `Key`, or a second index — not something the index can answer. Per-field term spaces are the same **format v5** |
+| No per-field length | A document's stored token count is Text plus every field, and nothing records how many belonged to each | So BM25 has nothing to normalize a field match against. Normalizing by the whole document's length would divide a five-token title by a five-thousand-token body and rank by brevity, so `scorer/text`'s field-scoped form sets B to 0 and does not normalize. What that gives up is separating two equally good field matches by field length. A per-field count in the record is a **format v6** and is not bought before something measures that it is needed |
+| A field's terms and Text's do not mix | A term in `Text` and the same term in a field are two different terms | Deliberate — it is what makes a scoped query mean anything. A caller wanting a word findable both ways puts it in both places, which counts its tokens twice toward the document's length |
+| The field separator is not checked on the token side | A field's terms are `name + NUL + token`, and nothing verifies that a token holds no NUL | The default tokenizer cannot produce one — it splits at every non-letter and non-digit — but a caller-supplied `Tokenizer` could, and such a token could collide with some field's term and share its posting list. Checking it is a byte scan of every token of every document |
 | DocID namespacing | None — a DocID means nothing outside its index | Unresolved; a DocID is meaningful only inside one index directory |
 | Vector search is approximate | recall@10 = 0.992 against a brute-force scan on the evaluation corpus | The screw is `nprobe`, and it is not exposed. [EVAL §5](EVAL.md) carries the curve |
 | A vector query's working set | 210 MiB per query of a 626 MiB `docs` section | The partition cut the arithmetic 5.6× and the bytes 3.0×. Why the second number is so much worse than the first, and what would actually fix it, is [FINDINGS milestone 3b](FINDINGS.md) |

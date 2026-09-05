@@ -56,6 +56,7 @@ Scorer has unexported fields
 const B = 0.75
 const K1 = 1.2
 func New(*engine.Index) *Scorer
+func NewField(*engine.Index, string) *Scorer
 method Scorer.Candidates(context.Context, engine.Query, int) ([]engine.Candidate, error)
 method Scorer.Name() string
 package text

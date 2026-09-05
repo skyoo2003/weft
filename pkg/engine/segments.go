@@ -41,6 +41,17 @@ type segment struct {
 	totalLen int
 	vecDim   int
 
+	// version is the format version every one of this segment's sections
+	// declared. openSegment refuses a segment whose sections disagree, so one
+	// number describes the whole of it.
+	//
+	// It is kept because the *record* layout varies with it: version 5 appends
+	// a field block to each docs record, and a reader positioned on a record has
+	// to know whether to expect one. Without it the fields decode as trailing
+	// bytes inside the unit and every record fails its own checksum — which is
+	// damage reported for a segment that is intact.
+	version uint64
+
 	// live is how many of this segment's documents had no tombstone when it was
 	// written, which is how many entries its keys section holds. It is a
 	// cross-check and nothing reads it at query time: whether a document is
@@ -116,6 +127,7 @@ func openSegment(root *os.Root, name string, base DocID) (*segment, error) {
 	}
 	s.maps = append(s.maps, metaB)
 
+	s.version = metaR.version
 	secs := segSectionsFor(metaR.version)
 	rs := make([]*segReader, len(secs))
 	rs[0] = metaR
@@ -455,7 +467,7 @@ func (s *segment) recordAt(local DocID) (*segReader, bool) {
 		}
 		end = next - segHeaderLen
 	}
-	return &segReader{name: docsFile, b: s.docs[:end], off: off - segHeaderLen}, true
+	return &segReader{name: docsFile, b: s.docs[:end], off: off - segHeaderLen, version: s.version}, true
 }
 
 // lookup decodes the postings for term, ascending by index-wide DocID, or nil
