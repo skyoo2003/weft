@@ -6,4 +6,4 @@ body: '`weft` with no arguments prints the help instead of starting an interacti
   documents a scorer cannot see.'
 time: 2026-09-06T10:00:02.000000000+09:00
 custom:
-  Issue: 29
+  Issue: 26

@@ -9,4 +9,4 @@ body: 'weftd carries the graph signal, both halves of it. A mapping binds a keyw
   `/_weft/query` under a prefix OpenSearch does not use. `pkg/` changed 0 lines.'
 time: 2026-09-06T10:00:01.000000000+09:00
 custom:
-  Issue: 29
+  Issue: 26

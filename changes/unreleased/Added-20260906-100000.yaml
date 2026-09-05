@@ -12,4 +12,4 @@ body: '`weft` is a command with subcommands — `index`, `search`, `inspect`, `c
   under, without which a numeric range query cannot be written by hand.'
 time: 2026-09-06T10:00:00.000000000+09:00
 custom:
-  Issue: 29
+  Issue: 26
