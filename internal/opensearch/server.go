@@ -322,6 +322,10 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) error {
 		return badRequest("illegal_argument_exception",
 			"a document id is required: weft keys documents by the id you give them and generates none")
 	}
+	commit, apiErr := parseRefresh(r)
+	if apiErr != nil {
+		return apiErr
+	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -336,8 +340,10 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if err := s.maybeCommit(r, x); err != nil {
-		return err
+	if commit {
+		if err := x.Commit(r.Context()); err != nil {
+			return err
+		}
 	}
 
 	result, status := "updated", http.StatusOK
@@ -376,13 +382,19 @@ func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	id := r.PathValue("id")
+	commit, apiErr := parseRefresh(r)
+	if apiErr != nil {
+		return apiErr
+	}
 
 	found, err := x.DeleteDoc(id)
 	if err != nil {
 		return err
 	}
-	if err := s.maybeCommit(r, x); err != nil {
-		return err
+	if commit {
+		if err := x.Commit(r.Context()); err != nil {
+			return err
+		}
 	}
 
 	result, status := "deleted", http.StatusOK
@@ -393,7 +405,7 @@ func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// maybeCommit honours ?refresh.
+// parseRefresh reads ?refresh and reports whether the write should be committed.
 //
 // The word means something different on each side of this call, and the
 // difference is published rather than papered over: in OpenSearch refresh makes a
@@ -402,14 +414,20 @@ func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request) error {
 // refresh=true is a Commit. That is the honest reading and also the expensive
 // one — a commit holds the writer for as long as it takes, 11 seconds for 20,000
 // documents (docs/LIMITATIONS.md).
-func (s *Server) maybeCommit(r *http.Request, x *Index) error {
+//
+// Called before the write, not after. Validating afterwards means a bad value
+// returns 400 over a document that is already indexed, which is the one shape
+// worse than either answer alone: the client is told the write failed and it did
+// not.
+func parseRefresh(r *http.Request) (commit bool, err *apiError) {
 	switch v := r.URL.Query().Get("refresh"); v {
 	case "", "false":
-		return nil
+		return false, nil
 	case "true", "wait_for":
-		return x.Commit(r.Context())
+		return true, nil
 	default:
-		return badRequest("illegal_argument_exception", "refresh takes true, false or wait_for, got %q", v)
+		return false, badRequest("illegal_argument_exception",
+			"refresh takes true, false or wait_for, got %q", v)
 	}
 }
 
