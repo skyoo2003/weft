@@ -4312,18 +4312,29 @@ production caller is `scorer/text`. Removing the preallocation outright would ha
 allocations a query on a shape whose whole budget is five. `make bench-head`, 50,000 documents,
 top 10, Apple M4:
 
-| Query shape | Before | After |
-| --- | --- | --- |
-| absent | 327.5 ns, 152 B, 5 allocs | see below |
-| rare | 1100 ns, 2873 B, 17 allocs | |
-| mid | 28102 ns, 4322 B, 62 allocs | |
-| common | 1345558 ns, 61673 B, 2630 allocs | |
-| mixed | 1428380 ns, 67822 B, 2692 allocs | |
+| Query shape | Allocations before | after | Bytes before | after |
+| --- | --- | --- | --- | --- |
+| absent | 5 | **5** | 152 | **152** |
+| rare | 17 | **17** | 2,873 | **2,873** |
+| mid | 62 | **62** | 4,322 | **4,316** |
+| common | 2,630 | **2,630** | 61,673 | **61,656** |
+| mixed | 2,692 | **2,692** | 67,822 | **67,827** |
 
-The ceiling is what keeps the after column equal to the before column: every published shape
-uses `k = 10`, which is far below 4096, so the preallocation still happens exactly as it did.
-**The change is invisible at the sizes this project measures and only binds at the sizes it
-never intended to serve** — which is the shape a security fix should have.
+**The allocation count is identical on every shape**, and the byte column moves by at most 17
+bytes in either direction, which is the per-run variation this benchmark already has. The
+ceiling is what buys that: every published shape uses `k = 10`, far below 4096, so the
+reservation still happens exactly as it did.
+
+The time column is not reported as a result. Fifty iterations is enough to compare allocations,
+which are counted, and not enough to compare nanoseconds: weft's `rare` reads 1100 ns before and
+1632 ns after, while bleve — which this change cannot touch — moved from 5233 ns to 5117 ns and
+its `absent` from 5850 ns to 6281 ns on the same two runs. A control that moves 7% in both
+directions is the measurement saying it cannot resolve this.
+
+**So the change is invisible at the sizes this project measures and binds only at the sizes it
+never intended to serve** — which is the shape a hardening fix should have. Removing the
+preallocation outright, which was the first thing considered, would have cost four allocations a
+query on a shape whose whole budget is five.
 
 ## 6. Carried forward
 
