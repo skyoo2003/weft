@@ -1,4 +1,4 @@
-.PHONY: all fmt build vet test lint lint-if-present lint-docs lint-docs-if-present spdx fuzz arch deps run example clean \
+.PHONY: all fmt build vet test lint lint-if-present lint-docs lint-docs-if-present spdx fuzz arch deps run serve compat example clean \
 	changelog changelog-new changelog-check docs-site release-check \
 	eval eval-full eval-data recall bench bench-preflight bench-compare bench-build bench-head
 
@@ -366,6 +366,42 @@ eval-data:
 
 run:
 	go run ./cmd/weft
+
+serve:
+	go run ./cmd/weftd
+
+# Milestone 24's judgment sentence: an official client drives weftd unmodified.
+#
+# Not in `all`, and skipped rather than failed when the client is absent — the
+# property that `make all` needs nothing beyond the Go toolchain is the one this
+# repository has protected since the first commit, and a compatibility check
+# that broke it would be paid for on every checkout. CI runs this as its own
+# step, the way `fuzz` is run.
+#
+# One shell, not two. Each recipe line gets its own, so an `exit 0` in the first
+# would skip nothing that follows it — the trap `lint-if-present` and `recall`
+# are both written around, and the one that once made a target print SKIP and
+# then run the very thing it had just said it was skipping.
+#
+# The Go tests already drive every one of these routes through httptest. What
+# only a real client can say is whether the fields it reads are the fields weftd
+# sends, and that is what D-026's version claim is spent on.
+# PYTHON is overridable so the client can live in a throwaway virtualenv rather
+# than in the interpreter on PATH — the same shape docs/EVAL.md section 7 uses
+# for its reference implementations, and for the same reason: a check that
+# demands a global install is a check people stop running.
+#
+#	python3 -m venv /tmp/weft-compat-venv
+#	/tmp/weft-compat-venv/bin/pip install opensearch-py
+#	make compat PYTHON=/tmp/weft-compat-venv/bin/python
+PYTHON ?= python3
+
+compat:
+	@if command -v $(PYTHON) >/dev/null && $(PYTHON) -c 'import opensearchpy' >/dev/null 2>&1; then \
+		$(PYTHON) internal/opensearch/testdata/compat.py; \
+	else \
+		echo "SKIP: $(PYTHON) has no opensearch-py. See the PYTHON note above this target in the Makefile."; \
+	fi
 
 example:
 	go run ./examples/basic
