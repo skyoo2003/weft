@@ -1,0 +1,9 @@
+kind: Changed
+body: '`weft` with no arguments prints the help instead of starting an interactive demo
+  over a corpus compiled into the binary. That demo is three examples now, one case
+  each: `examples/breakdown` prints what fusion did, `examples/weights` runs one query
+  under `Fuse` and `FuseWeighted` side by side, and `examples/sparse` is about the
+  documents a scorer cannot see.'
+time: 2026-09-06T10:00:02.000000000+09:00
+custom:
+  Issue: 29

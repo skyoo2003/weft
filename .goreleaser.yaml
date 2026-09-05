@@ -2,11 +2,11 @@ version: 2
 
 # What this ships and what it does not.
 #
-# It ships `cmd/weft`, the interactive demo. That is genuinely all there is to
-# ship: weft is a library, and a library is consumed with `go get`, which needs
-# no artefact from here. README calls the binary a demo and this file does not
-# promote it to a product — what the archives buy is that someone evaluating
-# the project can run it without a Go toolchain.
+# It ships `cmd/weft`, the command line in front of the library. That is
+# genuinely all there is to ship: weft is a library, and a library is consumed
+# with `go get`, which needs no artefact from here. This file does not promote
+# the binary to a product — what the archives buy is that someone evaluating the
+# project can index a corpus and query it without a Go toolchain.
 #
 # No Docker image and no Homebrew tap. Both are distribution channels that have
 # to be maintained on a schedule this project cannot promise, and neither is on

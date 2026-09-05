@@ -34,23 +34,34 @@ Per-milestone state, the published nDCG table and the two debts milestone 5 has 
 ## Quick start
 
 ```bash
-go run ./cmd/weft
+go run ./examples/breakdown
 ```
 
 ```text
-query> ranking fusion
-  1. rrf        0.03226  text:2  vector:-  graph:-  recency:2
-  2. hnsw       0.01749  text:-  vector:-  graph:2  recency:3
-  3. ivf        0.01721  text:-  vector:-  graph:3  recency:4
-  4. bm25       0.01702  text:-  vector:-  graph:1  recency:5
-  5. tfidf      0.01639  text:1  vector:-  graph:-  recency:-
+query "ranking fusion" @ [1 0 0], 4 scorers
+
+  1. rrf        0.04813  text:2  vector:3  graph:-  recency:2
+  2. tfidf      0.04791  text:1  vector:2  graph:-  recency:5
+  3. bm25       0.03366  text:-  vector:1  graph:1  recency:4
+  4. hnsw       0.03311  text:-  vector:4  graph:2  recency:3
+  5. changelog  0.01639  text:-  vector:-  graph:-  recency:1
 ```
 
-Trailing columns are each scorer's rank *before* fusion. `tfidf` leads text but lands fifth: no other scorer agreed, and one scorer's confidence does not beat consensus. A `-` means the document is absent from that stream — no opinion, deliberately withheld as a traversal seed, or simply below the cut.
+Trailing columns are each scorer's rank *before* fusion. `tfidf` leads text but lands second: no other scorer put it first, and one scorer's confidence does not beat consensus. A `-` means the document is absent from that stream — no opinion, deliberately withheld as a traversal seed, or simply below the cut. `changelog` has neither a vector nor a link and surfaces anyway, which is what rank fusion buys.
 
-The demo fuses with `FuseWeighted(1, 1, 0.1, 1)`, discounting the graph stream to a tenth of a vote, because that is the one weight this project has measured.
+The example fuses with `FuseWeighted(1, 1, 0.1, 1)`, discounting the graph stream to a tenth of a vote, because that is the one weight this project has measured.
 
-Minimal embedding: [`examples/basic`](examples/basic/main.go). Godoc example: `Example` in `pkg/engine`.
+Three more, one case each: [`examples/weights`](examples/weights/main.go) runs one query under `Fuse` and `FuseWeighted` side by side, [`examples/sparse`](examples/sparse/main.go) is about the documents a scorer cannot see, and [`examples/basic`](examples/basic/main.go) is the smallest embedding there is. Godoc example: `Example` in `pkg/engine`.
+
+### Or from a shell, without writing Go
+
+```bash
+go run ./cmd/weft index -data ./ix < corpus.jsonl
+go run ./cmd/weft search -data ./ix -q '+fusion' -scorers vector,recency -breakdown
+go run ./cmd/weft inspect -data ./ix -term fusion
+```
+
+`weft` is a command with subcommands: `index`, `search`, `inspect`, `check` and `encode`. Between them they reach every callable symbol the library exports but three, and those three are named with their reason in `cmd/weft/coverage_test.go` — which reads the golden API files as data, so an export no command can call fails the build.
 
 ### Or over HTTP, without writing Go
 

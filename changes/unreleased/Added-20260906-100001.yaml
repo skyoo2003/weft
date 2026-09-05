@@ -1,0 +1,12 @@
+kind: Added
+body: 'weftd carries the graph signal, both halves of it. A mapping binds a keyword field
+  with `"links": true` — the wire cannot tell one array of strings from an array of
+  document ids, so the mapping says which — and the `weft_graph` clause walks from
+  `seeds`, with `include_seeds`, `ppr`, `restart` and `precision` reaching the rest of
+  `pkg/scorer/graph`. Nine more routes reach the half of engine a search request never
+  touches: `_flush`, `_refresh`, `_forcemerge`, `_count` and `_analyze` under
+  OpenSearch''s own names, and `/_weft/terms`, `/_weft/postings`, `/_weft/scrub` and
+  `/_weft/query` under a prefix OpenSearch does not use. `pkg/` changed 0 lines.'
+time: 2026-09-06T10:00:01.000000000+09:00
+custom:
+  Issue: 29
