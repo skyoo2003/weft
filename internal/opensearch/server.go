@@ -113,6 +113,11 @@ var oneShard = shardInfo{Total: 1, Successful: 1}
 const (
 	clusterName    = "weft"
 	keyClusterName = "cluster_name"
+
+	// keyShards is the field the constant above is reported under, spelled once
+	// for the reason keyClusterName is: several handlers write it, and a typo in
+	// one is a field a client silently does not find.
+	keyShards = "_shards"
 )
 
 // The `result` a write reports. Spelled once because bulk.go answers with the
@@ -651,7 +656,7 @@ func writeHits(w http.ResponseWriter, hits []hit, total int, exact bool, took ti
 	writeJSON(w, http.StatusOK, map[string]any{
 		"took":      took.Milliseconds(),
 		"timed_out": false,
-		"_shards":   oneShard,
+		keyShards:   oneShard,
 		"hits": map[string]any{
 			"total":     map[string]any{"value": total, "relation": relation},
 			"max_score": maxScore,

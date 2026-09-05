@@ -35,7 +35,7 @@ func checkCmd(args []string, stdout, stderr io.Writer) error {
 	if err := engine.Scrub(data); err != nil {
 		return fmt.Errorf("%s: %w", data, err)
 	}
-	fmt.Fprintf(stdout, "no damage found in %s\n", data)
+	outf(stdout, "no damage found in %s\n", data)
 	return nil
 }
 
@@ -70,14 +70,14 @@ func encodeCmd(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return badUsage("-int %q is not an integer", n)
 		}
-		fmt.Fprintln(stdout, query.EncodeInt(v))
+		outln(stdout, query.EncodeInt(v))
 		return nil
 	case set["time"]:
 		t, err := time.Parse(time.RFC3339, ts)
 		if err != nil {
 			return badUsage("-time %q is not an RFC 3339 time: %v", ts, err)
 		}
-		fmt.Fprintln(stdout, query.EncodeTime(t))
+		outln(stdout, query.EncodeTime(t))
 		return nil
 	default:
 		return badUsage("nothing to encode: give -int an integer or -time an RFC 3339 time")

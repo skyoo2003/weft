@@ -20,95 +20,123 @@ import (
 // term in the index at all, under what spelling, in which documents, and what
 // does the link graph around this document actually look like.
 func inspectCmd(args []string, stdout, stderr io.Writer) error {
-	var data, tokName, doc, term, terms, field, postings, nearest, analyze string
-	var stats, adjacency bool
-	var limit int
-
-	fs, err := parseFlags(cmdInspect, args, stderr, func(fs *flag.FlagSet) {
-		fs.StringVar(&data, "data", "", "directory holding the index")
-		fs.StringVar(&tokName, "tokenizer", defaultTokenizer,
-			"tokenizer the index was committed with: "+strings.Join(tokenizerNames(), ", "))
-		fs.BoolVar(&stats, "stats", false, "document count, average length and id space; the default")
-		fs.StringVar(&doc, "doc", "", "report on one document, by key")
-		fs.StringVar(&term, "term", "", "how many documents hold this term, and which")
-		fs.StringVar(&terms, "terms", "", "walk the term space from this prefix; the empty prefix walks all of it")
-		fs.StringVar(&field, "field", "", "scope -term and -terms to one of Document.Fields")
-		fs.StringVar(&postings, "postings", "", "walk this term's postings a block at a time")
-		fs.StringVar(&nearest, "nearest", "", "the documents closest to this vector, comma-separated numbers")
-		fs.BoolVar(&adjacency, "graph", false, "the link graph's size; with -doc, that document's edges")
-		fs.StringVar(&analyze, "analyze", "", "tokenize this text; the one question here needing no index")
-		fs.IntVar(&limit, "limit", 20, "how many terms, postings or neighbours to print")
-	})
+	f, err := parseInspectArgs(args, stderr)
 	if err != nil {
 		return err
-	}
-	set := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-
-	tok, ok := tokenizers[tokName]
-	if !ok {
-		return badUsage("unknown tokenizer %q; the choices are %s", tokName, strings.Join(tokenizerNames(), ", "))
-	}
-	if limit <= 0 {
-		return badUsage("-limit must be positive, got %d", limit)
 	}
 
 	// -analyze without an index is engine's package-level tokenizer: the default
 	// one with nothing behind it. That is the only question in this command with
 	// an answer before a corpus exists, and it is the one worth asking first,
 	// because what a text becomes decides what a query can match.
-	if data == "" {
-		if !set["analyze"] {
-			return badUsage("-data names the directory holding the index, and it is required; " +
-				"-analyze is the only question here with an answer without one")
-		}
-		printTerms(stdout, "analyzed", tokenizeWithout(tok, tokName, analyze))
+	if f.data == "" {
+		printTerms(stdout, "analyzed", tokenizeWithout(f.tok, f.tokName, f.analyze))
 		return nil
 	}
 
-	ix, err := engine.Open(data, engine.WithTokenizer(tok))
+	ix, err := engine.Open(f.data, engine.WithTokenizer(f.tok))
 	if err != nil {
 		return err
 	}
 	defer ix.Close() //nolint:errcheck // nothing was written, so a failed close changes no answer
 
+	return f.report(stdout, ix)
+}
+
+// inspectArgs is one invocation's flags after they have been checked.
+type inspectArgs struct {
+	data, tokName                                       string
+	doc, term, terms, field, postings, nearest, analyze string
+	stats, adjacency                                    bool
+	limit                                               int
+
+	// set is which flags were written rather than left at their default, which
+	// is the difference between "walk the whole term space" and "no term walk
+	// was asked for" — both of which spell -terms as the empty string.
+	set map[string]bool
+
+	tok engine.Tokenizer
+}
+
+func parseInspectArgs(args []string, stderr io.Writer) (*inspectArgs, error) {
+	var f inspectArgs
+
+	fs, err := parseFlags(cmdInspect, args, stderr, func(fs *flag.FlagSet) {
+		fs.StringVar(&f.data, "data", "", "directory holding the index")
+		fs.StringVar(&f.tokName, "tokenizer", defaultTokenizer,
+			"tokenizer the index was committed with: "+strings.Join(tokenizerNames(), ", "))
+		fs.BoolVar(&f.stats, "stats", false, "document count, average length and id space; the default")
+		fs.StringVar(&f.doc, "doc", "", "report on one document, by key")
+		fs.StringVar(&f.term, "term", "", "how many documents hold this term, and which")
+		fs.StringVar(&f.terms, "terms", "",
+			"walk the term space from this prefix; the empty prefix walks all of it")
+		fs.StringVar(&f.field, "field", "", "scope -term and -terms to one of Document.Fields")
+		fs.StringVar(&f.postings, "postings", "", "walk this term's postings a block at a time")
+		fs.StringVar(&f.nearest, "nearest", "",
+			"the documents closest to this vector, comma-separated numbers")
+		fs.BoolVar(&f.adjacency, "graph", false, "the link graph's size; with -doc, that document's edges")
+		fs.StringVar(&f.analyze, "analyze", "", "tokenize this text; the one question here needing no index")
+		fs.IntVar(&f.limit, "limit", 20, "how many terms, postings or neighbours to print")
+	})
+	if err != nil {
+		return nil, err
+	}
+	f.set = map[string]bool{}
+	fs.Visit(func(fl *flag.Flag) { f.set[fl.Name] = true })
+
+	var ok bool
+	if f.tok, ok = tokenizers[f.tokName]; !ok {
+		return nil, badUsage("unknown tokenizer %q; the choices are %s",
+			f.tokName, strings.Join(tokenizerNames(), ", "))
+	}
+	if f.limit <= 0 {
+		return nil, badUsage("-limit must be positive, got %d", f.limit)
+	}
+	if f.data == "" && !f.set["analyze"] {
+		return nil, badUsage("-data names the directory holding the index, and it is required; " +
+			"-analyze is the only question here with an answer without one")
+	}
+	return &f, nil
+}
+
+// report runs every question the flags asked, in a fixed order so two runs of
+// the same command print the same thing in the same place.
+func (f *inspectArgs) report(w io.Writer, ix *engine.Index) error {
 	// Stats is the default rather than an empty run: a command given only the
 	// flag it cannot work without should say something about what it opened.
-	selected := set["doc"] || set["term"] || set["terms"] || set["postings"] ||
-		set["nearest"] || set["analyze"] || adjacency
-	if stats || !selected {
-		reportStats(stdout, ix)
+	selected := f.set["doc"] || f.set["term"] || f.set["terms"] || f.set["postings"] ||
+		f.set["nearest"] || f.set["analyze"] || f.adjacency
+	if f.stats || !selected {
+		reportStats(w, ix)
 	}
-	if set["analyze"] {
+	if f.set["analyze"] {
 		// Index.Tokenize rather than engine.Tokenize: this is the tokenizer the
 		// index was committed with, and the two differ exactly when it matters.
-		printTerms(stdout, "analyzed", ix.Tokenize(analyze))
+		printTerms(w, "analyzed", ix.Tokenize(f.analyze))
 	}
-	if set["doc"] {
-		if err := reportDoc(stdout, ix, doc); err != nil {
+	if f.set["doc"] {
+		if err := reportDoc(w, ix, f.doc); err != nil {
 			return err
 		}
 	}
-	if set["term"] {
-		reportTerm(stdout, ix, field, term, limit)
+	if f.set["term"] {
+		reportTerm(w, ix, f.field, f.term, f.limit)
 	}
-	if set["terms"] {
-		reportTermSpace(stdout, ix, field, terms, limit)
+	if f.set["terms"] {
+		reportTermSpace(w, ix, f.field, f.terms, f.limit)
 	}
-	if set["postings"] {
-		reportPostings(stdout, ix, field, postings, limit)
+	if f.set["postings"] {
+		reportPostings(w, ix, f.field, f.postings, f.limit)
 	}
-	if set["nearest"] {
-		v, err := floats32(nearest)
+	if f.set["nearest"] {
+		v, err := floats32(f.nearest)
 		if err != nil {
 			return badUsage("-nearest: %v", err)
 		}
-		reportNearest(stdout, ix, v, limit)
+		reportNearest(w, ix, v, f.limit)
 	}
-	if adjacency {
-		if err := reportGraph(stdout, ix, doc); err != nil {
-			return err
-		}
+	if f.adjacency {
+		return reportGraph(w, ix, f.doc)
 	}
 	return nil
 }
@@ -133,7 +161,7 @@ func tokenizeWithout(tok engine.Tokenizer, name, text string) []string {
 // three from a corpus of three with nine hundred deletions behind it.
 func reportStats(w io.Writer, ix *engine.Index) {
 	docs, _ := ix.Stats()
-	fmt.Fprintf(w, "%d documents, average length %.1f tokens, id space %d (Len, tombstones included)\n",
+	outf(w, "%d documents, average length %.1f tokens, id space %d (Len, tombstones included)\n",
 		docs, ix.AvgDocLen(), ix.Len())
 }
 
@@ -149,27 +177,27 @@ func reportDoc(w io.Writer, ix *engine.Index, key string) error {
 		return fmt.Errorf("document %q resolves to id %d and the index will not return it", key, id)
 	}
 
-	fmt.Fprintf(w, "%s (id %d)\n", d.Key, id)
-	fmt.Fprintf(w, "  text     %s\n", d.Text)
-	fmt.Fprintf(w, "  tokens   %d (every field's counted, which is what BM25 normalizes by)\n", ix.DocLen(id))
+	outf(w, "%s (id %d)\n", d.Key, id)
+	outf(w, "  text     %s\n", d.Text)
+	outf(w, "  tokens   %d (every field's counted, which is what BM25 normalizes by)\n", ix.DocLen(id))
 	if v, ok := ix.Vector(id); ok {
-		fmt.Fprintf(w, "  vector   %v\n", v)
+		outf(w, "  vector   %v\n", v)
 	} else {
-		fmt.Fprintln(w, "  vector   none — the vector scorer cannot see this document")
+		outln(w, "  vector   none — the vector scorer cannot see this document")
 	}
 	for _, f := range d.Fields {
-		fmt.Fprintf(w, "  field    %s: %s\n", f.Name, f.Text)
+		outf(w, "  field    %s: %s\n", f.Name, f.Text)
 	}
 	if !d.Time.IsZero() {
-		fmt.Fprintf(w, "  time     %s\n", d.Time.Format("2006-01-02T15:04:05Z07:00"))
+		outf(w, "  time     %s\n", d.Time.Format("2006-01-02T15:04:05Z07:00"))
 	}
 	if nbrs, ok := ix.Neighbors(id); ok && len(nbrs) > 0 {
-		fmt.Fprintf(w, "  links    %s\n", strings.Join(keysOf(ix, nbrs), " "))
+		outf(w, "  links    %s\n", strings.Join(keysOf(ix, nbrs), " "))
 	} else {
 		// Not the same as "this document has no Links". A link naming a key that
 		// was never added stays dangling and is skipped at traversal time, so a
 		// document can name three neighbours and reach none of them.
-		fmt.Fprintln(w, "  links    none reachable — the graph scorer cannot walk from this document")
+		outln(w, "  links    none reachable — the graph scorer cannot walk from this document")
 	}
 	return nil
 }
@@ -182,14 +210,14 @@ func reportDoc(w io.Writer, ix *engine.Index, key string) error {
 func reportTerm(w io.Writer, ix *engine.Index, field, term string, limit int) {
 	spelling := termIn(field, term)
 	n := ix.PostingCount(spelling)
-	fmt.Fprintf(w, "%s: %d posting(s)\n", displayTerm(spelling), n)
+	outf(w, "%s: %d posting(s)\n", displayTerm(spelling), n)
 
 	for i, p := range ix.Lookup(spelling) {
 		if i >= limit {
-			fmt.Fprintf(w, "  ... %d more\n", n-limit)
+			outf(w, "  ... %d more\n", n-limit)
 			break
 		}
-		fmt.Fprintf(w, "  %-14s freq %d\n", keyOf(ix, p.Doc), p.Freq)
+		outf(w, "  %-14s freq %d\n", keyOf(ix, p.Doc), p.Freq)
 	}
 }
 
@@ -200,12 +228,12 @@ func reportTerm(w io.Writer, ix *engine.Index, field, term string, limit int) {
 // it pays for itself.
 func reportTermSpace(w io.Writer, ix *engine.Index, field, prefix string, limit int) {
 	found := ix.Terms(termIn(field, prefix), limit)
-	fmt.Fprintf(w, "%d term(s) from %q\n", len(found), prefix)
+	outf(w, "%d term(s) from %q\n", len(found), prefix)
 
 	var buf []engine.Posting
 	for _, t := range found {
 		buf = ix.LookupInto(t, buf[:0])
-		fmt.Fprintf(w, "  %-24s %d document(s)\n", displayTerm(t), len(buf))
+		outf(w, "  %-24s %d document(s)\n", displayTerm(t), len(buf))
 	}
 }
 
@@ -223,31 +251,31 @@ func reportPostings(w io.Writer, ix *engine.Index, field, term string, limit int
 			break
 		}
 		block++
-		fmt.Fprintf(w, "%s: block %d, %d posting(s)\n", displayTerm(spelling), block, len(buf))
+		outf(w, "%s: block %d, %d posting(s)\n", displayTerm(spelling), block, len(buf))
 		for _, p := range buf {
 			if printed >= limit {
 				break
 			}
-			fmt.Fprintf(w, "  %-14s freq %d\n", keyOf(ix, p.Doc), p.Freq)
+			outf(w, "  %-14s freq %d\n", keyOf(ix, p.Doc), p.Freq)
 			printed++
 		}
 	}
 	if block == 0 {
-		fmt.Fprintf(w, "%s: no blocks — the term is not in the index\n", displayTerm(spelling))
+		outf(w, "%s: no blocks — the term is not in the index\n", displayTerm(spelling))
 	}
 	// Reported after the walk rather than instead of it: a cursor that failed
 	// halfway has already yielded real postings, and treating that short read as
 	// the whole list is how a term comes to look rarer than it is.
 	if err := cur.Err(); err != nil {
-		fmt.Fprintf(w, "  the walk stopped early: %v\n", err)
+		outf(w, "  the walk stopped early: %v\n", err)
 	}
 }
 
 func reportNearest(w io.Writer, ix *engine.Index, v []float32, limit int) {
 	ids := ix.Nearest(v, limit)
-	fmt.Fprintf(w, "%d nearest by vector\n", len(ids))
+	outf(w, "%d nearest by vector\n", len(ids))
 	for i, id := range ids {
-		fmt.Fprintf(w, "  %d. %s\n", i+1, keyOf(ix, id))
+		outf(w, "  %d. %s\n", i+1, keyOf(ix, id))
 	}
 }
 
@@ -258,7 +286,7 @@ func reportGraph(w io.Writer, ix *engine.Index, key string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "%d node(s), %d edge(s)\n", adj.Len(), adj.Edges())
+	outf(w, "%d node(s), %d edge(s)\n", adj.Len(), adj.Edges())
 	if key == "" {
 		return nil
 	}
@@ -267,9 +295,9 @@ func reportGraph(w io.Writer, ix *engine.Index, key string) error {
 	if !ok {
 		return fmt.Errorf("no live document keyed %q", key)
 	}
-	fmt.Fprintf(w, "  %s degree %d\n", key, adj.Degree(id))
-	fmt.Fprintf(w, "  out: %s\n", listOrNone(keysOf(ix, adj.Out(id))))
-	fmt.Fprintf(w, "  in:  %s\n", listOrNone(keysOf(ix, adj.In(id))))
+	outf(w, "  %s degree %d\n", key, adj.Degree(id))
+	outf(w, "  out: %s\n", listOrNone(keysOf(ix, adj.Out(id))))
+	outf(w, "  in:  %s\n", listOrNone(keysOf(ix, adj.In(id))))
 	return nil
 }
 
@@ -319,8 +347,8 @@ func listOrNone(keys []string) string {
 }
 
 func printTerms(w io.Writer, label string, terms []string) {
-	fmt.Fprintf(w, "%s: %d term(s)\n", label, len(terms))
+	outf(w, "%s: %d term(s)\n", label, len(terms))
 	for _, t := range terms {
-		fmt.Fprintf(w, "  %s\n", t)
+		outf(w, "  %s\n", t)
 	}
 }

@@ -86,14 +86,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		usage(stdout)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "weft: unknown subcommand %q\n\n", name)
+		outf(stderr, "weft: unknown subcommand %q\n\n", name)
 		usage(stderr)
 		return 2
 	}
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `usage: weft <index|search|inspect|check|encode> [flags]
+	outs(w, `usage: weft <index|search|inspect|check|encode> [flags]
 
   index    read documents as JSON lines on stdin, then commit them to -data.
            One object per line: key, text, vector, links, time, fields. Deletes
@@ -115,6 +115,25 @@ docs/STATUS.md is the account.
 `)
 }
 
+// outf, outln and outs are Fprintf, Fprintln and Fprint with the error dropped.
+//
+// The same shape cmd/weft-eval uses, for the same reason: a write to stdout that
+// fails has already lost the thing the caller wanted to see, and there is nowhere
+// left to report it — stderr is often the same pipe, so the second write fails
+// too. The exit code still carries whether the work succeeded. What a closed pipe
+// changes is only whether anyone was reading.
+func outf(w io.Writer, format string, a ...any) {
+	fmt.Fprintf(w, format, a...) //nolint:errcheck // see above
+}
+
+func outln(w io.Writer, a ...any) {
+	fmt.Fprintln(w, a...) //nolint:errcheck // see outf
+}
+
+func outs(w io.Writer, s string) {
+	fmt.Fprint(w, s) //nolint:errcheck // see outf
+}
+
 // usageError marks a failure a caller fixes by retyping the command.
 type usageError struct{ error }
 
@@ -133,7 +152,7 @@ func report(stderr io.Writer, err error) int {
 		// failure, exactly as `weft help` is not.
 		return 0
 	}
-	fmt.Fprintf(stderr, "weft: %v\n", err)
+	outf(stderr, "weft: %v\n", err)
 	var ue usageError
 	if errors.As(err, &ue) {
 		return 2

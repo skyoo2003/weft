@@ -25,9 +25,17 @@ import (
 // query string, so inventing an OpenSearch spelling for one would be a second
 // untruth where D-026 allows exactly one.
 
-// defaultTermLimit bounds a term walk that did not ask for a size. The term
-// space of a real corpus is larger than anything a client wants in one response.
-const defaultTermLimit = 100
+const (
+	// defaultTermLimit bounds a term walk that did not ask for a size. The term
+	// space of a real corpus is larger than anything a client wants in one
+	// response.
+	defaultTermLimit = 100
+
+	// keyTerm is the parameter these routes read a term from and the field they
+	// report it under. The same spelling as the `term` query clause and not the
+	// same thing, which is why it is a constant here rather than a shared one.
+	keyTerm = "term"
+)
 
 // flush makes everything written so far durable.
 //
@@ -42,7 +50,7 @@ func (s *Server) flush(w http.ResponseWriter, r *http.Request) error {
 	if err := x.Commit(r.Context()); err != nil {
 		return fmt.Errorf("flush %q: %w", x.Name(), err)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"_shards": oneShard})
+	writeJSON(w, http.StatusOK, map[string]any{keyShards: oneShard})
 	return nil
 }
 
@@ -63,7 +71,7 @@ func (s *Server) forceMerge(w http.ResponseWriter, r *http.Request) error {
 	if err := x.Merge(r.Context()); err != nil {
 		return fmt.Errorf("forcemerge %q: %w", x.Name(), err)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"_shards": oneShard})
+	writeJSON(w, http.StatusOK, map[string]any{keyShards: oneShard})
 	return nil
 }
 
@@ -81,7 +89,7 @@ func (s *Server) count(w http.ResponseWriter, r *http.Request) error {
 	// there is no k-independent count of what a fused ranking would have held —
 	// so a query here has no answer, and returning the corpus size instead would
 	// be a number shaped like one.
-	if len(strings.TrimSpace(string(body))) > 0 {
+	if strings.TrimSpace(string(body)) != "" {
 		return badRequest(kindIllegalArgument,
 			"_count does not take a query here: a fused ranking is a top-k, so the number of documents it "+
 				"would have contained is not defined without a k. Run _search and read hits.total, which "+
@@ -89,7 +97,7 @@ func (s *Server) count(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	docs, _ := x.Engine().Stats()
-	writeJSON(w, http.StatusOK, map[string]any{"count": docs, "_shards": oneShard})
+	writeJSON(w, http.StatusOK, map[string]any{"count": docs, keyShards: oneShard})
 	return nil
 }
 
@@ -160,7 +168,7 @@ func (s *Server) weftTerms(w http.ResponseWriter, r *http.Request) error {
 	var buf []engine.Posting
 	for _, t := range found {
 		buf = ix.LookupInto(t, buf[:0])
-		out = append(out, map[string]any{"term": displayTerm(t), "doc_count": len(buf)})
+		out = append(out, map[string]any{keyTerm: displayTerm(t), "doc_count": len(buf)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"terms": out})
 	return nil
@@ -173,7 +181,7 @@ func (s *Server) weftPostings(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	q := r.URL.Query()
-	term := q.Get("term")
+	term := q.Get(keyTerm)
 	if term == "" {
 		return badRequest(kindIllegalArgument,
 			"term is required: without one this route would report the postings of the empty string, "+
@@ -204,7 +212,7 @@ func (s *Server) weftPostings(w http.ResponseWriter, r *http.Request) error {
 		out = append(out, map[string]any{"_id": d.Key, "freq": p.Freq})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"term": displayTerm(term), "doc_count": n, "postings": out,
+		keyTerm: displayTerm(term), "doc_count": n, "postings": out,
 	})
 	return nil
 }

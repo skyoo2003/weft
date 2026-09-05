@@ -202,6 +202,7 @@ const (
 	clauseKnn      = "knn"
 	clausePrefix   = "prefix"
 	clauseWildcard = "wildcard"
+	clauseTerm     = "term"
 
 	occMust    = "must"
 	occMustNot = "must_not"
@@ -400,7 +401,7 @@ func (c *compiler) clause(name string, body json.RawMessage) (compiled, *apiErro
 		return c.match(body)
 	case "match_phrase":
 		return c.matchPhrase(body)
-	case "term":
+	case clauseTerm:
 		return c.term(body)
 	case "terms":
 		return c.terms(body)
@@ -622,7 +623,7 @@ func (c *compiler) matchPhrase(body json.RawMessage) (compiled, *apiError) {
 
 // term finds one literal value in one field.
 func (c *compiler) term(body json.RawMessage) (compiled, *apiError) {
-	field, value, err := oneField("term", body)
+	field, value, err := oneField(clauseTerm, body)
 	if err != nil {
 		return compiled{}, err
 	}

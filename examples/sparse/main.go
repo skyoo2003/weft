@@ -2,13 +2,12 @@
 
 // Command sparse is about the documents a scorer cannot see.
 //
-// Two things are shown at once, and they are opposite sides of one claim:
-//
-//   - A document with no vector and no links still surfaces. Text and recency
-//     can see it, the other two cannot, and fusion does not require agreement.
-//   - A scorer with nothing to say contributes nothing and costs nothing. The
-//     second query below carries no vector, so the vector scorer returns an
-//     empty stream — not an error, and not a row of zeros.
+// Two things are shown at once, and they are opposite sides of one claim. A
+// document with no vector and no links still surfaces: text and recency can see
+// it, the other two cannot, and fusion does not require agreement. And a scorer
+// with nothing to say contributes nothing and costs nothing — the second query
+// below carries no vector, so the vector scorer returns an empty stream, not an
+// error and not a row of zeros.
 //
 //	go run ./examples/sparse
 //

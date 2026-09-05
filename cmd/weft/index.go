@@ -115,7 +115,7 @@ func indexCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		// Not an error. A delete of a key that is not there has already achieved
 		// what it was asked for, and a script cleaning up after itself should not
 		// have to know which keys it managed to write last time.
-		fmt.Fprintf(stderr, "weft: no document keyed %q to delete\n", key)
+		outf(stderr, "weft: no document keyed %q to delete\n", key)
 	}
 
 	added, updated, err := read(stdin, ix)
@@ -127,16 +127,16 @@ func indexCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		if err := ix.Merge(); err != nil {
 			return fmt.Errorf("merge: %w", err)
 		}
-		fmt.Fprintln(stdout, "merged")
+		outln(stdout, "merged")
 	}
 	if err := ix.Commit(ctx, data); err != nil {
 		return fmt.Errorf("commit to %s: %w", data, err)
 	}
 
 	docs, avg := ix.Stats()
-	fmt.Fprintf(stdout, "added %d, updated %d, deleted %d; %d documents, average length %.1f\n",
+	outf(stdout, "added %d, updated %d, deleted %d; %d documents, average length %.1f\n",
 		added, updated, deleted, docs, avg)
-	fmt.Fprintf(stdout, "committed to %s\n", data)
+	outf(stdout, "committed to %s\n", data)
 	return nil
 }
 
