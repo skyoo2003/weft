@@ -138,7 +138,15 @@ func parseSearch(ix *engine.Index, raw []byte) (plan, *apiError) {
 					"query, or raise the window in a build you control",
 				*req.Size, maxResultWindow)
 		}
-		p.size = *req.Size
+		// min as well as the refusal above, and the redundancy is deliberate.
+		// The refusal is the API's answer — a client learns its request was too
+		// large. The clamp is the memory bound, and it is written at the
+		// assignment because that is where the number stops being the client's:
+		// everything downstream reads plan.size, in another function and then in
+		// another package, and a guard that lives three frames up is a guard the
+		// next reader has to go and find. CodeQL cannot follow it either, which
+		// is how this whole defect was found.
+		p.size = min(*req.Size, maxResultWindow)
 	}
 
 	if len(req.Query) == 0 {
