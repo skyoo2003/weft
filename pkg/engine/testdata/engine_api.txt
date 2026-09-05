@@ -20,6 +20,7 @@ method Index.Nearest([]float32, int) []DocID
 method Index.Neighbors(DocID) ([]DocID, bool)
 method Index.Resolve(string) (DocID, bool)
 method Index.Stats() (int, float64)
+method Index.Terms(string, int) []string
 method Index.Tokenize(string) []string
 method Index.Update(Document) (DocID, error)
 method Index.Vector(DocID) ([]float32, bool)

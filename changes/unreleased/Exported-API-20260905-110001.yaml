@@ -1,0 +1,18 @@
+kind: Exported API
+body: '`engine.Index.Terms(prefix, limit) []string` is added — the indexed terms
+  starting with a prefix, ascending, at most `limit` of them. It is the read a
+  term *pattern* needs and `Lookup` cannot serve: a prefix, wildcard or
+  edit-distance query has to know which terms exist before it can look any of them
+  up, and nothing else said. **Sorted and then truncated, not truncated as it
+  goes**, so which terms a limit cuts does not depend on map iteration order — the
+  alternative answers differently on consecutive calls against an unchanged index,
+  which is a wrong answer wearing the face of a flaky test. A limit of zero or less
+  returns nothing, the convention every `Candidates` already uses for a
+  non-positive k. Terms from the committed segments and from the pending segment
+  are merged and deduplicated. `public_api.txt` gains a `# ../query` block for the
+  new package; one line of `engine_api.txt`. **Nothing already written stops
+  compiling**, and the on-disk format is **v4, unchanged** — this reads the term
+  dictionary each segment already decodes at `Open`.'
+time: 2026-09-05T11:00:01.000000000+09:00
+custom:
+  Issue: 22

@@ -1221,6 +1221,69 @@ func (ix *Index) LookupInto(term string, buf []Posting) []Posting {
 	return ix.lookupInto(term, buf)
 }
 
+// Terms returns the indexed terms starting with prefix, ascending, at most
+// limit of them. An empty prefix asks for the whole vocabulary.
+//
+// It is the read a term *pattern* needs and Lookup cannot serve: a prefix, a
+// wildcard or an edit-distance query has to know which terms exist before it can
+// look any of them up, and nothing else here says. A limit of zero or less
+// returns nothing, which is the convention Search and every Candidates already
+// use for a non-positive k.
+//
+// **Sorted and then truncated, not truncated as it goes.** Which terms a limit
+// cuts must not depend on map iteration order, or the same query answers
+// differently on consecutive calls against an unchanged index — a wrong answer
+// that looks like a flaky test. So the limit bounds what is returned and not
+// what is examined; see the ponytail note below for what that costs.
+//
+// The result is freshly allocated and is the caller's to keep and to modify.
+// Terms from the committed segments and from the pending segment are merged and
+// deduplicated, so a term held by both appears once.
+//
+// ponytail: a linear scan of the vocabulary, and the prefix narrows the result
+// rather than the work. A segment's terms are a map here, though the `terms`
+// section they were decoded from is sorted on disk and a prefix is a range in
+// it — so the seek exists in the bytes and not in the reader. The vocabulary is
+// bounded by the language and not by the corpus, which is why this is affordable
+// at all: 2.7 MB of terms index against 626 MiB of documents on the milestone 4
+// corpus. Buy the ordered structure when a profile shows pattern queries
+// dominating, and note that it is a reader change and not a format change.
+func (ix *Index) Terms(prefix string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+
+	// A set, because a term held by two segments and by the pending one is one
+	// term. Lookup already merges their posting lists behind a single name.
+	seen := make(map[string]struct{})
+	for term := range ix.postings {
+		if strings.HasPrefix(term, prefix) {
+			seen[term] = struct{}{}
+		}
+	}
+	for _, s := range ix.segs {
+		for term := range s.terms {
+			if strings.HasPrefix(term, prefix) {
+				seen[term] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for term := range seen {
+		out = append(out, term)
+	}
+	slices.Sort(out)
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 // Nearest returns the DocIDs worth scoring exactly for v, at least k of them
 // when the index holds that many vectors. It computes no score: the metric
 // belongs to the caller.
