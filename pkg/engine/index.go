@@ -1221,6 +1221,39 @@ func (ix *Index) LookupInto(term string, buf []Posting) []Posting {
 	return ix.lookupInto(term, buf)
 }
 
+// PostingBound is an upper bound on how many postings Lookup would return for
+// term, read without decoding any of them.
+//
+// It exists so a caller can size a per-query accumulator before it starts
+// filling one. Sizing it to the corpus instead is what
+// pkg/scorer/text/bench_test.go measured at 4.73 MB and 143 µs on a query for a
+// term **no document holds** — a floor under every query on that corpus,
+// whatever it reached, and 128 MB/s of garbage at the arrival rate where
+// docs/FINDINGS.md milestone 5 §3.2 saw sustained load collapse. Sizing it to
+// the first term's list instead moves the cost rather than removing it: a query
+// whose rarest term comes first grows its way up to the widest one, which cost
+// 42% more memory than the corpus hint did.
+//
+// **A bound, not a count**, and cheap for exactly that reason. A term's postings
+// are written in blocks of a fixed size with the block count in front, so this
+// reads one varint per segment and multiplies; the answer is tight to within one
+// block per segment. Deleted documents are not subtracted — a tombstone leaves
+// its posting where it was, and Lookup filters at read time.
+//
+// Zero means no segment claims the term and nothing is pending for it, so Lookup
+// would return nothing. Nothing else about the value is promised: it is a hint,
+// and a caller that cannot get one pays the growth it would have paid anyway.
+func (ix *Index) PostingBound(term string) int {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+
+	n := len(ix.postings[term])
+	for _, s := range ix.segs {
+		n += s.postingBound(term)
+	}
+	return n
+}
+
 // Terms returns the indexed terms starting with prefix, ascending, at most
 // limit of them. An empty prefix asks for the whole vocabulary.
 //

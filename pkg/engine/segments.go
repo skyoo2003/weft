@@ -486,6 +486,35 @@ func (s *segment) lookup(term string) []Posting {
 	return pl
 }
 
+// postingBound is the number scanPostings would pass to size, read without
+// decoding a single posting.
+//
+// A term's entry begins with its block count, and every block but the last holds
+// exactly blockSize — so one varint gives a bound tight to within one block.
+// That is the same arithmetic decodeTermPostings already does; what is different
+// is that this stops there. Reading a 200,000-posting list to find out how long
+// it is costs the scan a caller is trying to size for.
+//
+// Zero for a term this segment does not hold, and for one whose entry does not
+// begin where the terms index says. A bound that cannot be read is not an error
+// here: it is a hint, and the caller's fallback is the growth it would have paid
+// anyway.
+func (s *segment) postingBound(term string) int {
+	sp, ok := s.terms[term]
+	if !ok || sp.off < segHeaderLen || sp.off-segHeaderLen > len(s.postings) {
+		return 0
+	}
+	r := &segReader{name: postingsFile, b: s.postings, off: sp.off - segHeaderLen}
+	nblocks, err := r.intn("block count", len(r.b))
+	if err != nil {
+		return 0
+	}
+	// Bounded against the segment's own document count, because that is what the
+	// list cannot exceed: one posting per document. Without it a damaged block
+	// count is a multiplication this hands to make() as a capacity.
+	return min(nblocks*blockSize, s.count)
+}
+
 // scanPostings hands term's postings to yield, ascending by index-wide DocID,
 // and reports how many. Zero means this segment does not hold the term or
 // cannot decode it, and yield may already have been called when that is known.

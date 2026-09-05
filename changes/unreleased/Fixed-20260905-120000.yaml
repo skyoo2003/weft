@@ -1,0 +1,24 @@
+kind: Fixed
+body: '**`scorer/text` allocated a corpus-sized map on every query, including
+  queries that matched nothing.** The BM25 accumulator was sized to the document
+  count, so a query for a term no document holds allocated **1.18 MB and 78 µs**
+  building a map that never received an entry — a floor under every query on the
+  corpus, scaling with the corpus rather than with what the query reached. On the
+  171,332-document evaluation index it is 4.73 MB a query, which at the 27
+  queries/s where `docs/FINDINGS.md` milestone 5 §3.2 saw sustained load collapse
+  is 128 MB/s of garbage produced before a single document is scored — the same
+  currency that section names as the wall. It is now sized to the widest posting
+  list the query will actually walk, read through the new `Index.PostingBound`.
+  Measured on 50,000 documents committed and reopened: a query matching nothing
+  goes from 78,685 ns and 1,182,240 B to **151 ns and 16 B**; a term in three
+  documents from 101,285 ns and 1,185,247 B to **982 ns and 7,166 B**; a term in
+  one document in fifty from 176,454 ns and 1,216,432 B to **84,655 ns and 70,415
+  B**. A term held by every document is unchanged — 2,818,997 B to 2,818,797 B,
+  and a time difference inside the run-to-run noise band. **No score or ranking
+  changes**: map sizing does not touch a value, and `internal/eval/bm25_test.go`
+  still matches `rank_bm25` to 4.44e-16. Sizing from the *first* term instead was
+  tried and rejected: it removes the floor and costs 42% more memory on a
+  multi-term query whose rarest term comes first, which is the realistic shape.'
+time: 2026-09-05T12:00:00.000000000+09:00
+custom:
+  Issue: 23

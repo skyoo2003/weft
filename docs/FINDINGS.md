@@ -3614,3 +3614,139 @@ error, which is the one place it can be said to the party able to fix it.
 6. **The demo does not show it.** `cmd/weft` still fuses the four milestone-1 scorers, and the
    README's sample output is the one that documents. Adding a fifth column is a documentation
    change, not a code one, and it is not worth making before §5.1 says what the column means.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 17 — The floor under every query, found and removed
+
+[Milestone 5 §3.2](#milestone-5--performance) measured this project's throughput wall and named
+its cause in one sentence: **live heap under concurrency**. At 27 queries/s — weft's own
+sequential rate — p50 went from 39 ms to 1.27 s, 14% of queries were shed, and RSS went from 126
+to 853 MiB. The explanation attached to it was "every candidate decodes a whole record", and
+[§9 of milestone 8](#milestone-8--what-a-repetition-has-to-hold) had already corrected that
+attribution once without replacing it.
+
+This round measured `scorer/text` directly and found a second, larger source that is not a
+decode at all.
+
+## 1. What a query allocated before it scored anything
+
+`BenchmarkCandidates`, 50,000 documents committed and reopened, darwin/arm64, Apple M4. The
+corpus is deliberately skewed: `everywhere` in every document, `occasional` in one in fifty,
+`singular` in three, and a query term in none.
+
+| Query | ns/op | B/op |
+| --- | --- | --- |
+| a term **no document holds** | 78,685 | **1,182,240** |
+| a term in 3 documents | 101,285 | 1,185,247 |
+| a term in 1 document in 50 | 176,454 | 1,216,432 |
+| a term in every document | 5,838,555 | 2,818,997 |
+
+**1.18 MB and 78 µs to answer a query that matches nothing.** The line responsible was one
+allocation:
+
+```go
+acc := make(map[engine.DocID]float64, docs)
+```
+
+The accumulator was sized to the corpus. The comment above it argued the case honestly and the
+argument was sound as far as it went — one common term produces one entry per matching document,
+and an unhinted map re-buckets its way up through every doubling on exactly the queries that
+cost most. What it did not price is that the insurance is bought **on every query**, including
+the ones that will never write an entry into it.
+
+That is the floor. It does not scale with what a query reaches; it scales with the corpus. On
+the 171,332-document evaluation index the same benchmark shape measures **4.73 MB a query**, and
+at the 27 queries/s where milestone 5 saw the collapse that is **128 MB/s of garbage produced
+before a single document is scored**.
+
+## 2. The first fix moved the cost instead of removing it
+
+Sizing the map lazily from the first term that has postings is one line and removes the floor
+completely — a query matching nothing allocates 16 bytes. It also **made the realistic case
+worse**, which is the outcome the original comment predicted:
+
+| Query, 200k in-memory corpus | corpus hint | first-term hint |
+| --- | --- | --- |
+| three terms, rarest first | 11,200,864 B | **15,930,392 B** |
+
+Sizing from a three-document term and then growing to a 200,000-document one costs the doublings,
+and 42% more than the hint it replaced. Real queries are multi-term, so this was not a trade
+worth taking on its own.
+
+## 3. `Index.PostingBound`, and why the bound was already on disk
+
+The third option is to size from the widest list the query will *actually* walk, which needs
+the lengths before the loop that produces them. It turns out to cost almost nothing: a term's
+postings entry begins with its **block count**, and every block but the last holds exactly
+`blockSize`. One varint per term per segment gives a bound tight to within one block, without
+decoding a posting.
+
+`decodeTermPostings` already computed exactly this and handed it to `size` so `Lookup` could
+allocate its slice once. What was missing was a way to ask for it without also asking for the
+postings.
+
+```go
+widest := 0
+for _, term := range terms {
+    widest = max(widest, s.ix.PostingBound(term))
+}
+acc := make(map[engine.DocID]float64, min(widest, docs))
+```
+
+It is a **bound and not a count**, and the distinction is load-bearing in two directions: a
+bound below the truth is a map that grows anyway, which is harmless, while a caller treating it
+as a count would be reading a number that does not subtract tombstones — a deleted document
+keeps its posting and `Lookup` filters at read time.
+
+## 4. The result
+
+Same benchmark, 50,000 documents committed and reopened, before and after:
+
+| Query | ns before | ns after | B before | B after |
+| --- | --- | --- | --- | --- |
+| a term no document holds | 78,685 | **151** | 1,182,240 | **16** |
+| a term in 3 documents | 101,285 | **982** | 1,185,247 | **7,166** |
+| a term in 1 in 50 | 176,454 | **84,655** | 1,216,432 | **70,415** |
+| a term in every document | 5,838,555 | 6,085,817 | 2,818,997 | 2,818,797 |
+
+**521× faster and 73,890× less memory** on a query matching nothing; **103×** and **165×** on a
+rare term; **2.1×** and **17×** on a mid-frequency one. The expensive query is unchanged in
+memory to within 200 bytes and unchanged in time to within run-to-run variation — the two
+measurements of it differ by 4% in opposite directions across runs, which is the noise band at
+100 iterations and not a result.
+
+**Nothing about the ranking changed.** Map sizing does not touch a score, and
+`internal/eval/bm25_test.go` — the check that matches `rank_bm25` to 4.44e-16 — is what says so
+rather than an assertion here.
+
+## 5. What this does and does not license
+
+**It does not re-open milestone 5's numbers.** `108.193 ms` was measured under a load-point rule
+[milestone 7](#milestone-7--a-baseline-nobody-has-to-qualify) then showed is not reproducible,
+and this round ran a Go microbenchmark rather than the ladder. What is claimed is what was
+measured: the per-query allocation floor, on one machine, at two corpus sizes.
+
+**It is a strong reason to expect the collapse to move, and no evidence that it does.** The
+wall milestone 5 named is live heap under concurrency; this removes between 1.18 and 4.73 MB per
+query of it, before any candidate is scored. Whether the arrival rate at which p50 goes from
+39 ms to 1.27 s moves as a result is a ladder run, and the ladder has come back void three
+rounds running ([milestone 14](#milestone-14--the-probe-passed-the-ladder-ran-twice-and-a-closed-lid-discarded-both)).
+
+## 6. Carried forward
+
+1. **The ladder is still owed, and now has a second reason to run.** It was owed a reproducible
+   load point; it is now also the only thing that can say whether §4 moves the collapse.
+2. **`scorer/vector` and `scorer/graph` have not been measured this way.** The accumulator
+   pattern was `scorer/text`'s; whether either of the others carries a corpus-sized allocation
+   of its own is unlooked-at. `graph.PPR` allocates 230 times a query by construction, which is
+   evidence about the new scorer and not about the old ones.
+3. **`DocLen` still takes the index-wide read lock once per posting.** The `ponytail:` note in
+   `scorer/text` has said so since milestone 3 and nothing here changed it. A term held by a
+   million documents is a million lock acquisitions, and that cost gets *worse* as cores are
+   added — which is the shape of a throughput wall and is exactly what this round did not
+   measure.
+4. **`PostingBound` is a bound and could be a count.** Making it exact means summing the last
+   block's posting count, which is one more varint at a known offset per segment. Nothing needs
+   the exact number yet; block-max WAND would.

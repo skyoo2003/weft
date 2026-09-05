@@ -80,10 +80,34 @@ func (s *Scorer) Candidates(ctx context.Context, q engine.Query, k int) ([]engin
 	// Duplicate query terms are summed twice, which is the formula taken
 	// literally: the sum is over occurrences in Q, not over the distinct set.
 	//
-	// Sized to the corpus rather than grown from nothing: one common term
-	// produces one entry per matching document, so an unhinted map re-buckets
-	// its way up through every doubling on exactly the queries that cost most.
-	acc := make(map[engine.DocID]float64, docs)
+	// Sized to the widest posting list this query will actually walk, not to the
+	// corpus, and not to whichever term happened to be typed first.
+	//
+	// The corpus hint that used to stand here was insurance against one common
+	// term re-bucketing its way up through every doubling — a real cost, on the
+	// queries that are already the most expensive — and it charged every other
+	// query for it. BenchmarkCandidates priced the premium: a query for a term
+	// **no document holds** allocated 4.73 MB and 143 µs building a map that
+	// never received an entry, and that was the floor under every query on the
+	// corpus whatever it reached. At the 27 queries/s where docs/FINDINGS.md
+	// milestone 5 §3.2 saw sustained load collapse, that floor is 128 MB/s of
+	// garbage produced before a single document is scored.
+	//
+	// Sizing from the first term instead only moves the cost: on a three-term
+	// query whose rarest term comes first it grew its way up to the widest list
+	// and used 42% *more* memory than the corpus hint did. PostingBound is what
+	// makes the third option affordable — one varint per term per segment, no
+	// postings decoded — so the hint is the real answer rather than a guess at
+	// it, and the widest list is what the union cannot exceed by more than the
+	// other terms' disjoint documents.
+	//
+	// Bounded by the corpus, because the bound is per term and a query naming a
+	// term twice would otherwise ask for twice the corpus.
+	widest := 0
+	for _, term := range terms {
+		widest = max(widest, s.ix.PostingBound(term))
+	}
+	acc := make(map[engine.DocID]float64, min(widest, docs))
 	// One buffer for every term, not one list per term. A term's postings are walked and
 	// finished with before the next term is looked up, so what has to be live is the
 	// longest list rather than the sum of them — and the sum is what LookupInto's doc
