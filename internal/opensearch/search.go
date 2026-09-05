@@ -94,7 +94,8 @@ func parseSearch(ix *engine.Index, raw []byte) (plan, *apiError) {
 		{req.Aggs != nil || req.Aggregations != nil, http.StatusNotImplemented,
 			"aggregations are not implemented: weft's index carries a term's document and frequency and no doc-values column to aggregate over"},
 		{req.Highlight != nil, http.StatusNotImplemented,
-			"highlighting is not implemented: a Posting carries a frequency and not a position, so no offset in the source text can be decided from the index (docs/FORMAT.md section 8)"},
+			"highlighting is not implemented: a Posting carries a frequency and not a position, so no " +
+				"offset in the source text can be decided from the index (docs/FORMAT.md section 8)"},
 		{req.SearchAfter != nil, http.StatusNotImplemented,
 			"search_after is not implemented: there is no sort order to resume from, because results come back by fused score only"},
 		{req.Collapse != nil, http.StatusNotImplemented,

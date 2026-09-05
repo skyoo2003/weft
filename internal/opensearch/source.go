@@ -60,7 +60,10 @@ func LoadSource(dir string, live int) (*Source, error) {
 	s := NewSource()
 	path := filepath.Join(dir, sourceFile)
 
-	raw, err := os.ReadFile(path)
+	// The path is filepath.Join of a directory this process chose and a
+	// constant filename; no part of it comes from a request. Registry.validName
+	// is what keeps the directory half of that true, and it is tested.
+	raw, err := os.ReadFile(path) //nolint:gosec // path is a constant name under a directory this process owns
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		// Left empty. The count check below is what decides whether that is the
@@ -155,7 +158,7 @@ func (s *Source) Save(dir string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", tmp.Name(), err)
 	}
-	if err := os.Rename(tmp.Name(), filepath.Join(dir, sourceFile)); err != nil {
+	if err := os.Rename(tmp.Name(), filepath.Join(dir, sourceFile)); err != nil { //nolint:gosec // same: a constant name under an owned directory
 		return fmt.Errorf("publish %s: %w", sourceFile, err)
 	}
 	return nil

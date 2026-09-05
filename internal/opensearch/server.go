@@ -100,6 +100,30 @@ type shardInfo struct {
 
 var oneShard = shardInfo{Total: 1, Successful: 1}
 
+// clusterName is what a single-node weft calls itself, in the three places a
+// client looks for it.
+const clusterName = "weft"
+
+// docResult answers a write or a delete. A struct rather than a map literal
+// because the same five keys are spelled in three handlers, and a typo in one
+// of them is a field a client silently does not find.
+type docResult struct {
+	Index   string    `json:"_index"`
+	ID      string    `json:"_id"`
+	Version int       `json:"_version"`
+	Result  string    `json:"result"`
+	Shards  shardInfo `json:"_shards"`
+}
+
+// getResult answers a document read, present or absent.
+type getResult struct {
+	Index   string          `json:"_index"`
+	ID      string          `json:"_id"`
+	Version int             `json:"_version,omitempty"`
+	Found   bool            `json:"found"`
+	Source  json.RawMessage `json:"_source,omitempty"`
+}
+
 // Server routes the subset of the OpenSearch API this milestone speaks.
 type Server struct {
 	reg     *Registry
@@ -187,8 +211,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (s *Server) root(w http.ResponseWriter, _ *http.Request) error {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":         "weft",
-		"cluster_name": "weft",
+		"name":         clusterName,
+		"cluster_name": clusterName,
 		"cluster_uuid": "weft-single-node",
 		"tagline":      "The weft thread. One weft crosses and binds them all.",
 		"version": map[string]any{
@@ -208,7 +232,7 @@ func (s *Server) root(w http.ResponseWriter, _ *http.Request) error {
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) error {
 	names := s.reg.Names()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"cluster_name":                    "weft",
+		"cluster_name":                    clusterName,
 		"status":                          "green",
 		"timed_out":                       false,
 		"number_of_nodes":                 1,
@@ -320,10 +344,7 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) error {
 	if created {
 		result, status = "created", http.StatusCreated
 	}
-	writeJSON(w, status, map[string]any{
-		"_index": x.Name(), "_id": id, "_version": 1,
-		"result": result, "_shards": oneShard,
-	})
+	writeJSON(w, status, docResult{Index: x.Name(), ID: id, Version: 1, Result: result, Shards: oneShard})
 	return nil
 }
 
@@ -338,19 +359,14 @@ func (s *Server) getDoc(w http.ResponseWriter, r *http.Request) error {
 	// record on disk (docs/LIMITATIONS.md — deletion reclaims nothing) and only
 	// Resolve knows it is gone.
 	if _, live := x.Engine().Resolve(id); !live {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"_index": x.Name(), "_id": id, "found": false,
-		})
+		writeJSON(w, http.StatusNotFound, getResult{Index: x.Name(), ID: id, Found: false})
 		return nil
 	}
 	body, ok := x.Source().Get(id)
 	if !ok {
 		body = json.RawMessage(`{}`)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"_index": x.Name(), "_id": id, "_version": 1,
-		"found": true, "_source": body,
-	})
+	writeJSON(w, http.StatusOK, getResult{Index: x.Name(), ID: id, Version: 1, Found: true, Source: body})
 	return nil
 }
 
@@ -373,9 +389,7 @@ func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request) error {
 	if !found {
 		result, status = "not_found", http.StatusNotFound
 	}
-	writeJSON(w, status, map[string]any{
-		"_index": x.Name(), "_id": id, "result": result, "_shards": oneShard,
-	})
+	writeJSON(w, status, docResult{Index: x.Name(), ID: id, Version: 1, Result: result, Shards: oneShard})
 	return nil
 }
 

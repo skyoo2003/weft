@@ -30,13 +30,13 @@ func newTestServer(t *testing.T) (*httptest.Server, *Registry) {
 	return srv, reg
 }
 
-func do(t *testing.T, srv *httptest.Server, method, path, body string) (int, []byte) {
+func do(t *testing.T, srv *httptest.Server, method, path, body string) (status int, out []byte) {
 	t.Helper()
 	var rdr io.Reader
 	if body != "" {
 		rdr = strings.NewReader(body)
 	}
-	req, err := http.NewRequest(method, srv.URL+path, rdr)
+	req, err := http.NewRequestWithContext(t.Context(), method, srv.URL+path, rdr)
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}

@@ -82,8 +82,16 @@ func run(addr, data string, maxBody int64) error {
 	}
 	defer reg.Close() //nolint:errcheck // the shutdown path below reports what it can
 
+	// The signal context is taken before the listener rather than after it, so a
+	// Ctrl-C during startup is caught by the same handler that catches one during
+	// service. Without that, the window between binding and installing the
+	// handler kills the process with a bound port and open mappings.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Listen before printing, so a port in the banner is a port that is bound.
-	ln, err := net.Listen("tcp", addr)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
@@ -96,9 +104,6 @@ func run(addr, data string, maxBody int64) error {
 		// dribbles out headers.
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	errs := make(chan error, 1)
 	go func() { errs <- srv.Serve(ln) }()

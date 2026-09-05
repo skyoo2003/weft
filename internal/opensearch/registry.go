@@ -115,12 +115,16 @@ func (r *Registry) Create(name string) (*Index, error) {
 	}
 
 	dir := filepath.Join(r.root, name)
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	// validName above rejects a separator, a leading dot and the two relative
+	// path elements, so name cannot escape r.root. That guard is the security
+	// boundary and TestCreateRefusesANameThatWouldCollideWithARoute is what
+	// holds it; the analyser cannot see across the call.
+	if err := os.Mkdir(dir, 0o700); err != nil { //nolint:gosec // validName rejects every path element that could escape r.root
 		return nil, fmt.Errorf("create %s: %w", dir, err)
 	}
 	ix := engine.New()
 	if err := ix.Commit(context.Background(), dir); err != nil {
-		os.RemoveAll(dir) //nolint:errcheck // the commit error is the one to report
+		os.RemoveAll(dir) //nolint:errcheck,gosec // same guard as the Mkdir above; the commit error is the one to report
 		return nil, fmt.Errorf("commit the empty index %q: %w", name, err)
 	}
 
