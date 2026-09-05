@@ -72,7 +72,7 @@ func TestUnfilteredFusionLetsRefusedDocumentsBack(t *testing.T) {
 		"miss", "alpha delta epsilon",
 	)
 	txt := text.New(ix)
-	only := query.Glob(ix, "beta") // a restriction admitting only "hit"
+	only := query.Glob(ix, "", "beta") // a restriction admitting only "hit"
 
 	got, err := engine.Search(context.Background(), engine.Query{Text: "alpha"}, 10,
 		engine.Fuser(fusion.Fuse), txt, only)
@@ -100,7 +100,7 @@ func TestMustIntersectsEveryNamedStream(t *testing.T) {
 		"two", "red green",
 		"one", "red",
 	)
-	red, green, blue := query.Glob(ix, "red"), query.Glob(ix, "green"), query.Glob(ix, "blue")
+	red, green, blue := query.Glob(ix, "", "red"), query.Glob(ix, "", "green"), query.Glob(ix, "", "blue")
 
 	for _, tc := range []struct {
 		name    string
@@ -132,7 +132,7 @@ func TestMustNotDropsAndDoesNotVote(t *testing.T) {
 	)
 	fuse := query.MustNot(fusion.Fuse, 1)
 	got, err := engine.Search(context.Background(), engine.Query{}, 10, fuse,
-		query.Glob(ix, "alpha"), query.Glob(ix, "draft"))
+		query.Glob(ix, "", "alpha"), query.Glob(ix, "", "draft"))
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestMustNotDropsAndDoesNotVote(t *testing.T) {
 // constraint were absent does not.
 func TestAConstraintThatCannotBeEvaluatedIsNotSatisfied(t *testing.T) {
 	ix := corpus(t, "a", "alpha", "b", "beta")
-	all := query.Glob(ix, "*")
+	all := query.Glob(ix, "", "*")
 
 	for name, fuse := range map[string]engine.Fuser{
 		"Must past the end":    query.Must(fusion.Fuse, 9),
@@ -172,7 +172,7 @@ func TestFiltersCompose(t *testing.T) {
 	)
 	fuse := query.Must(query.MustNot(fusion.Fuse, 2), 1)
 	got, err := engine.Search(context.Background(), engine.Query{}, 10, fuse,
-		query.Glob(ix, "alpha"), query.Glob(ix, "beta"), query.Glob(ix, "draft"))
+		query.Glob(ix, "", "alpha"), query.Glob(ix, "", "beta"), query.Glob(ix, "", "draft"))
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestGlobMatchesThePatternsItAdvertises(t *testing.T) {
 		{"*", []string{"a", "b", "c", "d", "e", "f"}},
 	} {
 		t.Run(tc.pattern, func(t *testing.T) {
-			names := sorted(keys(t, ix, candidates(t, query.Glob(ix, tc.pattern), engine.Query{}, 10)))
+			names := sorted(keys(t, ix, candidates(t, query.Glob(ix, "", tc.pattern), engine.Query{}, 10)))
 			if !slices.Equal(names, sorted(tc.want)) {
 				t.Errorf("Glob(%q) = %v, want %v", tc.pattern, names, sorted(tc.want))
 			}
@@ -216,7 +216,7 @@ func TestGlobMatchesThePatternsItAdvertises(t *testing.T) {
 // whoever wrote it.
 func TestGlobReportsAMalformedPattern(t *testing.T) {
 	ix := corpus(t, "a", "alpha")
-	_, err := query.Glob(ix, "[unterminated").Candidates(context.Background(), engine.Query{}, 10)
+	_, err := query.Glob(ix, "", "[unterminated").Candidates(context.Background(), engine.Query{}, 10)
 	if err == nil {
 		t.Error("a malformed pattern returned no error")
 	}
@@ -232,10 +232,10 @@ func TestGlobDoesNotTruncateToK(t *testing.T) {
 	}
 	ix := corpus(t, pairs...)
 
-	if got := candidates(t, query.Glob(ix, "shared"), engine.Query{}, 3); len(got) != 20 {
+	if got := candidates(t, query.Glob(ix, "", "shared"), engine.Query{}, 3); len(got) != 20 {
 		t.Errorf("Glob returned %d candidates for k=3, want all 20", len(got))
 	}
-	if got := candidates(t, query.Glob(ix, "shared"), engine.Query{}, 0); len(got) != 0 {
+	if got := candidates(t, query.Glob(ix, "", "shared"), engine.Query{}, 0); len(got) != 0 {
 		t.Errorf("Glob returned %d candidates for k=0, want none", len(got))
 	}
 }
@@ -250,7 +250,7 @@ func TestGlobRanksByIDF(t *testing.T) {
 		"common2", "xcommon",
 		"common3", "xcommon",
 	)
-	names := keys(t, ix, candidates(t, query.Glob(ix, "x*"), engine.Query{}, 10))
+	names := keys(t, ix, candidates(t, query.Glob(ix, "", "x*"), engine.Query{}, 10))
 	if len(names) == 0 || names[0] != "rare" {
 		t.Errorf("Glob ranked %v; the document holding the rare term has to lead", names)
 	}
@@ -341,8 +341,8 @@ func TestScorersAreCancellable(t *testing.T) {
 	cancel()
 
 	for name, s := range map[string]engine.Scorer{
-		"glob":   query.Glob(ix, "*"),
-		"phrase": query.Phrase(ix, query.Glob(ix, "*"), "shared token"),
+		"glob":   query.Glob(ix, "", "*"),
+		"phrase": query.Phrase(ix, query.Glob(ix, "", "*"), "shared token"),
 	} {
 		if _, err := s.Candidates(ctx, engine.Query{Text: "shared"}, 10); !errors.Is(err, context.Canceled) {
 			t.Errorf("%s on a cancelled context returned %v, want context.Canceled", name, err)

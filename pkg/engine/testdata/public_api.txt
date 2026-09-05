@@ -5,12 +5,17 @@ func FuseWeighted(...float64) engine.Fuser
 package fusion
 
 # ../query
+const MaxEditDistance = 2
 const MaxTerms = 4096
 const PhraseOverfetch = 10
-func Glob(*engine.Index, string) engine.Scorer
+func EncodeInt(int64) string
+func EncodeTime(time.Time) string
+func Fuzzy(*engine.Index, string, string, int) engine.Scorer
+func Glob(*engine.Index, string, string) engine.Scorer
 func Must(engine.Fuser, ...int) engine.Fuser
 func MustNot(engine.Fuser, ...int) engine.Fuser
 func Phrase(*engine.Index, engine.Scorer, string) engine.Scorer
+func Range(*engine.Index, string, string, string) engine.Scorer
 package query
 
 # ../scorer/graph

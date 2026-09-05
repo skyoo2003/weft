@@ -38,76 +38,55 @@ const (
 	PhraseOverfetch = 10
 )
 
-// Glob ranks documents holding any term matching pattern.
+// termScorer is the shape all three term-selection queries share: pick a set of
+// indexed terms, then score every document holding any of them.
 //
-// The syntax is path.Match's: `*` matches any run of non-separator characters,
-// `?` matches one, and `[a-z]` is a character class. `go*` is a prefix query,
-// `*ing` a suffix query, `organi[sz]e` an alternation. The pattern is matched
-// against indexed terms, so it is matched against whatever this index's
-// tokenizer produced — lowercased and split at non-letters by default.
+// The scoring is the same for Glob, Range and Fuzzy and is deliberately **not**
+// BM25. Under rank fusion what a term-selection query owes is a monotone,
+// non-degenerate ordering — fusion.Fuse reads rank rather than score — so this
+// is IDF times frequency, summed over the matched terms, with no length
+// normalization. scorer/text is where BM25 lives and this package does not
+// import it.
 //
-// Two consequences of borrowing path.Match rather than writing a matcher:
+// One implementation and three selection rules, because the difference between
+// these queries is entirely which terms they name. Three copies of the
+// accumulate-and-rank loop would be three places for the IDF clamp, the
+// cancellation polling and the "do not truncate to k" rule to drift apart.
+type termScorer struct {
+	ix   *engine.Index
+	name string
+
+	// pick returns the terms to score, already scoped to a field. It runs
+	// before any posting is read, so a query that names nothing costs a
+	// vocabulary scan and no corpus work.
+	pick func() ([]string, error)
+}
+
+func (t *termScorer) Name() string { return t.name }
+
+// Candidates implements engine.Scorer.
 //
-//   - `/` is a separator to it, so `*` will not cross one. The default
-//     tokenizer cannot produce a term containing `/`, but a caller-supplied one
-//     can, and there such a term is only reachable by naming the slash.
-//   - A malformed pattern — an unterminated `[` — is reported by Candidates as
-//     an error rather than silently matching nothing, which is the difference
-//     between a typo you find and a query that quietly returns zero hits.
-//
-// # What it scores
-//
-// The sum over matching terms of IDF times the document's frequency: plain
-// TF-IDF with no length normalization. That is deliberately **not** BM25 and is
-// not trying to be. A pattern query's job under rank fusion is to nominate the
-// documents the pattern reaches in a defensible order, and fusion.Fuse reads
-// rank rather than score — so what this owes is a monotone, non-degenerate
-// ordering, and IDF is what stops one very common expansion from deciding all of
-// it. scorer/text is where BM25 lives and this package does not import it.
-//
-// # Using it as a restriction
-//
-// Candidates returns **every** matching document and does not truncate to k,
-// which is what Must and MustNot need — see the package documentation for why a
+// It returns **every** matching document and does not truncate to k, which is
+// what Must and MustNot need — see the package documentation for why a
 // restriction truncated to k is a wrong answer rather than a narrow one. Passing
-// it to Search as an ordinary scorer is still fine: fusion takes the top k at
-// the end.
-func Glob(ix *engine.Index, pattern string) engine.Scorer {
-	return &globScorer{ix: ix, pattern: pattern}
-}
-
-type globScorer struct {
-	ix      *engine.Index
-	pattern string
-}
-
-func (g *globScorer) Name() string { return "glob" }
-
-func (g *globScorer) Candidates(ctx context.Context, _ engine.Query, k int) ([]engine.Candidate, error) {
+// one of these to Search as an ordinary scorer is still fine: fusion takes the
+// top k at the end.
+func (t *termScorer) Candidates(ctx context.Context, _ engine.Query, k int) ([]engine.Candidate, error) {
 	if k <= 0 {
 		return nil, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// Validated once, against a term that cannot match, before the vocabulary
-	// scan. path.Match reports a bad pattern on every call, so checking inside
-	// the loop would ask the same question once per term and answer it only
-	// after paying for the scan.
-	if _, err := path.Match(g.pattern, ""); err != nil {
-		return nil, fmt.Errorf("glob %q: %w", g.pattern, err)
+	terms, err := t.pick()
+	if err != nil {
+		return nil, err
 	}
-
-	// The literal head of the pattern narrows what has to be examined. It is the
-	// whole pattern for a prefix query, and empty for one starting in a
-	// wildcard — where the scan is the vocabulary and MaxTerms is what bounds
-	// the result.
-	terms := g.ix.Terms(literalPrefix(g.pattern), MaxTerms)
 	if len(terms) == 0 {
 		return nil, nil
 	}
 
-	docs, _ := g.ix.Stats()
+	docs, _ := t.ix.Stats()
 	if docs == 0 {
 		return nil, nil
 	}
@@ -119,16 +98,10 @@ func (g *globScorer) Candidates(ctx context.Context, _ engine.Query, k int) ([]e
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		ok, err := path.Match(g.pattern, term)
-		if err != nil || !ok {
-			// The error cannot happen — the pattern was validated above — and
-			// re-reporting it here would be a second judge of one question.
-			continue
-		}
 		// LookupInto, not Lookup: a term's postings are walked and finished with
 		// before the next term is looked up, so one buffer holds the longest
 		// list instead of the sum of them. Same reasoning as scorer/text.
-		posts = g.ix.LookupInto(term, posts)
+		posts = t.ix.LookupInto(term, posts)
 		if len(posts) == 0 {
 			continue
 		}
@@ -153,14 +126,72 @@ func (g *globScorer) Candidates(ctx context.Context, _ engine.Query, k int) ([]e
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// Not truncated to k. See the doc comment: this has to be usable as a
-	// restriction, and a restriction that stops at k excludes every document
-	// below its own cut.
 	out := make([]engine.Candidate, 0, len(acc))
 	for doc, score := range acc {
 		out = append(out, engine.Candidate{Doc: doc, Score: score})
 	}
 	return engine.TopK(out, len(out)), nil
+}
+
+// scopedTerms is the vocabulary a field-scoped query may match, with the field's
+// prefix already taken off.
+//
+// Every selection rule below wants the same two things — the terms of one field,
+// and them stated as the caller would have typed them — so the scoping and the
+// unscoping live here rather than in three places. An empty field is
+// Document.Text's own term space, which engine.FieldTerm already spells as "the
+// token unchanged".
+func scopedTerms(ix *engine.Index, field, literal string) (terms []string, prefix string) {
+	prefix = engine.FieldTerm(field, "")
+	return ix.Terms(prefix+literal, MaxTerms), prefix
+}
+
+// Glob ranks documents holding a term matching pattern, in the named field.
+//
+// An empty field is Document.Text. Any other name is one of Document.Fields, and
+// the pattern is matched against that field's tokens alone — the same scoping
+// text.NewField gives BM25, so a caller does not have to know that a field's
+// terms are spelled with a separator.
+//
+// The syntax is path.Match's: `*` matches any run of non-separator characters,
+// `?` matches one, and `[a-z]` is a character class. `go*` is a prefix query,
+// `*ing` a suffix query, `organi[sz]e` an alternation. The pattern is matched
+// against indexed terms, so it is matched against whatever this index's
+// tokenizer produced — lowercased and split at non-letters by default.
+//
+// Two consequences of borrowing path.Match rather than writing a matcher:
+//
+//   - `/` is a separator to it, so `*` will not cross one. The default
+//     tokenizer cannot produce a term containing `/`, but a caller-supplied one
+//     can, and there such a term is only reachable by naming the slash.
+//   - A malformed pattern — an unterminated `[` — is reported by Candidates as
+//     an error rather than silently matching nothing, which is the difference
+//     between a typo you find and a query that quietly returns zero hits.
+//
+// See termScorer for what it scores and why it does not truncate to k.
+func Glob(ix *engine.Index, field, pattern string) engine.Scorer {
+	return &termScorer{ix: ix, name: scorerName("glob", field), pick: func() ([]string, error) {
+		// Validated once, against a term that cannot match, before the
+		// vocabulary scan. path.Match reports a bad pattern on every call, so
+		// checking inside the loop would ask the same question once per term and
+		// answer it only after paying for the scan.
+		if _, err := path.Match(pattern, ""); err != nil {
+			return nil, fmt.Errorf("glob %q: %w", pattern, err)
+		}
+		// The literal head narrows what has to be examined. It is the whole
+		// pattern for a prefix query, and empty for one starting in a wildcard —
+		// where the scan is the field's vocabulary and MaxTerms bounds the result.
+		cand, prefix := scopedTerms(ix, field, literalPrefix(pattern))
+		out := make([]string, 0, len(cand))
+		for _, term := range cand {
+			// The error cannot happen — the pattern was validated above — and
+			// re-reporting it here would be a second judge of one question.
+			if ok, _ := path.Match(pattern, strings.TrimPrefix(term, prefix)); ok {
+				out = append(out, term)
+			}
+		}
+		return out, nil
+	}}
 }
 
 // literalPrefix is the part of a pattern before its first metacharacter, which
@@ -174,6 +205,16 @@ func literalPrefix(pattern string) string {
 		return pattern[:i]
 	}
 	return pattern
+}
+
+// scorerName is what a stream calls itself in a diagnostic. A field-scoped query
+// names its field, so a caller fusing several can tell them apart — the same
+// convention scorer/text uses.
+func scorerName(kind, field string) string {
+	if field == "" {
+		return kind
+	}
+	return kind + ":" + field
 }
 
 // Phrase wraps inner and keeps only the candidates whose text contains phrase as
@@ -192,19 +233,23 @@ func literalPrefix(pattern string) string {
 // The cost is therefore bounded by what inner nominates and not by the corpus:
 // k times PhraseOverfetch record decodes and tokenizations per query.
 //
+// # What it reads, and what it does not
+//
+// **Document.Text only.** A phrase inside a Document.Field is not found, because
+// this checks the one text a document has always had. Scoping it would mean a
+// second parameter and a second rule about which text a run may cross, and
+// neither is worth guessing at before somebody asks.
+//
 // # What it scores
 //
 // Whatever inner scored. The phrase is a constraint and not a signal, so a
 // surviving candidate keeps its position in inner's ranking — which means a
 // caller can wrap the text scorer and still be ranking by BM25.
 //
-// # Using it as a restriction
-//
 // Candidates returns every surviving candidate rather than truncating to k, for
-// the reason Glob gives. Note the difference from Glob though: what survives is
+// the reason termScorer gives. Note the difference though: what survives is
 // bounded by what inner nominated, so this restricts *inner's candidates* and
-// not the corpus. Restricting a different stream by it only excludes what inner
-// had already reached.
+// not the corpus.
 //
 // A phrase that tokenizes to nothing matches every candidate, because a caller
 // asking to filter on an empty phrase has asked for no constraint. A phrase of
