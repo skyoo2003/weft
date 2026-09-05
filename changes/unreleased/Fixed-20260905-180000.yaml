@@ -1,0 +1,26 @@
+kind: Fixed
+body: '**`scorer/text` scored term-at-a-time and held three corpus-sized
+  structures to do it.** Milestone 22 measured weft against bleve and found weft
+  faster on every query shape and allocating **156× more** on the widest — 2.82 MB
+  against 18 KB — which is the same quantity milestone 5 §3.2 named as the
+  throughput wall, *live heap under concurrency*, measured for the first time
+  against something other than weft''s own past. The accumulator, the posting
+  buffer and the candidate slice were all sized by the corpus rather than by the
+  answer. It now walks **document-at-a-time** over one `engine.BlockCursor` per
+  query term, scoring each document to completion and offering it to a k-sized
+  `engine.Collector`: no accumulator, no candidate slice, and no posting list
+  held whole. On 50,000 documents, a term held by every one of them goes from
+  **2,819,333 B and 2,139,639 ns to 32,337 B and 944,509 ns** — 87× less memory
+  and 2.3× faster — and against bleve it is now **3.1× faster at 1.8× the
+  memory**, where it was 1.36× faster at 156×. On the shapes that are not the
+  worst case weft now allocates **less** than bleve: 4.8× less on a term in a
+  fiftieth of the corpus, 69× less on one no document holds. A middle version
+  that held whole posting lists was tried and rejected — it removes the
+  accumulator but holds the *sum* of the lists, which is worse than the old path
+  for a query whose terms are all common, and
+  `TestScoringDoesNotAllocateAPostingListPerTerm` is what caught it. **No score or
+  ranking changes**: the reference tests matching `rank_bm25` to 4.44e-16 and
+  `pytrec_eval` are unmoved.'
+time: 2026-09-05T18:00:00.000000000+09:00
+custom:
+  Issue: 29

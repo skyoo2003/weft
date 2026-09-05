@@ -4096,3 +4096,126 @@ and missed the point.
 4. **The ladder is still owed by three rounds.** This does not discharge it. What it does is make
    the debt smaller: a change to the query path can now be checked against bleve in under a
    minute, so the ladder is needed for the tail rather than for every decision.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
+# Milestone 23 — Document-at-a-time, and the 156× that became 1.8×
+
+[Milestone 22](#milestone-22--measured-against-bleve-and-the-gap-that-is-left-is-not-time)
+measured weft against bleve and found weft faster on every query shape and allocating **156×
+more** on the widest — 2.82 MB against 18 KB. It named the cause precisely: weft scored
+term-at-a-time, so a query held an accumulator, a posting buffer and a candidate slice, and all
+three were sized by the corpus rather than by the answer. This round removes all three.
+
+## 1. The result
+
+`make bench-head`, 50,000 documents, one BM25 query, top 10, darwin/arm64, Apple M4.
+
+| Query | weft before | weft after | bleve |
+| --- | --- | --- | --- |
+| `absent` | 645 ns / 72 B | **295 ns / 152 B** | 7,198 ns / 10,524 B |
+| `rare` | 2,102 ns / 7,289 B | **911 ns / 2,732 B** | 4,341 ns / 11,704 B |
+| `mid` | 44,608 ns / 70,979 B | **21,212 ns / 3,682 B** | 64,925 ns / 17,694 B |
+| `common` | 2,139,639 ns / 2,819,333 B | **944,509 ns / 32,337 B** | 2,902,909 ns / 18,062 B |
+| `mixed` | 2,118,154 ns / 2,838,586 B | **1,008,872 ns / 37,721 B** | 3,179,371 ns / 31,773 B |
+
+On the widest query: **87× less memory and 2.3× faster than before**, and against bleve **3.1×
+faster at 1.8× the memory** where it was 1.36× faster at 156×. On three of the five shapes weft
+now allocates *less* than bleve — 4.8× less on a term in a fiftieth of the corpus, 69× less on
+one no document holds.
+
+The time improved as well as the memory, which was not the point and is worth explaining rather
+than claiming: a map write per posting and a slice append per matching document are not free,
+and neither happens now.
+
+## 2. The middle version that was tried and rejected
+
+Document-at-a-time removes the accumulator and the candidate slice by construction: a document's
+score is complete the moment every cursor has passed it, so it is offered to a k-sized collector
+and forgotten. The obvious way to write it is to fetch each term's posting list with `Lookup` and
+walk the lists in step.
+
+**That is worse than what it replaces for a query whose terms are all common.** Term-at-a-time
+walked one term to exhaustion and reused a single buffer, so it held the *longest* list;
+document-at-a-time cannot, because a document may be reached by any term, so it holds the *sum*.
+Three common terms is three lists where the old path held one plus an accumulator.
+
+`TestScoringDoesNotAllocateAPostingListPerTerm` caught it — a test written for milestone 8 to
+pin exactly the invariant this was trading away, which is what a test written about a property
+rather than about an implementation is for.
+
+So the lists are not held at all. `engine.BlockCursor` hands one block at a time, and the cost
+becomes `blockSize` postings per term whatever the corpus holds.
+
+## 3. What a cursor cannot be, and what that forced
+
+A cursor that kept a `*segment` across a lock release would be a **segmentation fault** rather
+than an error: `Close` unmaps, and this package promises never to panic. So the cursor holds
+numbers only — a segment's base DocID, a byte offset, a block index — and re-resolves the
+segment under a fresh read lock on every block.
+
+Three things follow, and each is a decision rather than a consequence:
+
+- **A segment can go away mid-walk.** A merge replaces the oldest run while a cursor is inside
+  it. The cursor stops and says so through `Err`, because `Next` returning nil cannot carry the
+  difference between "the term ended" and "the term could not be read" — and a short posting
+  list is not a smaller answer, it is a wrong one.
+- **One read lock per block**, about four hundred for a term held by fifty thousand documents,
+  against one for `Lookup`. Against the corpus walk it replaces, that is not the term that
+  matters.
+- **`decodeBlock` had to be extracted** so the eager reader and the cursor are two *walkers* and
+  not two decoders. Two implementations of a format is how a format drifts, and
+  `TestACursorAgreesWithLookup` checks the two walkers against each other over a corpus that
+  crosses block boundaries, a segment boundary and the pending segment.
+
+## 4. Two bugs this nearly shipped, both found by asking the same question twice
+
+**The cursor did not filter tombstones.** A deleted document keeps its posting, its length and
+its record — only the index knows it is gone — so a cursor without the filter puts deleted
+documents in front of every scorer built on it and nothing downstream can tell. The deletion
+tests caught it. Every other read path takes tombstones off inside the read that decoded them,
+and this one now does too.
+
+**A block of nothing but tombstones ended the walk.** Once the filter existed, a block whose
+every posting was deleted decoded to an empty slice — and empty is what a caller reads as "this
+term is finished". The corpus that would show it is one where a whole block is deleted
+consecutively, which no existing test built.
+`TestACursorSurvivesAWholeBlockOfTombstones` is that corpus.
+
+**And one that was caught by writing the changelog.** The first version used
+`Index.PostingBound` for IDF, because a cursor cannot say how long it is without being walked
+and IDF must be known before the first posting is scored. A bound is not a frequency: rounded up
+to a block boundary and not subtracting tombstones, it drifts every score in the corpus by an
+amount that depends on where the block boundaries fell. `PostingBound` is now `PostingCount`,
+exact and tombstone-filtered, and it costs one counting pass per term with postings decoded and
+never collected. `TestRestoredIndexRanksIdentically` is what would have caught it — a pending
+index and the same index committed and reopened must rank the same, and only the second has
+blocks.
+
+## 5. What is claimed
+
+**Per-query cost parity with bleve, on one machine, on this corpus, for one BM25 query at a
+time — in both time and allocation.** That is the narrowest true version and it is the one the
+README carries. Milestone 22 §2 says what this benchmark is not, and all of it still applies:
+not a tail, not a throughput figure, not a quality comparison, and no substitute for the ladder.
+
+**No score or ranking changed.** `internal/eval`'s match to `rank_bm25` at 4.44e-16 and to
+`pytrec_eval`'s `ndcg_cut_10` are unmoved, and `TestRestoredIndexRanksIdentically` holds across
+the commit boundary where the block structure appears.
+
+## 6. Carried forward
+
+1. **Block-max WAND is now cheap to add and has not been added.** The cursor is the structure it
+   needs, the metadata has been on disk since version 1, and what is missing is a `Peek` that
+   returns a block's summary without decoding it. What it would buy is skipping blocks whose
+   best possible score cannot reach the k-th best so far — a *time* win, where this round was a
+   memory one.
+2. **The remaining 1.8× on the widest query is 1,321 allocations.** Most of what is left is the
+   per-block decode path rather than anything corpus-sized, so the next figure to move is a
+   count, not a size.
+3. **`DocLen`'s lock is now paid once per document rather than once per posting.** The
+   `ponytail:` note that stood on it since milestone 3 asked for a batched read;
+   document-at-a-time answered the same question by needing the length once. It is still a lock
+   per document and still unmeasured under concurrency.
+4. **The ladder is owed by four rounds.** Every figure here is sequential.

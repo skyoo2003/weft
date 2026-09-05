@@ -1294,35 +1294,57 @@ func (ix *Index) LookupInto(term string, buf []Posting) []Posting {
 	return ix.lookupInto(term, buf)
 }
 
-// PostingBound is an upper bound on how many postings Lookup would return for
-// term, read without decoding any of them.
+// PostingCount is how many postings Lookup would return for term, counted
+// without materialising any of them.
 //
-// It exists so a caller can size a per-query accumulator before it starts
-// filling one. Sizing it to the corpus instead is what
-// pkg/scorer/text/bench_test.go measured at 4.73 MB and 143 µs on a query for a
-// term **no document holds** — a floor under every query on that corpus,
-// whatever it reached, and 128 MB/s of garbage at the arrival rate where
-// docs/FINDINGS.md milestone 5 §3.2 saw sustained load collapse. Sizing it to
-// the first term's list instead moves the cost rather than removing it: a query
-// whose rarest term comes first grows its way up to the widest one, which cost
-// 42% more memory than the corpus hint did.
+// It is the collection frequency BM25 needs before it can score anything, and a
+// scorer that walks a term with a BlockCursor cannot get it from the walk: IDF
+// has to be known before the first posting is scored, and a cursor cannot say
+// how long it is without being walked. So this is the one extra pass a
+// document-at-a-time scorer pays, and it is the cheap kind — the postings are
+// decoded and counted, never collected, so the cost is bytes read and nothing
+// held.
 //
-// **A bound, not a count**, and cheap for exactly that reason. A term's postings
-// are written in blocks of a fixed size with the block count in front, so this
-// reads one varint per segment and multiplies; the answer is tight to within one
-// block per segment. Deleted documents are not subtracted — a tombstone leaves
-// its posting where it was, and Lookup filters at read time.
+// **Exact, and deleted documents are not counted.** Both halves matter and the
+// second is why this is not the block arithmetic it looks like it could be: a
+// term's blocks are all full but the last, so a bound is one varint away — but a
+// bound is not a frequency, and IDF computed from one drifts every score in the
+// corpus by an amount that depends on where the block boundaries fell. Lookup
+// filters tombstones at read time, so a count that did not would disagree with
+// the list it is supposed to describe.
 //
-// Zero means no segment claims the term and nothing is pending for it, so Lookup
-// would return nothing. Nothing else about the value is promised: it is a hint,
-// and a caller that cannot get one pays the growth it would have paid anyway.
-func (ix *Index) PostingBound(term string) int {
+// Zero means no live document holds the term, which is also what a segment that
+// claims the term and cannot decode it reports — absence being the answer D-006
+// gives corruption on this path, and the same answer Lookup's nil is.
+func (ix *Index) PostingCount(term string) int {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 
-	n := len(ix.postings[term])
+	// Hoisted for an index that has never deleted anything, which is both the
+	// common case and what every published figure was measured on.
+	filter := !ix.dead.empty()
+	n := 0
 	for _, s := range ix.segs {
-		n += s.postingBound(term)
+		if _, claimed := s.terms[term]; !claimed {
+			continue
+		}
+		// Counted per segment and added afterwards, because a segment that
+		// claims the term and fails to decode makes the whole count absent —
+		// and a partial count is not a smaller answer, it is a wrong IDF.
+		seen := 0
+		if s.scanPostings(term, nil, func(p Posting) {
+			if !filter || !ix.dead.has(p.Doc) {
+				seen++
+			}
+		}) == 0 {
+			return 0
+		}
+		n += seen
+	}
+	for _, p := range ix.postings[term] {
+		if !filter || !ix.dead.has(p.Doc) {
+			n++
+		}
 	}
 	return n
 }

@@ -1432,6 +1432,123 @@ func decodeTermIndex(terms *segReader, postEnd int) (map[string]termSpan, error)
 // the next term's entry is the witness the count itself does not carry.
 type termSpan struct{ off, end int }
 
+// decodeBlock reads one posting block from wherever r is positioned, yields its
+// postings, and re-derives every field the block records about itself.
+//
+// It is a function rather than the body of decodeTermPostings' loop because two
+// readers walk blocks and they must not be two decoders: the eager one reads a
+// term's blocks in sequence, and Index.BlockCursor reads one block at a time
+// from a remembered offset, so that a document-at-a-time scorer holds one block
+// per query term instead of one posting list per query term. Two implementations
+// of a format is how a format drifts, and this one carries every check.
+//
+// prev is the last DocID decoded, carried across blocks: deltas restart at each
+// block boundary — that is what makes a block decodable on its own — but the
+// *ascending* rule still spans them, and a block whose first id does not exceed
+// the previous block's last is a delta chain that was continued instead of
+// restarted. A cursor entering a term at block b passes the maxDocID of block
+// b-1, which is the same number by a different route.
+//
+// nblocks is needed for one rule and one only: every block but the last holds
+// exactly blockSize postings.
+func decodeBlock(post *segReader, term string, b, nblocks, docCount int, offs docOffsets, prev *uint64, yield func(Posting)) (int, error) {
+	blockStart := post.off
+	cnt, err := post.intn("block posting count", blockSize)
+	if err != nil {
+		return 0, err
+	}
+	if cnt == 0 || (b < nblocks-1 && cnt != blockSize) {
+		return 0, fmt.Errorf("%s: term %q block %d holds %d postings: %w", post.name, term, b, cnt, ErrCorrupt)
+	}
+	maxDoc, err := post.uvarint("block maxDocID")
+	if err != nil {
+		return 0, err
+	}
+	maxTF, err := post.intn("block maxTF", maxInt)
+	if err != nil {
+		return 0, err
+	}
+	// Re-derived like the two beside it, not read and dropped. D-001 wrote
+	// these three fields before any query used them, and the standing hazard
+	// of that trade is a field that rots unread — the answer being that every
+	// decoder rebuilds them from the block's own contents. This one was the
+	// exception: advancing the reader past it was all decoding took, so a
+	// block whose minimum disagreed with the documents its postings name
+	// stayed wrong through every Lookup and Merge that touched it. docoff
+	// makes the token count arithmetic, and the frequency bound below reads
+	// it anyway.
+	minDL, err := post.intn("block minDocLen", maxInt)
+	if err != nil {
+		return 0, err
+	}
+
+	gotMaxTF, gotMinDL := 0, maxInt
+	for j := range cnt {
+		delta, err := post.uvarint("posting docID delta")
+		if err != nil {
+			return 0, err
+		}
+		var id uint64
+		switch {
+		case j > 0:
+			if delta == 0 {
+				return 0, fmt.Errorf("%s: term %q repeats a docID; postings are strictly ascending: %w", post.name, term, ErrCorrupt)
+			}
+			if delta > math.MaxUint64-*prev {
+				return 0, fmt.Errorf("%s: term %q docID delta %d overflows past %d: %w", post.name, term, delta, *prev, ErrCorrupt)
+			}
+			id = *prev + delta
+		case b == 0:
+			id = delta
+		default:
+			id = delta
+			if id <= *prev {
+				return 0, fmt.Errorf("%s: term %q block %d starts at document %d, block %d ended at %d; postings are strictly ascending: %w",
+					post.name, term, b, id, b-1, *prev, ErrCorrupt)
+			}
+		}
+		if id >= uint64(docCount) {
+			return 0, fmt.Errorf("%s: term %q names document %d of a %d-document segment: %w", post.name, term, id, docCount, ErrCorrupt)
+		}
+		*prev = id
+		freq, err := post.intn("posting frequency", maxInt)
+		if err != nil {
+			return 0, err
+		}
+		if freq == 0 {
+			return 0, fmt.Errorf("%s: term %q in document %d has frequency 0, which Add never writes: %w", post.name, term, id, ErrCorrupt)
+		}
+		// Every occurrence of this term was one of the document's tokens, so
+		// its length is the ceiling. Read from docoff, which is arithmetic
+		// on a mapped table — the record itself stays on disk.
+		dl := offs.docLen(DocID(id))
+		if freq > dl {
+			return 0, fmt.Errorf("%s: term %q occurs %d times in document %d, which holds %d tokens: %w",
+				post.name, term, freq, id, dl, ErrCorrupt)
+		}
+		yield(Posting{Doc: DocID(id), Freq: freq})
+		gotMaxTF = max(gotMaxTF, freq)
+		gotMinDL = min(gotMinDL, dl)
+	}
+	// prev is the last posting this block decoded — every iteration above
+	// assigns it and a block holds at least one posting. The accumulated
+	// slice this used to index into never said anything else.
+	if *prev != maxDoc {
+		return 0, fmt.Errorf("%s: term %q block %d records maxDocID %d, contents end at %d: %w", post.name, term, b, maxDoc, *prev, ErrCorrupt)
+	}
+	if gotMaxTF != maxTF {
+		return 0, fmt.Errorf("%s: term %q block %d records maxTF %d, contents say %d: %w", post.name, term, b, maxTF, gotMaxTF, ErrCorrupt)
+	}
+	if gotMinDL != minDL {
+		return 0, fmt.Errorf("%s: term %q block %d records minDocLen %d, contents say %d: %w", post.name, term, b, minDL, gotMinDL, ErrCorrupt)
+	}
+	if err := post.unit(fmt.Sprintf("term %q block %d", term, b), blockStart, uint64(segHeaderLen+blockStart)); err != nil {
+		return 0, err
+	}
+
+	return cnt, nil
+}
+
 // decodeTermPostings reads one term's postings from wherever r is positioned.
 //
 // It is decodePostings' inner loop with the corpus-wide checks left out, and
@@ -1477,100 +1594,11 @@ func decodeTermPostings(post *segReader, term string, offs docOffsets, end int, 
 	n := 0
 	prev := uint64(0)
 	for b := range nblocks {
-		blockStart := post.off
-		cnt, err := post.intn("block posting count", blockSize)
+		cnt, err := decodeBlock(post, term, b, nblocks, docCount, offs, &prev, yield)
 		if err != nil {
 			return 0, err
 		}
-		if cnt == 0 || (b < nblocks-1 && cnt != blockSize) {
-			return 0, fmt.Errorf("%s: term %q block %d holds %d postings: %w", post.name, term, b, cnt, ErrCorrupt)
-		}
-		maxDoc, err := post.uvarint("block maxDocID")
-		if err != nil {
-			return 0, err
-		}
-		maxTF, err := post.intn("block maxTF", maxInt)
-		if err != nil {
-			return 0, err
-		}
-		// Re-derived like the two beside it, not read and dropped. D-001 wrote
-		// these three fields before any query used them, and the standing hazard
-		// of that trade is a field that rots unread — the answer being that every
-		// decoder rebuilds them from the block's own contents. This one was the
-		// exception: advancing the reader past it was all decoding took, so a
-		// block whose minimum disagreed with the documents its postings name
-		// stayed wrong through every Lookup and Merge that touched it. docoff
-		// makes the token count arithmetic, and the frequency bound below reads
-		// it anyway.
-		minDL, err := post.intn("block minDocLen", maxInt)
-		if err != nil {
-			return 0, err
-		}
-
-		gotMaxTF, gotMinDL := 0, maxInt
-		for j := range cnt {
-			delta, err := post.uvarint("posting docID delta")
-			if err != nil {
-				return 0, err
-			}
-			var id uint64
-			switch {
-			case j > 0:
-				if delta == 0 {
-					return 0, fmt.Errorf("%s: term %q repeats a docID; postings are strictly ascending: %w", post.name, term, ErrCorrupt)
-				}
-				if delta > math.MaxUint64-prev {
-					return 0, fmt.Errorf("%s: term %q docID delta %d overflows past %d: %w", post.name, term, delta, prev, ErrCorrupt)
-				}
-				id = prev + delta
-			case b == 0:
-				id = delta
-			default:
-				id = delta
-				if id <= prev {
-					return 0, fmt.Errorf("%s: term %q block %d starts at document %d, block %d ended at %d; postings are strictly ascending: %w",
-						post.name, term, b, id, b-1, prev, ErrCorrupt)
-				}
-			}
-			if id >= uint64(docCount) {
-				return 0, fmt.Errorf("%s: term %q names document %d of a %d-document segment: %w", post.name, term, id, docCount, ErrCorrupt)
-			}
-			prev = id
-			freq, err := post.intn("posting frequency", maxInt)
-			if err != nil {
-				return 0, err
-			}
-			if freq == 0 {
-				return 0, fmt.Errorf("%s: term %q in document %d has frequency 0, which Add never writes: %w", post.name, term, id, ErrCorrupt)
-			}
-			// Every occurrence of this term was one of the document's tokens, so
-			// its length is the ceiling. Read from docoff, which is arithmetic
-			// on a mapped table — the record itself stays on disk.
-			dl := offs.docLen(DocID(id))
-			if freq > dl {
-				return 0, fmt.Errorf("%s: term %q occurs %d times in document %d, which holds %d tokens: %w",
-					post.name, term, freq, id, dl, ErrCorrupt)
-			}
-			yield(Posting{Doc: DocID(id), Freq: freq})
-			n++
-			gotMaxTF = max(gotMaxTF, freq)
-			gotMinDL = min(gotMinDL, dl)
-		}
-		// prev is the last posting this block decoded — every iteration above
-		// assigns it and a block holds at least one posting. The accumulated
-		// slice this used to index into never said anything else.
-		if prev != maxDoc {
-			return 0, fmt.Errorf("%s: term %q block %d records maxDocID %d, contents end at %d: %w", post.name, term, b, maxDoc, prev, ErrCorrupt)
-		}
-		if gotMaxTF != maxTF {
-			return 0, fmt.Errorf("%s: term %q block %d records maxTF %d, contents say %d: %w", post.name, term, b, maxTF, gotMaxTF, ErrCorrupt)
-		}
-		if gotMinDL != minDL {
-			return 0, fmt.Errorf("%s: term %q block %d records minDocLen %d, contents say %d: %w", post.name, term, b, minDL, gotMinDL, ErrCorrupt)
-		}
-		if err := post.unit(fmt.Sprintf("term %q block %d", term, b), blockStart, uint64(segHeaderLen+blockStart)); err != nil {
-			return 0, err
-		}
+		n += cnt
 	}
 	// The blocks have to fill the entry. A count that names fewer than were
 	// written leaves every block it does name intact and verifying, so nothing

@@ -92,6 +92,89 @@ func TopK(cands []Candidate, k int) []Candidate {
 	return cands[:k:k]
 }
 
+// Collector keeps the best k candidates out of a stream, in memory bounded by k
+// rather than by how many candidates it is shown.
+//
+// TopK is the same selection with the stream already in a slice. This is for the
+// scorer that never builds one — and the difference is not a convenience, it is
+// the whole of what a document-at-a-time scorer is for. docs/FINDINGS.md
+// milestone 22 measured weft against bleve and found weft faster on every query
+// shape and allocating **156× more** on the widest: 2.82 MB against 18 KB, of
+// which a corpus-sized candidate slice was 800 KB. A slice that is never built
+// cannot be sized to the corpus.
+//
+//	c := engine.NewCollector(k)
+//	for … { c.Offer(doc, score) }
+//	return c.Take(), nil
+//
+// **Offer is one comparison in the common case.** Once k candidates have been
+// seen, anything that cannot beat the worst of them is rejected against a single
+// value; only a survivor pays a sift. So a stream of a hundred thousand
+// candidates costs a hundred thousand comparisons and a handful of log₂k sifts.
+//
+// The zero value is not usable; NewCollector is. A Collector is not safe for
+// concurrent use and is not meant to outlive the query that built it.
+type Collector struct {
+	k    int
+	best []Candidate
+}
+
+// NewCollector returns a Collector keeping the best k. A k of zero or less
+// keeps nothing, which is the convention every Candidates already uses.
+func NewCollector(k int) *Collector {
+	if k <= 0 {
+		return &Collector{}
+	}
+	return &Collector{k: k, best: make([]Candidate, 0, k)}
+}
+
+// Offer shows the collector one candidate. It keeps what it needs and drops the
+// rest.
+//
+// Duplicate DocIDs are not detected: a caller offering one document twice gets
+// it twice in the result. A document-at-a-time scorer sums a document's
+// contributions before offering it once, which is the shape this is for.
+func (c *Collector) Offer(doc DocID, score float64) {
+	if c.k == 0 {
+		return
+	}
+	cand := Candidate{Doc: doc, Score: score}
+	// Filling: append and, on the last one, make a heap of what is there.
+	if len(c.best) < c.k {
+		c.best = append(c.best, cand)
+		if len(c.best) == c.k {
+			for i := c.k/2 - 1; i >= 0; i-- {
+				siftDown(c.best, i)
+			}
+		}
+		return
+	}
+	// Full: one comparison against the worst of the best, which is the root.
+	if rank(cand, c.best[0]) < 0 {
+		c.best[0] = cand
+		siftDown(c.best, 0)
+	}
+}
+
+// Take returns what was kept, best first, and empties the collector.
+//
+// The result is the collector's array, so a caller keeping it must not reuse the
+// collector — which Take makes impossible rather than merely discouraged by
+// dropping the reference.
+func (c *Collector) Take() []Candidate {
+	out := c.best
+	c.best = nil
+	if len(out) == 0 {
+		// nil rather than an empty slice, which is what every scorer returns for
+		// "no opinion" and what a `== nil` caller reads.
+		return nil
+	}
+	// Fewer than k were offered, so nothing was ever heapified — and more than
+	// that, a heap is not sorted. Both cases end in one sort of at most k.
+	slices.SortFunc(out, rank)
+	return out[:len(out):len(out)]
+}
+
 // rank orders two candidates best-first: higher score, then lower DocID.
 //
 // Scores go through cmp.Compare rather than >, which is what makes TopK's
