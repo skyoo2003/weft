@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -401,6 +402,8 @@ func (c *compiler) clause(name string, body json.RawMessage) (compiled, *apiErro
 		return c.exists(body)
 	case clauseKnn:
 		return c.knn(body)
+	case clauseWeftGraph:
+		return c.weftGraph(body)
 	case "function_score":
 		return c.functionScore(body)
 	case clauseHybrid:
@@ -1489,8 +1492,29 @@ func documentFrom(id string, body json.RawMessage, m *Mapping) (engine.Document,
 
 	vecField, dim, hasVec := m.Vector()
 	timeField, hasTime := m.Recency()
+	linkField, hasLinks := m.Links()
 	d := engine.Document{Key: id}
 	for _, name := range names {
+		if hasLinks && name == linkField {
+			links, err := linksOf(name, raw[name])
+			if err != nil {
+				return engine.Document{}, err
+			}
+			d.Links = links
+			// Set *and* indexed, which is the choice the recency field already
+			// made and for the same reason: a client that declared this field
+			// wants both, and neither is derivable from the other. The ids go in
+			// as a field's text so that `term` and `exists` over the field still
+			// answer — what they would otherwise do is match nothing and say
+			// nothing, which is the failure this surface refuses everywhere else.
+			//
+			// The ids are tokenized on the way in, so an id the tokenizer splits
+			// is reachable by its parts rather than whole. That is the keyword
+			// limitation D-022 already carries — one tokenizer per index — and not
+			// a new one.
+			d.Fields = append(d.Fields, engine.Field{Name: name, Text: strings.Join(links, " ")})
+			continue
+		}
 		if hasVec && name == vecField {
 			v, err := jsonVector(name, dim, raw[name])
 			if err != nil {
