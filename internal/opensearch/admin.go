@@ -31,10 +31,13 @@ const (
 	// response.
 	defaultTermLimit = 100
 
-	// keyTerm is the parameter these routes read a term from and the field they
-	// report it under. The same spelling as the `term` query clause and not the
-	// same thing, which is why it is a constant here rather than a shared one.
-	keyTerm = "term"
+	// The fields these routes answer with, and the parameter they read a term
+	// from. keyTerm and keyTerms share their spelling with the `term` and `terms`
+	// query clauses and are not the same thing, which is why they are declared
+	// here rather than reusing the ones search.go has.
+	keyTerm     = "term"
+	keyTerms    = "terms"
+	keyDocCount = "doc_count"
 )
 
 // flush makes everything written so far durable.
@@ -168,9 +171,9 @@ func (s *Server) weftTerms(w http.ResponseWriter, r *http.Request) error {
 	var buf []engine.Posting
 	for _, t := range found {
 		buf = ix.LookupInto(t, buf[:0])
-		out = append(out, map[string]any{keyTerm: displayTerm(t), "doc_count": len(buf)})
+		out = append(out, map[string]any{keyTerm: displayTerm(t), keyDocCount: len(buf)})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"terms": out})
+	writeJSON(w, http.StatusOK, map[string]any{keyTerms: out})
 	return nil
 }
 
@@ -212,7 +215,7 @@ func (s *Server) weftPostings(w http.ResponseWriter, r *http.Request) error {
 		out = append(out, map[string]any{"_id": d.Key, "freq": p.Freq})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		keyTerm: displayTerm(term), "doc_count": n, "postings": out,
+		keyTerm: displayTerm(term), keyDocCount: n, "postings": out,
 	})
 	return nil
 }
@@ -297,6 +300,18 @@ func (s *Server) weftQuery(w http.ResponseWriter, r *http.Request) error {
 }
 
 // intParam reads a positive integer query parameter, or its default.
+//
+// The cap is a security boundary and not a preference, which is the same
+// sentence maxResultWindow carries and for the same reason. engine.Index.Terms
+// allocates for the limit it is handed and the slice below is built to it, so a
+// number read straight out of a query string is a remote allocation primitive:
+// `?limit=` with ten digits asks this process for the memory before a single
+// term has been walked. CodeQL's go/uncontrolled-allocation-size found this one
+// exactly as it found the one on _search.
+//
+// maxResultWindow rather than a second number, because a client that already
+// handles the refusal on _search handles this one, and two caps would be two
+// places to get it wrong.
 func intParam(raw string, fallback int) (int, *apiError) {
 	if raw == "" {
 		return fallback, nil
@@ -304,6 +319,12 @@ func intParam(raw string, fallback int) (int, *apiError) {
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
 		return 0, badRequest(kindIllegalArgument, "limit is a positive integer, got %q", raw)
+	}
+	if n > maxResultWindow {
+		return 0, badRequest(kindIllegalArgument,
+			"limit of %d is over the window of %d: the walk allocates for the limit it is given, so this "+
+				"is refused before it is allocated rather than after. Page with a narrower prefix",
+			n, maxResultWindow)
 	}
 	return n, nil
 }

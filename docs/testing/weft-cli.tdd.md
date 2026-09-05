@@ -192,6 +192,30 @@ client, which is what D-033 is spending the prefix on.
   on a machine window, and nothing here changes what it will measure — the ladder
   aims at `_search`.
 
+### After the first CI run — two failures worth keeping
+
+`make all` passed locally and failed in CI, on the disagreement the Makefile
+already warns about: CI pins golangci-lint v2.12.2 and the local binary was
+v2.13.1. The older one counts three `goconst` occurrences the newer does not.
+Fixed by removing the literals rather than by pinning around it — `clauseTerms`,
+`keyTerms`, `keyDocCount`.
+
+**CodeQL found a real defect**, and it is one this repository has met before.
+`intParam` validated that `limit` was positive and put no ceiling on it, so
+`GET /_weft/terms?limit=2000000000` asked `engine.Index.Terms` to allocate for
+two billion entries before a single term was walked — `go/uncontrolled-allocation-size`,
+the same rule that produced `maxResultWindow` on `_search` when the HTTP surface
+was new. RED first:
+
+```text
+$ go test ./internal/opensearch/ -run TestWeftLimitIsCapped
+--- FAIL: TestWeftLimitIsCapped//papers/_weft/terms?limit=2000000000
+    status 200, want 400
+```
+
+GREEN with the same cap rather than a second number, so a client that already
+handles the refusal on `_search` handles this one.
+
 ## Merge evidence
 
 Checkpoint commits on `cli-full-api-surface`, in order: `2154261` (RED, ledger

@@ -192,6 +192,34 @@ func TestWeftPostings(t *testing.T) {
 	}
 }
 
+// TestWeftLimitIsCapped is an allocation boundary, not a preference.
+//
+// `engine.Index.Terms` allocates for the limit it is handed, so a limit read
+// straight out of a query string is a remote allocation primitive: `?limit=`
+// with ten digits asks this process for the memory before a single term is
+// walked. It is the hole `maxResultWindow` was introduced for on _search, found
+// the same way — CodeQL's go/uncontrolled-allocation-size — and refused with the
+// same number, so a client that already handles one handles the other.
+func TestWeftLimitIsCapped(t *testing.T) {
+	srv := dslCorpus(t)
+
+	for _, path := range []string{
+		"/papers/_weft/terms?limit=2000000000",
+		"/papers/_weft/postings?term=fusion&limit=2000000000",
+	} {
+		t.Run(path, func(t *testing.T) {
+			status, raw := do(t, srv, http.MethodGet, path, "")
+
+			if status != http.StatusBadRequest {
+				t.Fatalf("status %d, want 400 (body %s)", status, raw)
+			}
+			if !strings.Contains(string(raw), "10000") {
+				t.Errorf("the refusal does not name the cap:\n%s", raw)
+			}
+		})
+	}
+}
+
 func TestWeftPostingsNeedsATerm(t *testing.T) {
 	srv := dslCorpus(t)
 

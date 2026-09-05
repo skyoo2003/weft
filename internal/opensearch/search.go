@@ -203,6 +203,7 @@ const (
 	clausePrefix   = "prefix"
 	clauseWildcard = "wildcard"
 	clauseTerm     = "term"
+	clauseTerms    = "terms"
 
 	occMust    = "must"
 	occMustNot = "must_not"
@@ -403,7 +404,7 @@ func (c *compiler) clause(name string, body json.RawMessage) (compiled, *apiErro
 		return c.matchPhrase(body)
 	case clauseTerm:
 		return c.term(body)
-	case "terms":
+	case clauseTerms:
 		return c.terms(body)
 	case clausePrefix, clauseWildcard:
 		return c.pattern(body, name)
@@ -642,7 +643,7 @@ func (c *compiler) term(body json.RawMessage) (compiled, *apiError) {
 
 // terms finds any of several literal values in one field.
 func (c *compiler) terms(body json.RawMessage) (compiled, *apiError) {
-	field, value, err := oneField("terms", body)
+	field, value, err := oneField(clauseTerms, body)
 	if err != nil {
 		return compiled{}, err
 	}
