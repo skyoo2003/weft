@@ -1,0 +1,15 @@
+kind: Documentation
+body: 'README is 91 lines from 261, and the detail it carried now lives in four documents
+  that each answer one question: docs/STATUS.md (milestone state, the published nDCG
+  table, the debts milestone 5 has not paid), docs/LIMITATIONS.md (the 24 rows, grouped
+  by whether they cost you uptime, durability, ranking quality or expressiveness),
+  docs/ARCHITECTURE.md (layout, dependency direction, the three assertions a test decides)
+  and docs/SCORERS.md (the extension path). The README that is left is a front door and a
+  map. Every inbound link moved with the text — SECURITY, SUPPORT, RELEASE, CONTRIBUTING,
+  both issue templates and the docs site — and the full make target reference, which the
+  README had only nine rows of, is now generated from the Makefile in CONTRIBUTING. Three
+  stale claims died on the way: the bug template said nine limitations and no query
+  language, and the site said the on-disk format was versions 1 to 3.'
+time: 2026-09-05T11:30:00.000000000+09:00
+custom:
+  Issue: 23

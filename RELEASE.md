@@ -6,7 +6,7 @@ This procedure used to live in [CONTRIBUTING](CONTRIBUTING.md) and now lives onl
 
 ## 0. What a tag means
 
-A commit you can name. Not a support promise, and not a claim that the code became production-ready — [README](README.md#status) says it is not, and a version number does not change what the code does.
+A commit you can name. Not a support promise, and not a claim that the code became production-ready — [STATUS](docs/STATUS.md) says it is not, and a version number does not change what the code does.
 
 The module version and `formatVersion` are independent, and [CHANGELOG](CHANGELOG.md) says why. The API can break inside a minor while this is v0.x.
 
@@ -21,7 +21,7 @@ make changelog           # regenerates CHANGELOG.md from every batched version
 
 `changie batch` empties `changes/unreleased/`. If it produces nothing, there is nothing to release — write the entry first with `make changelog-new`.
 
-In the same commit, fix whatever else the tag makes false. As of the first tag that is [README](README.md#status)'s "no tag yet" and [SECURITY](SECURITY.md)'s "no releases yet".
+In the same commit, fix whatever else the tag makes false. As of the first tag that is [STATUS](docs/STATUS.md)'s "no tag yet" and [SECURITY](SECURITY.md)'s "no releases yet".
 
 ## 2. Confirm that exact commit is green
 

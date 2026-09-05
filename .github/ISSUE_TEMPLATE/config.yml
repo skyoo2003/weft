@@ -14,7 +14,7 @@ contact_links:
     about: Not here. Report it privately on the Security tab; SECURITY.md has the policy and an email fallback.
 
   - name: Known limitations
-    url: https://github.com/skyoo2003/weft/blob/main/README.md#limitations
+    url: https://github.com/skyoo2003/weft/blob/main/docs/LIMITATIONS.md
     about: >-
       No deletion, a commit blocks reads, throughput collapses under sustained
       load, no CJK tokenization, no query language. All documented and deliberate.
