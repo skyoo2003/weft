@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -189,23 +190,31 @@ func TestIndexMergesWhenAsked(t *testing.T) {
 // TestIndexTokenizerIsRecorded pins the replacement point at both ends. An index
 // built with one tokenizer and opened with another is refused by engine itself —
 // ErrTokenizerMismatch — and this flag is how a command reaches that.
+//
+// The text is chosen so the two tokenizers disagree about how many tokens it
+// holds, not merely about what they are. engine detects the mismatch by
+// re-tokenizing one sampled document and comparing its length against the length
+// on disk, so "Hello, World" is invisible to it: the default drops the comma and
+// lowercases, the whitespace one keeps both, and each still produces two tokens.
+// A hyphen is what splits the counts — the default cuts at it and whitespace
+// does not.
 func TestIndexTokenizerIsRecorded(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "ix")
 
-	code, _, stderr := feed(t, `{"key":"a","text":"Hello, World"}`+"\n",
+	code, _, stderr := feed(t, `{"key":"a","text":"weft-cli tool"}`+"\n",
 		"index", "-data", dir, "-tokenizer", "whitespace")
 	if code != 0 {
 		t.Fatalf("index: exit %d, stderr:\n%s", code, stderr)
 	}
 
-	// The whitespace tokenizer keeps the comma the default one splits at.
 	ix := openIndexed(t, dir, engine.WithTokenizer(tokenizers["whitespace"]))
-	if n := ix.PostingCount("Hello,"); n != 1 {
-		t.Errorf(`PostingCount("Hello,") = %d, want 1 — the text was not split on whitespace`, n)
+	if n := ix.PostingCount("weft-cli"); n != 1 {
+		t.Errorf(`PostingCount("weft-cli") = %d, want 1 — the text was not split on whitespace`, n)
 	}
 
-	if _, err := engine.Open(dir); err == nil {
-		t.Error("opening with the default tokenizer succeeded; engine should have refused the mismatch")
+	_, err := engine.Open(dir)
+	if !errors.Is(err, engine.ErrTokenizerMismatch) {
+		t.Errorf("opening with the default tokenizer returned %v, want ErrTokenizerMismatch", err)
 	}
 }
 

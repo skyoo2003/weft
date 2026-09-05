@@ -1,214 +1,154 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Command weft is an interactive demo of scorer-agnostic fusion.
+// Command weft is the command line in front of the library.
 //
-// It indexes a small built-in corpus and answers queries with four scorers at
-// once, printing each scorer's own rank beside the fused result so you can see
-// what fusion actually did. A document that only one scorer can see still
-// surfaces; a scorer with no opinion contributes nothing and costs nothing.
+// The library is the product and this is a cmd/ — docs/DECISIONS.md D-025 — so
+// nothing here is a capability weft has and a `go get` user does not. What it is
+// for is the other direction: reaching pkg/ from a shell, without writing a Go
+// program first.
 //
-// Vectors in the corpus are hand-assigned. Generating embeddings is out of
-// scope for weft, so a demo cannot compute them.
+//	weft index -data ./ix < corpus.jsonl
+//	weft search -data ./ix -q '+covid "airborne transmission"' -scorers vector,recency -breakdown
 //
-//	go run ./cmd/weft
-//	query> ranking fusion
-//	query> nearest neighbour @ 0,1,0
+// Each subcommand takes its input from flags alone. A leftover positional
+// argument is refused rather than ignored, because flag stops parsing at the
+// first non-flag argument and says nothing about it, so a typo would silently
+// leave every flag after it at its default.
+//
+// For weft embedded in a Go program, see ./examples: basic is the smallest one,
+// breakdown prints what fusion did, weights shows a stream being discounted, and
+// sparse is about the documents a scorer cannot see.
+//
+// # Read this before pointing it at anything that matters
+//
+// weft is not usable in production. docs/STATUS.md and docs/LIMITATIONS.md are
+// the full account.
 package main
 
 import (
-	"bufio"
-	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
-	"strconv"
-	"strings"
-	"time"
-
-	"github.com/skyoo2003/weft/pkg/engine"
-	"github.com/skyoo2003/weft/pkg/fusion"
-	"github.com/skyoo2003/weft/pkg/scorer/graph"
-	"github.com/skyoo2003/weft/pkg/scorer/recency"
-	"github.com/skyoo2003/weft/pkg/scorer/text"
-	"github.com/skyoo2003/weft/pkg/scorer/vector"
 )
 
-// demoNow pins the clock. With time.Now the recency ranks would drift between
-// runs and the demo would stop being reproducible.
-var demoNow = time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+// Subcommand names. Written once because two places have to agree on each: the
+// switch in run, and the FlagSet the subcommand builds — the FlagSet name is
+// what -h prints and what a leftover-argument error quotes back, so a drift
+// between the two tells an operator about a command they did not run.
+const (
+	cmdIndex  = "index"
+	cmdSearch = "search"
+)
 
-func day(n int) time.Time { return demoNow.AddDate(0, 0, -n) }
-
-// The three vector dimensions stand in for topics: [ranking, vectors, graphs].
-var corpus = []engine.Document{
-	{Key: "bm25", Text: "bm25 ranks documents by term frequency and document length", Vector: []float32{1, 0, 0}, Links: []string{"tfidf"}, Time: day(400)},
-	{Key: "tfidf", Text: "tf idf term weighting for ranking", Vector: []float32{0.9, 0, 0.1}, Links: []string{"bm25"}, Time: day(800)},
-	{Key: "rrf", Text: "reciprocal rank fusion combines rankings from several retrievers", Vector: []float32{0.8, 0.3, 0}, Links: []string{"bm25", "hnsw"}, Time: day(30)},
-	{Key: "hnsw", Text: "hierarchical navigable small world graphs for approximate nearest neighbour search", Vector: []float32{0, 0.7, 0.7}, Links: []string{"ivf"}, Time: day(120)},
-	{Key: "ivf", Text: "inverted file index partitions vectors into clusters", Vector: []float32{0, 1, 0}, Links: []string{"hnsw"}, Time: day(200)},
-	{Key: "pagerank", Text: "pagerank scores nodes by random walk probability over a link graph", Vector: []float32{0.3, 0, 0.9}, Links: []string{"bfs"}, Time: day(600)},
-	{Key: "bfs", Text: "breadth first search finds shortest hop distance in a graph", Vector: []float32{0, 0, 1}, Links: []string{"pagerank"}, Time: day(900)},
-	// No vector, no links: only text and recency can see this one.
-	{Key: "changelog", Text: "release notes for the current version", Time: day(1)},
-}
+// subcommands is that same list in the order the help prints them, and is what
+// TestUsageListsEverySubcommand reads.
+var subcommands = []string{cmdIndex, cmdSearch}
 
 func main() {
-	k := flag.Int("k", 5, "how many results to show")
-	flag.Parse()
-
-	// Search returns an empty result for k <= 0 rather than an error, so without
-	// this the demo answers every query with "no results" and exits 0.
-	if *k <= 0 {
-		fmt.Fprintf(os.Stderr, "-k must be positive, got %d\n", *k)
-		os.Exit(2)
-	}
-	if flag.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "queries are read from stdin, not arguments: %q\n", flag.Args())
-		os.Exit(2)
-	}
-
-	ix := engine.New()
-	for _, d := range corpus {
-		if _, err := ix.Add(d); err != nil {
-			fmt.Fprintf(os.Stderr, "index %q: %v\n", d.Key, err)
-			os.Exit(1)
-		}
-	}
-
-	txt := text.New(ix)
-	scorers := []engine.Scorer{
-		txt,
-		vector.New(ix),
-		graph.New(ix, txt), // seeded by any scorer, here the text one
-		recency.NewAt(ix, demoNow),
-	}
-	// One weight per stream, by position, written here because position is only
-	// meaningful next to the slice that fixes it — FuseWeighted's own
-	// documentation says the two lists belong at the same call site, and a
-	// reordered slice with unedited weights re-ranks silently.
-	//
-	// The graph stream takes a tenth of a vote. Milestone 4 measured that scorer
-	// at +0.0000 nDCG@10 at its best weight and −0.1227 at a full one, and both
-	// README and the scorer's own package documentation tell a user to weight it
-	// down if they enable it at all. This demo is the first weft most readers
-	// run, so fusing it at equal weight was the project demonstrating the
-	// opposite of its own advice. Note what the weights still do not require: a
-	// number for slot three, not the knowledge that slot three holds a graph
-	// scorer.
-	weighted := fusion.FuseWeighted(1, 1, 0.1, 1)
-
-	// Stats, not Len: since deletion exists Len is one past the highest DocID and
-	// counts the tombstones with it, so a corpus that has been deleted from would
-	// be announced larger than it is. Stats is the live population.
-	docs, _ := ix.Stats()
-	fmt.Printf("weft — %d documents, %d scorers. Query syntax: TEXT [@ v1,v2,v3]. Ctrl-D to quit.\n\n", docs, len(scorers))
-
-	in := bufio.NewScanner(os.Stdin)
-	for {
-		fmt.Print("query> ")
-		if !in.Scan() {
-			fmt.Println()
-			break
-		}
-		q, err := parseQuery(in.Text())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %v\n\n", err)
-			continue
-		}
-		if q.Text == "" && len(q.Vector) == 0 {
-			continue
-		}
-		if err := run(ix, scorers, weighted, q, *k); err != nil {
-			fmt.Fprintf(os.Stderr, "  %v\n\n", err)
-		}
-	}
-	if err := in.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "read:", err)
-		os.Exit(1)
-	}
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-// run searches and prints the fused ranking with a per-scorer breakdown.
-func run(ix *engine.Index, scorers []engine.Scorer, weighted engine.Fuser, q engine.Query, k int) error {
-	ctx := context.Background()
-
-	// Fuser is a parameter, so wrapping it hands back the very streams Search
-	// fused. Asking every scorer a second time to rebuild the breakdown would
-	// print a reconstruction instead of what happened — and the two can disagree
-	// the moment a scorer is not deterministic, which is the one thing this
-	// display exists to rule out. It also halves the work per query.
-	var streams [][]engine.Candidate
-	fuse := func(s [][]engine.Candidate, k int) []engine.Candidate {
-		streams = s
-		return weighted(s, k)
-	}
-
-	// The fused ranking. Note that this call names no scorer and no count.
-	results, err := engine.Search(ctx, q, k, fuse, scorers...)
-	if err != nil {
-		return err
-	}
-	if len(results) == 0 {
-		fmt.Print("  no results\n\n")
-		return nil
-	}
-
-	breakdown := make([]map[engine.DocID]int, len(scorers))
-	for i, stream := range streams {
-		breakdown[i] = ranksOf(stream)
-	}
-
-	for rank, c := range results {
-		d, _ := ix.Doc(c.Doc)
-		fmt.Printf("  %d. %-10s %.5f  ", rank+1, d.Key, c.Score)
-		for i, s := range scorers {
-			fmt.Printf("%s:%s  ", s.Name(), place(breakdown[i][c.Doc]))
-		}
-		fmt.Println()
-	}
-	fmt.Println()
-	return nil
-}
-
-// ranksOf maps each document in one scorer's stream to its 1-based position.
-func ranksOf(stream []engine.Candidate) map[engine.DocID]int {
-	ranks := make(map[engine.DocID]int, len(stream))
-	for i, c := range stream {
-		ranks[c.Doc] = i + 1
-	}
-	return ranks
-}
-
-// place renders a rank, or a dash for a document absent from that scorer's
-// stream.
+// run is main with its arguments and streams passed in, so a test can drive the
+// whole command without a subprocess and without os.Exit.
 //
-// A dash is not the same as "no opinion". Every scorer is asked for k, so a
-// scorer that ranks the whole corpus — recency does — shows a dash for anything
-// below its own top k. Raise -k and the dashes fill in. Only a scorer with
-// nothing to say at all, like vector on a query carrying no vector, is dashed
-// the whole way down.
-func place(rank int) string {
-	if rank == 0 {
-		return "-"
+// The exit code carries the difference between the two kinds of failure: 2 is a
+// command a caller fixes by retyping it, and 1 is one where retyping is not the
+// problem. Both print to stderr.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		// Help, not a session. `weft` alone used to index a built-in corpus and
+		// read queries from stdin, which is a thing to demonstrate rather than a
+		// thing to be — that demo lives in ./examples now.
+		usage(stderr)
+		return 2
 	}
-	return strconv.Itoa(rank)
+
+	name, rest := args[0], args[1:]
+	switch name {
+	case cmdIndex:
+		return report(stderr, indexCmd(rest, stdin, stdout, stderr))
+	case cmdSearch:
+		return report(stderr, searchCmd(rest, stdout, stderr))
+	case "help", "-h", "--help":
+		// Asking for the help is a request that succeeded; being handed it after
+		// typing nothing is a diagnostic. Different streams, different codes.
+		usage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "weft: unknown subcommand %q\n\n", name)
+		usage(stderr)
+		return 2
+	}
 }
 
-// parseQuery splits "some text @ 1,0,0" into text and an optional vector. The
-// vector is typed by hand because weft does not generate embeddings.
-func parseQuery(line string) (engine.Query, error) {
-	// Not named `text`: that is the scorer package this file imports.
-	qtext, vec, hasVec := strings.Cut(line, "@")
-	q := engine.Query{Text: strings.TrimSpace(qtext)}
-	if !hasVec {
-		return q, nil
+func usage(w io.Writer) {
+	fmt.Fprint(w, `usage: weft <index|search> [flags]
+
+  index   read documents as JSON lines on stdin, then commit them to -data.
+          One object per line: key, text, vector, links, time, fields. Deletes
+          and a segment merge happen in the same run, before the commit.
+  search  rank an index. Streams come from -scorers and from -q, weft's own
+          query string, and -weights discounts them by position. -breakdown
+          prints each scorer's own rank beside the fused one, which is how you
+          see that the fused order is nobody's order.
+
+Run either subcommand with -h for its flags. weft is not usable in production;
+docs/STATUS.md is the account.
+`)
+}
+
+// usageError marks a failure a caller fixes by retyping the command.
+type usageError struct{ error }
+
+// badUsage builds one.
+func badUsage(format string, a ...any) error {
+	return usageError{fmt.Errorf(format, a...)}
+}
+
+// report prints a subcommand's error and turns it into an exit code.
+func report(stderr io.Writer, err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, flag.ErrHelp):
+		// The FlagSet has already printed the flags. Asking for them is not a
+		// failure, exactly as `weft help` is not.
+		return 0
 	}
-	for _, f := range strings.Split(vec, ",") {
-		v, err := strconv.ParseFloat(strings.TrimSpace(f), 32)
-		if err != nil {
-			return engine.Query{}, fmt.Errorf("bad vector component %q: %w", strings.TrimSpace(f), err)
+	fmt.Fprintf(stderr, "weft: %v\n", err)
+	var ue usageError
+	if errors.As(err, &ue) {
+		return 2
+	}
+	return 1
+}
+
+// parseFlags builds a subcommand's FlagSet, registers its flags and parses args.
+//
+// ContinueOnError rather than the ExitOnError cmd/weft-eval uses: a flag package
+// that calls os.Exit takes the test process with it, and the exit code is the
+// thing being asserted.
+//
+// A leftover positional argument is refused for the reason weft-eval refuses it.
+// flag stops at the first non-flag argument and says nothing, so `weft index
+// typo -data ./ix` would leave -data empty and report a missing flag the caller
+// can see they typed.
+func parseFlags(name string, args []string, out io.Writer, register func(*flag.FlagSet)) (*flag.FlagSet, error) {
+	fs := flag.NewFlagSet("weft "+name, flag.ContinueOnError)
+	fs.SetOutput(out)
+	register(fs)
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, err
 		}
-		q.Vector = append(q.Vector, float32(v))
+		return nil, usageError{err}
 	}
-	return q, nil
+	if fs.NArg() > 0 {
+		return nil, badUsage("%s takes no arguments, and %q is not a flag: parsing stopped there, "+
+			"so every flag after it was ignored and left at its default", name, fs.Arg(0))
+	}
+	return fs, nil
 }
