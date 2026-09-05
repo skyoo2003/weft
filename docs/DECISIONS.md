@@ -1950,3 +1950,117 @@ about, and `ru_nivcsw` per rung becomes the next instrument rather than a reject
 alternative. The opposite failure — a probe that fails on a machine which would in
 fact have reproduced the ladder — costs one minute and is the direction the threshold
 was chosen to err in.
+
+---
+
+## D-025 — The server is a `cmd/`, and the library is still the product
+
+**Date**: 2026-09-05 · **Milestone**: 24 · **Status**: accepted
+
+### The question
+
+The founding PRD lists **"compatibility with an existing query language"** among the
+things this project does not do, and `docs/RESEARCH.md` §3 dismisses zinc, blast and
+phalanx in four words — *they are servers*. An OpenSearch-compatible HTTP surface
+contradicts the first directly and points the second at weft itself.
+
+Both objections are real and neither survives being looked at closely, which is why
+this is a decision and not an oversight.
+
+### The decision
+
+**Build it, in `cmd/weftd` and `internal/opensearch`. Nothing under `pkg/`.**
+
+The reversal was approved on 2026-09-05 by the maintainer, who read the argument below
+and asked for the implementation.
+
+The check that makes this a boundary rather than an intention: **milestone 24 changes
+zero lines under `pkg/`.** `git diff --stat pkg/` is the assertion, `make arch` guards
+the two golden API files, and `make deps` still prints one module because `net/http`
+and `encoding/json` are the standard library.
+
+### Why the founding out-of-scope line does not bind
+
+Its sibling — *"query language and parser — queries are built through the Go API; a
+DSL contributes nothing to proving the architecture"* — was reversed by milestone 20,
+and reversed on grounds that apply here word for word. The rejection was conditional
+on an unproven architecture. Milestones 1, 16, 18, 19, 20 and 23 have since passed;
+the open question is no longer whether the design works but whether anyone will use
+it, and the adoption metric this project registered for itself has **not started**.
+
+### Why `internal/` rather than `pkg/api`
+
+`docs/ARCHITECTURE.md` already argues this for the evaluation harness: a measurement
+apparatus is not part of the library contract, and keeping it out of `pkg/` leaves the
+exported surface — and the golden file guarding it — untouched by the measurement. A
+server is the same kind of thing. Put it in `pkg/api` and `engine_api.txt` starts
+carrying HTTP types, every handler signature becomes a semver promise, and the
+`CHANGELOG` claim that a release with no entry has nothing for a caller to do stops
+being true for a package no library user imports.
+
+`internal/opensearch` imports `pkg/scorer/*`, and that is not a violation. What
+milestone 1 forbids is **`pkg/fusion` knowing a scorer exists**; `cmd/weft/main.go`
+has named all four since the beginning. `make deps`' second check is unchanged.
+
+### What this costs, and it is not nothing
+
+A server is an operational surface with its own failure modes, and this one opens on a
+codebase `docs/STATUS.md` calls **not usable in production**: sustained load collapses
+at 27 queries a second and a commit holds the writer for 11 seconds. `weftd` binds to
+loopback and prints that warning at startup. Both are mitigations and neither is a
+fix; milestone 27 is where the number gets measured through HTTP, and it is blocked on
+a quiet window that has failed four rounds running.
+
+### What would show this decision was wrong
+
+**A line needed under `pkg/`.** If the HTTP surface cannot be expressed without
+widening `Scorer`, `Search` or `Fuse`, then the architecture claim does not survive a
+process boundary — and that is a finding worth more than the server. It gets written
+into `docs/FINDINGS.md` before the line is written into the code.
+
+The weaker signal: the library falling behind the server. If a capability lands in
+`internal/opensearch` that a `go get` user cannot reach, this decision has quietly
+made the server the product.
+
+---
+
+## D-026 — The handshake claims OpenSearch 2.19.0, and that is the only lie
+
+**Date**: 2026-09-05 · **Milestone**: 24 · **Status**: accepted
+
+### The question
+
+`GET /` must return `version.distribution: "opensearch"` and a version number, because
+every official client reads them and branches on what it finds. weft is not
+OpenSearch. Saying so truthfully means no client connects, and a compatibility surface
+nothing connects to is not a compatibility surface.
+
+### The decision
+
+**Claim `2.19.0`, and confine the untruth to that one response.** Everything else is
+honest: a query type weft cannot express returns **400 or 501**, never 200 with an
+empty result.
+
+2.19.0 rather than something older because it is the first line carrying the `hybrid`
+query and an RRF ranker — the shapes that map onto `fusion.Fuse` without translation,
+and the reason milestone 26 exists. Claiming 1.x would buy a smaller lie and lose the
+part of the protocol weft is actually good at.
+
+### Why silence is worse than refusal here
+
+This is `pkg/query`'s rule reaching the wire. That package's documentation states it
+outright: *an unterminated quote, a malformed range, a phrase with no terms — none of
+them is a query that quietly returns nothing, which is the failure this package
+refuses everywhere else.* A server that answers `aggs` with an empty aggregation block
+commits exactly that failure, at a distance, in someone else's dashboard.
+
+So the version string is a handshake token, not a claim about behaviour, and the
+behaviour says what it is on every request that reaches past the handshake.
+
+### What would show this decision was wrong
+
+A client that gets **further in** because of the claimed version and then fails in a
+way the operator cannot attribute — a 501 arriving somewhere the client has no error
+path for, so it surfaces as a hang or a silent empty page. If milestone 24's
+`make compat` run finds that shape, the answer is not a lower version number but a
+documented list of what the claim invites, kept in this decision.
