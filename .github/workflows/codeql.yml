@@ -1,0 +1,68 @@
+name: CodeQL
+
+# The one gate that is not `make all` and cannot be. golangci-lint reads a file
+# at a time and asks whether it is correct Go; CodeQL builds a dataflow graph
+# across the module and asks where a value the caller chose ends up. SECURITY.md
+# names the segment decoder as the first place a hostile file lands — a length
+# the file chose driving an allocation, an offset it chose driving a read — and
+# that is a taint question, not a lint one.
+#
+# It is not in `make all` because it cannot be: the analysis is minutes, not
+# seconds, and it needs a database built before it can ask anything. `make fuzz`
+# is the local half of the same question and is a Makefile target for exactly
+# that reason. This half only ever runs here.
+
+on:
+  push:
+    branches: [main]
+    # Documentation and workflow edits do not change the dataflow graph, and a
+    # full re-analysis for a README fix would buy a green check nobody read.
+    paths: ['**/*.go', 'go.mod', '.github/workflows/codeql.yml']
+  pull_request:
+    branches: [main]
+    paths: ['**/*.go', 'go.mod', '.github/workflows/codeql.yml']
+  # The queries move even when the code does not. A weekly run is what catches a
+  # rule written after the last commit, which is most of what CodeQL is worth on
+  # a repository that goes quiet between milestones.
+  schedule:
+    - cron: '15 3 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze Go
+    runs-on: ubuntu-latest
+    permissions:
+      # Narrower than the workflow default because this is the one job that
+      # writes anything: the findings go to the Security tab, not to a log.
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # checkout v7.0.1
+
+      # Before init, not after: autobuild picks up whatever Go is on the runner,
+      # and the runner's default is not go.mod's. Same single source of truth CI
+      # uses, so the tree CodeQL analyses is the tree `make all` compiled.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # setup-go v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # codeql-action v4
+        with:
+          languages: go
+          # autobuild is `go build ./...` here, which is all the root module
+          # needs: zero external dependencies, no generated code, no build tags.
+          # It does not descend into bench/, and that is correct rather than a
+          # gap — the comparison harness is not shipped and never sees a file
+          # weft did not write.
+          build-mode: autobuild
+
+      - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # codeql-action v4
+        with:
+          category: '/language:go'

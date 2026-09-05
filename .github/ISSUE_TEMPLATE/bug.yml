@@ -5,11 +5,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        Before filing: nine known limitations are listed in
-        [README — Limitations](https://github.com/skyoo2003/weft/blob/main/README.md#limitations),
+        Before filing: the known limitations are listed in
+        [LIMITATIONS.md](https://github.com/skyoo2003/weft/blob/main/docs/LIMITATIONS.md),
         and a report about one of them is not a bug. The corpus having to fit in
-        memory, no deletion, no CJK tokenization and no query language are all
-        there on purpose.
+        memory, deletion reclaiming nothing, no CJK tokenization and a query
+        syntax with no boolean algebra are all there on purpose.
 
         A vulnerability is not a bug report. It goes to
         [SECURITY.md](https://github.com/skyoo2003/weft/blob/main/SECURITY.md).

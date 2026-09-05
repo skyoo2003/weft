@@ -28,6 +28,32 @@ make fuzz         # 30s each against the two segment-decoder fuzz targets
 
 `make lint` needs `golangci-lint` and `make lint-docs` needs `markdownlint-cli2` or an `npx` to fetch it with; each target says so and names the install command rather than failing obscurely. `make fuzz` needs nothing but time, and it is the one most likely to find something no test covers — [SECURITY.md](SECURITY.md) names the segment decoder as the first place a hostile file lands. There is an optional [pre-commit config](.pre-commit-config.yaml) that runs `make all`, `make spdx` and `make lint`; nothing requires it, and CI does not use it.
 
+One gate has no Makefile target and no local half: [CodeQL](.github/workflows/codeql.yml), which runs on its own workflow against Go changes and once a week. It is absent from `make all` because it cannot be there — it builds a dataflow database before it can ask anything, which is minutes rather than seconds. It asks a different question from `golangci-lint` too: not whether a file is correct Go, but where a value the caller chose ends up. Its findings land on the Security tab rather than in a pull request check, so the way you meet it is by being told, not by a red build.
+
+## Every target
+
+Generated from the `Makefile`, which is the source of truth. `make help` is not a thing here; this table is.
+
+| Target | What it does |
+| --- | --- |
+| `make`, `make all` | fmt + build + vet + `test -race`, plus both linters when they are installed |
+| `make arch` | The milestone 1 pass/fail line, verbosely, plus the two golden-file tests |
+| `make deps` | The two architecture properties cheap enough to check by hand: zero dependencies, and fusion sees no scorer |
+| `make lint`, `make lint-docs` | The two linters by name — these fail rather than skip when the tool is missing |
+| `make spdx`, `make spdx-fix` | Every `.go` file carries its licence line; `-fix` adds the missing ones |
+| `make fuzz` | 30 seconds each against the two segment-decoder fuzz targets |
+| `make run`, `make example` | The interactive demo; the minimal embedding under `examples/` |
+| `make eval` | Milestone 4's published nDCG table, reprinted from an already-built index |
+| `make eval-full` | Adds the degeneracy diagnostic, the frozen arms and the 28-configuration sweep. Slower |
+| `make eval-data` | Refuses to call corpus preparation complete until the query vectors exist — without them `text+vector` arms silently measure text only |
+| `make recall` | Overlap with a brute-force scan, which is what nDCG cannot see about an approximate vector index |
+| `make bench` | Milestone 5's latency ladder. Long: the lowest rung alone sends 10,000 queries |
+| `make bench-build`, `make bench-compare`, `make bench-head` | The bleve comparison, which is its own module: vet + test it; run the ladder against bleve; the head-to-head microbenchmark milestone 22 reads |
+| `make changelog`, `make changelog-new`, `make changelog-check` | Render `CHANGELOG.md`; start an entry; fail if it was hand-edited |
+| `make docs-site`, `make release-check`, `make clean` | Render the docs site from `/docs`; dry-run the release pipeline before the tag is unwithdrawable; remove build output |
+
+Everything needing a prepared corpus — `eval`, `eval-full`, `recall`, `bench`, `bench-compare` — needs data that is not in the repository. [EVAL.md §7](docs/EVAL.md) lists the downloads and the one-time `weft-eval prepare` step.
+
 ## What not to break
 
 Two assertions are decided by tests rather than by a reviewer:
@@ -45,7 +71,7 @@ The line-count figure is a measurement, not a budget you have to fit under — w
 
 ## Adding a scorer
 
-The main extension path is written down once, in [README](README.md#adding-a-scorer): implement `engine.Scorer` and nothing in `engine/` or `fusion/` should need to change. If your change does need to touch them, that is the interesting part of the pull request — lead with it.
+The main extension path is written down once, in [docs/SCORERS.md](docs/SCORERS.md): implement `engine.Scorer` and nothing in `engine/` or `fusion/` should need to change. If your change does need to touch them, that is the interesting part of the pull request — lead with it.
 
 ## Pull requests
 

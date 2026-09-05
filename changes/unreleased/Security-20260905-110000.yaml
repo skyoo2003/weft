@@ -1,0 +1,12 @@
+kind: Security
+body: 'CodeQL runs on every Go change and once a week, and SECURITY.md now names both
+  automated gates rather than only the fuzz one. It is the half of the decoder question
+  `make fuzz` cannot reach: fuzzing finds a crash on an input it happened to generate in
+  thirty seconds, dataflow analysis finds where a length the file chose reaches an
+  allocation whether or not anything generated that file. Neither is in `make all` —
+  CodeQL builds a database before it can ask anything, which is minutes — so this is the
+  first gate with no local half, and its findings land on the Security tab rather than in
+  a pull request check.'
+time: 2026-09-05T11:00:00.000000000+09:00
+custom:
+  Issue: 23

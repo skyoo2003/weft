@@ -20,13 +20,13 @@ No commercial support and no consulting.
 
 ## Before you file
 
-weft is a library that is [explicitly not production software](README.md#status). Three of the most common surprises are documented rather than broken:
+weft is a library that is [explicitly not production software](docs/STATUS.md). Three of the most common surprises are documented rather than broken:
 
 - **Sustained query load collapses rather than degrades.** At its own sequential rate p50 goes 39 ms to 1.27 s and queries are shed. That is measured and documented, not a bug.
 - **A commit blocks reads for as long as it takes,** 11 s for a 20,000-document batch, and nothing bounds the window.
 - **Documents cannot be deleted.** Tombstones and DocID namespacing are one design problem and neither is built.
 
-The [Limitations table](README.md#limitations) has the rest. Something on that list is not worth an issue unless you can say what it should do instead.
+[LIMITATIONS.md](docs/LIMITATIONS.md) has the rest. Something on that list is not worth an issue unless you can say what it should do instead.
 
 ## What a `priority:` label means
 
