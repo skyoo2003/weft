@@ -2212,3 +2212,111 @@ reading `origin`, `scale`, `offset` or `decay` and ignoring them would rank by a
 asked for. The three curve *names* are accepted and approximated, because a name this server can
 answer approximately is better than three names it refuses — and a parameter it would silently
 ignore is not.
+
+---
+
+## D-032 — Every exported symbol has a command or a recorded reason, and a test counts them
+
+**Date**: 2026-09-06 · **Milestone**: 28 · **Status**: accepted
+
+### The question
+
+D-025 registered the signal that would show the server had quietly become the product: *a
+capability lands in `internal/opensearch` that a `go get` user cannot reach.* The inverse was
+never registered and turned out to be the one that was true. `pkg/scorer/graph` was the package
+the HTTP surface did not import at all; `engine.Scrub` had never been called by anything in this
+repository; `query.Parse` — weft's own query language, milestone 20 — could be reached only by
+writing a Go program.
+
+None of that is visible from anywhere. The golden API files record what is exported and no test
+asks whether anything can call it.
+
+### The decision
+
+**`cmd/weft/coverage_test.go` reads both golden files as data.** Every callable symbol they list
+has a row: the surfaces that reach it and the call site that proves it, or the reason nothing
+does. A symbol with no row fails. A row naming a symbol that no longer exists fails. A row
+claiming a surface whose source no longer holds the call fails. The figure is printed rather
+than asserted against a threshold:
+
+```text
+public callable symbols: 74, reached by a command: 71 (95.9%), reached by none: 3
+```
+
+The three are `NewCollector`, `Collector.Offer` and `Collector.Take`, and the recorded reason is
+that a Collector is the top-k buffer a `Scorer` implementation keeps while it walks postings —
+reaching it from a command would mean inventing a scorer for a flag to select, and `pkg/scorer`
+is what that would duplicate.
+
+This is milestone 25's shape reused. `TestTheRefusalRateIsCounted` holds the DSL table as data so
+that a quietly implemented row and a quietly broken one both break the build; this holds the API
+surface the same way.
+
+### What it proves and what it does not
+
+The proof is a call site in the surface's own source, found after comments are stripped —
+because this repository writes what it is *not* doing beside the call it is not making, and
+`internal/opensearch` says "engine.Scrub is not this" in a comment three lines from where a raw
+text scan would have read it as a call.
+
+It does not prove the call sits on a path a user can reach, and it cannot tell two same-named
+methods apart: `.Len(` is `Index.Len` and `Adjacency.Len` both. Where that mattered the row
+carries an explicit call string instead of the derived one, and `.Err(` is the case that caught
+it — `bufio.Scanner` has one too, and the index command calls it on stdin.
+
+### What would show this decision was wrong
+
+**A command invented to satisfy the ledger.** The test measures reachability, and the cheap way
+to raise a percentage is a subcommand nobody would run. The three unreachable rows are the
+control: if a later round makes them reachable without a use case arriving first, the number is
+being farmed rather than earned, and the reason recorded against them is the argument that has
+to be defeated in writing before the row changes.
+
+---
+
+## D-033 — What OpenSearch has no name for gets a name OpenSearch does not use
+
+**Date**: 2026-09-06 · **Milestone**: 29 · **Status**: accepted
+
+### The question
+
+Half of weft has no OpenSearch spelling. The graph signal is not a query type OpenSearch has;
+neither is weft's own query string, a term-space walk, or `engine.Scrub`. D-026 confines the
+untruth to the version handshake and says everything past it is honest — but it does not say
+what to call a thing OpenSearch never named.
+
+Two ways to get it wrong. Reuse an OpenSearch name for different behaviour, which is a second
+lie and a worse one, because a client that already knows the name will not read the
+documentation. Or refuse to expose the capability at all, which is D-025's weaker signal in
+reverse: the library reaching further than anything a client can call.
+
+### The decision
+
+**A `weft_` prefix on the clause and a `/_weft/` prefix on the route.** `weft_graph` is the graph
+signal; `/_weft/terms`, `/_weft/postings`, `/_weft/scrub` and `/_weft/query` are the four routes
+with no OpenSearch counterpart. A client sending standard DSL cannot reach any of them by
+accident, and a client reading one back knows which half of the surface it is on.
+
+`hybrid.weights` is the precedent, an extension inside a query that exists (D-030). This is the
+same move applied to a whole clause and a whole route.
+
+**Where the honest name is OpenSearch's, it is used.** `_flush`, `_refresh`, `_forcemerge`,
+`_count` and `_analyze` all do here what those names mean elsewhere — a flush is a commit, and a
+refresh can only be one too, since a search already reads the live index. Prefixing those would
+have been the mirror error: hiding a standard capability behind a private name.
+
+### Why `query_string` stays a 501 while `/_weft/query` answers
+
+They are different requests. `query_string` asks this server to read *Lucene's* language, and
+weft's is not it — the two disagree about `+`, `OR` and parentheses, so translating silently runs
+a query other than the one written. `/_weft/query` is a client asking for weft's language by
+name, on a route that says whose language it is. The refusal was never about the capability.
+
+### What would show this decision was wrong
+
+**A client that has to be told the prefix exists before it finds anything.** The namespace is
+cheap to add and cheap to ignore, and the failure mode is a surface where the interesting half is
+invisible to everyone who did not read this file. If adopters keep asking for a feature that has
+been reachable under `/_weft/` for months, the prefix is not carrying the meaning it was supposed
+to carry, and the answer is documentation on the route that would have been sent anyway — not a
+second name for it.

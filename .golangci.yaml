@@ -191,13 +191,17 @@ linters:
           - funlen
         path: pkg/engine/persist\.go$
 
-      # cmd/weft is a demo whose corpus is a literal table. Wrapping those rows
-      # or lifting their keys into constants makes the data harder to read,
-      # which is the only thing that file is for.
+      # The examples are demos whose corpus is a literal table. Wrapping those
+      # rows or lifting their keys into constants makes the data harder to read,
+      # which is the only thing those files are for.
+      #
+      # This exception used to name cmd/weft/main.go, which held the demo before
+      # it became a command with subcommands. The table moved; the rule follows
+      # it rather than staying pointed at a file that no longer has one.
       - linters:
           - lll
           - goconst
-        path: cmd/weft/main\.go$
+        path: examples/[a-z]+/main\.go$
 
       # The eval harness's subcommands are branchy for one reason: almost every
       # branch is a refusal. prepare and build are the two commands docs/EVAL.md

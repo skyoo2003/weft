@@ -18,8 +18,12 @@ func Fuse(streams [][]Candidate, k int) []Candidate
 ## Layout
 
 ```text
-cmd/weft/          interactive demo binary
-examples/basic/    minimal library embedding
+cmd/weft/          the command line in front of the library: index, search,
+                   inspect, check, encode
+examples/basic/      minimal library embedding
+examples/breakdown/  four scorers, one query, each scorer's own rank beside it
+examples/weights/    Fuse and FuseWeighted over the same query
+examples/sparse/     the documents a scorer cannot see
 pkg/
   engine/          shared types, Scorer interface, in-memory index, Search,
                    segment format, Commit and Open

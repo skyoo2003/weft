@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/skyoo2003/weft/pkg/engine"
@@ -109,6 +110,11 @@ type plan struct {
 	// depth overrides from+size when a clause asks every stream for more
 	// candidates than the page needs. A knn clause's k is the one that does.
 	depth int
+
+	// fuse replaces everything fuser() would have assembled, and only one caller
+	// sets it: /_weft/query, whose constraints were fixed by pkg/query.Parse over
+	// the very stream list it produced. nil everywhere else.
+	fuse engine.Fuser
 }
 
 // fuser assembles this plan's constraints over fusion.Fuse.
@@ -135,6 +141,13 @@ type plan struct {
 // carrying weights has no must_not positions. TestHybridWeightsAndMustNotDoNotMeet
 // is what holds that rather than this comment.
 func (p plan) fuser() engine.Fuser {
+	// A route that brought its own Fuser wins outright. /_weft/query is the one
+	// that does: pkg/query.Parse hands back the constraints as a Fuser over the
+	// positions it just fixed, and rebuilding those from must and mustNot here
+	// would be this file holding a second opinion about a query it did not parse.
+	if p.fuse != nil {
+		return p.fuse
+	}
 	base := engine.Fuser(fusion.Fuse)
 	if p.weights != nil {
 		base = fusion.FuseWeighted(p.weights...)
@@ -189,6 +202,8 @@ const (
 	clauseKnn      = "knn"
 	clausePrefix   = "prefix"
 	clauseWildcard = "wildcard"
+	clauseTerm     = "term"
+	clauseTerms    = "terms"
 
 	occMust    = "must"
 	occMustNot = "must_not"
@@ -387,9 +402,9 @@ func (c *compiler) clause(name string, body json.RawMessage) (compiled, *apiErro
 		return c.match(body)
 	case "match_phrase":
 		return c.matchPhrase(body)
-	case "term":
+	case clauseTerm:
 		return c.term(body)
-	case "terms":
+	case clauseTerms:
 		return c.terms(body)
 	case clausePrefix, clauseWildcard:
 		return c.pattern(body, name)
@@ -401,6 +416,8 @@ func (c *compiler) clause(name string, body json.RawMessage) (compiled, *apiErro
 		return c.exists(body)
 	case clauseKnn:
 		return c.knn(body)
+	case clauseWeftGraph:
+		return c.weftGraph(body)
 	case "function_score":
 		return c.functionScore(body)
 	case clauseHybrid:
@@ -607,7 +624,7 @@ func (c *compiler) matchPhrase(body json.RawMessage) (compiled, *apiError) {
 
 // term finds one literal value in one field.
 func (c *compiler) term(body json.RawMessage) (compiled, *apiError) {
-	field, value, err := oneField("term", body)
+	field, value, err := oneField(clauseTerm, body)
 	if err != nil {
 		return compiled{}, err
 	}
@@ -626,7 +643,7 @@ func (c *compiler) term(body json.RawMessage) (compiled, *apiError) {
 
 // terms finds any of several literal values in one field.
 func (c *compiler) terms(body json.RawMessage) (compiled, *apiError) {
-	field, value, err := oneField("terms", body)
+	field, value, err := oneField(clauseTerms, body)
 	if err != nil {
 		return compiled{}, err
 	}
@@ -1489,8 +1506,29 @@ func documentFrom(id string, body json.RawMessage, m *Mapping) (engine.Document,
 
 	vecField, dim, hasVec := m.Vector()
 	timeField, hasTime := m.Recency()
+	linkField, hasLinks := m.Links()
 	d := engine.Document{Key: id}
 	for _, name := range names {
+		if hasLinks && name == linkField {
+			links, err := linksOf(name, raw[name])
+			if err != nil {
+				return engine.Document{}, err
+			}
+			d.Links = links
+			// Set *and* indexed, which is the choice the recency field already
+			// made and for the same reason: a client that declared this field
+			// wants both, and neither is derivable from the other. The ids go in
+			// as a field's text so that `term` and `exists` over the field still
+			// answer — what they would otherwise do is match nothing and say
+			// nothing, which is the failure this surface refuses everywhere else.
+			//
+			// The ids are tokenized on the way in, so an id the tokenizer splits
+			// is reachable by its parts rather than whole. That is the keyword
+			// limitation D-022 already carries — one tokenizer per index — and not
+			// a new one.
+			d.Fields = append(d.Fields, engine.Field{Name: name, Text: strings.Join(links, " ")})
+			continue
+		}
 		if hasVec && name == vecField {
 			v, err := jsonVector(name, dim, raw[name])
 			if err != nil {

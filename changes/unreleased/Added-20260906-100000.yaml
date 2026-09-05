@@ -1,0 +1,15 @@
+kind: Added
+body: '`weft` is a command with subcommands — `index`, `search`, `inspect`, `check` and
+  `encode` — and between them they reach every callable symbol the library exports but
+  three. `search` takes weft''s own query string with `-q`, builds streams with
+  `-scorers` (text, text:FIELD, vector, graph, graph:seeds, graph:ppr, recency),
+  discounts them by position with `-weights`, and prints each scorer''s own rank beside
+  the fused one with `-breakdown`. `inspect` reads the index''s own bookkeeping: stats
+  with Len beside Stats so tombstones are visible, one document, a term''s postings, the
+  term space, the nearest vectors, the whole link graph, and `-analyze`, which needs no
+  index at all. `check` is `engine.Scrub`, which nothing in this repository had ever
+  called. `encode` prints the order-preserving term an integer or a time is indexed
+  under, without which a numeric range query cannot be written by hand.'
+time: 2026-09-06T10:00:00.000000000+09:00
+custom:
+  Issue: 26

@@ -59,10 +59,15 @@ var ErrMappingConflict = errors.New("opensearch: a field already has a different
 // and a JSON body does not, so something has to say which date is it, and a
 // mapping is the only place that knows a field's type at both index and query
 // time. scorer/recency reads Document.Time and nothing else.
+// Links is the same kind of extension, for the same reason and one signal
+// further along: engine.Document.Links is a set of document keys, and on the
+// wire that is a JSON array of strings — indistinguishable from any other array
+// of strings. scorer/graph reads Links and nothing else.
 type property struct {
 	Type      string `json:"type"`
 	Dimension int    `json:"dimension,omitempty"`
 	Recency   bool   `json:"recency,omitempty"`
+	Links     bool   `json:"links,omitempty"`
 }
 
 // mappingDoc is the file format, and it is also the wire format OpenSearch uses
@@ -132,13 +137,18 @@ func (m *Mapping) Type(field string) string {
 	return m.props[field].Type
 }
 
-// isVector and isRecency are the two singleton bindings: the field whose value
-// becomes engine.Document.Vector, and the one whose value becomes Document.Time.
+// isVector, isRecency and isLinks are the singleton bindings: the field whose
+// value becomes engine.Document.Vector, the one whose value becomes
+// Document.Time, and the one whose value becomes Document.Links.
 //
 // One each per index, because a document carries one of each — so a second
 // declaration is one this server could accept and then not honour.
+//
+// The comment on bound below said the third signal to want one would add a
+// predicate and no code. This is that third signal, and it did.
 func isVector(p property) bool  { return p.Type == typeKNNVector }
 func isRecency(p property) bool { return p.Recency }
+func isLinks(p property) bool   { return p.Links }
 
 // bound finds the field a singleton binding names, and it is the same search for
 // both of them: the third signal to want one adds a predicate and no code.
@@ -166,6 +176,12 @@ func (m *Mapping) Vector() (field string, dim int, ok bool) {
 // Recency reports the date field bound to engine.Document.Time.
 func (m *Mapping) Recency() (field string, ok bool) {
 	name, _, ok := m.bound(isRecency)
+	return name, ok
+}
+
+// Links reports the keyword field bound to engine.Document.Links.
+func (m *Mapping) Links() (field string, ok bool) {
+	name, _, ok := m.bound(isLinks)
 	return name, ok
 }
 
@@ -214,6 +230,7 @@ func (m *Mapping) merge(doc mappingDoc) error {
 		}{
 			{isVector(p), isVector, "a knn_vector (a document carries one engine.Document.Vector)"},
 			{isRecency(p), isRecency, "the recency field (a document carries one engine.Document.Time)"},
+			{isLinks(p), isLinks, "the links field (a document carries one engine.Document.Links)"},
 		} {
 			if other, _, ok := m.boundLocked(b.is); b.declared && ok && other != name {
 				return fmt.Errorf("%q cannot be %s because %q already is", name, b.what, other)
@@ -263,6 +280,11 @@ func validProperty(name string, p property) error {
 	if p.Recency && p.Type != typeDate {
 		return fmt.Errorf("recency belongs to a %s field and %q is %q: engine.Document.Time is a time, and a "+
 			"keyword bound to it would decay from a number that is not one", typeDate, name, p.Type)
+	}
+	if p.Links && p.Type != typeKeyword {
+		return fmt.Errorf("links belongs to a %s field and %q is %q: a link is another document's id, and an "+
+			"analysed field would hold whatever the tokenizer made of that id — edges named by terms, "+
+			"pointing at nothing", typeKeyword, name, p.Type)
 	}
 	return nil
 }

@@ -113,6 +113,11 @@ var oneShard = shardInfo{Total: 1, Successful: 1}
 const (
 	clusterName    = "weft"
 	keyClusterName = "cluster_name"
+
+	// keyShards is the field the constant above is reported under, spelled once
+	// for the reason keyClusterName is: several handlers write it, and a typo in
+	// one is a field a client silently does not find.
+	keyShards = "_shards"
 )
 
 // The `result` a write reports. Spelled once because bulk.go answers with the
@@ -188,6 +193,28 @@ func NewServer(reg *Registry, maxBody int64) *Server {
 
 	s.mux.HandleFunc("POST /{index}/_search", s.handle(s.search))
 	s.mux.HandleFunc("GET /{index}/_search", s.handle(s.search))
+
+	// Durability and maintenance. These carry OpenSearch's names because what
+	// weft does under them is honestly what those names mean: a flush is a
+	// commit, and a refresh can only be one too — a search here already reads the
+	// live index, so there is nothing else for it to make visible.
+	s.mux.HandleFunc("POST /{index}/_flush", s.handle(s.flush))
+	s.mux.HandleFunc("POST /{index}/_refresh", s.handle(s.flush))
+	s.mux.HandleFunc("GET /{index}/_refresh", s.handle(s.flush))
+	s.mux.HandleFunc("POST /{index}/_forcemerge", s.handle(s.forceMerge))
+	s.mux.HandleFunc("GET /{index}/_count", s.handle(s.count))
+	s.mux.HandleFunc("POST /{index}/_count", s.handle(s.count))
+	s.mux.HandleFunc("POST /{index}/_analyze", s.handle(s.analyze))
+	s.mux.HandleFunc("GET /{index}/_analyze", s.handle(s.analyze))
+
+	// Everything weft has and OpenSearch does not. The prefix is the same
+	// decision the weft_graph clause makes: a route OpenSearch has no name for
+	// gets a name OpenSearch does not use, so a client cannot arrive here by
+	// sending standard requests and cannot mistake the answers for standard ones.
+	s.mux.HandleFunc("GET /{index}/_weft/terms", s.handle(s.weftTerms))
+	s.mux.HandleFunc("GET /{index}/_weft/postings", s.handle(s.weftPostings))
+	s.mux.HandleFunc("POST /{index}/_weft/scrub", s.handle(s.weftScrub))
+	s.mux.HandleFunc("POST /{index}/_weft/query", s.handle(s.weftQuery))
 
 	// Routed so they are refused by name rather than by the catch-all 404. A 404
 	// on /_search/scroll reads as "wrong URL" and sends a client looking for a
@@ -600,6 +627,17 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) error {
 		return fmt.Errorf("search %q: %w", x.Name(), err)
 	}
 
+	writeHits(w, hits, total, exact, time.Since(start))
+	return nil
+}
+
+// writeHits is the search response, shared by every route that produces one.
+//
+// One function rather than two, because /_weft/query answers in the same shape:
+// a client reading both would otherwise be reading two dialects of it, and the
+// null-versus-empty-array rule below is exactly the detail that goes right in one
+// copy and wrong in the other.
+func writeHits(w http.ResponseWriter, hits []hit, total int, exact bool, took time.Duration) {
 	relation := "gte"
 	if exact {
 		relation = "eq"
@@ -616,14 +654,13 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) error {
 	// every client's latency dashboard, which is the failure D-026 confines to
 	// the handshake.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"took":      time.Since(start).Milliseconds(),
+		"took":      took.Milliseconds(),
 		"timed_out": false,
-		"_shards":   oneShard,
+		keyShards:   oneShard,
 		"hits": map[string]any{
 			"total":     map[string]any{"value": total, "relation": relation},
 			"max_score": maxScore,
 			"hits":      hits,
 		},
 	})
-	return nil
 }
