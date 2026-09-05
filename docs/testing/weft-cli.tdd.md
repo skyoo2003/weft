@@ -149,7 +149,8 @@ across the split.
 | 15 | A force merge keeps the corpus, and `max_num_segments` is refused rather than ignored | `internal/opensearch/admin_test.go:TestForceMergeKeepsTheCorpus`, `TestForceMergeTakesNoTarget` | integration | PASS |
 | 16 | `_count` with a query, and `_analyze` with a named analyzer, are refused with the reason | `internal/opensearch/admin_test.go` | integration | PASS |
 | 17 | `/_weft/query` runs weft's query string and reports a syntax error rather than an empty ranking | `internal/opensearch/admin_test.go:TestWeftQuery`, `TestWeftQueryReportsASyntaxError` | integration | PASS |
-| 18 | `pkg/` is unchanged, fusion imports no scorer, and the module has no dependencies | `make arch`, `make deps`, `git diff --stat main -- pkg/` | structural | PASS (0 lines) |
+| 18 | `opensearch-py` 3.2.0 still drives weftd unmodified after ten new routes and a new clause — 50 checks, including every refusal | `make compat PYTHON=<venv>/bin/python` | compatibility | PASS |
+| 19 | `pkg/` is unchanged, fusion imports no scorer, and the module has no dependencies | `make arch`, `make deps`, `git diff --stat main -- pkg/` | structural | PASS (0 lines) |
 
 ## Coverage
 
@@ -159,7 +160,21 @@ ok      github.com/skyoo2003/weft/cmd/weft    coverage: 88.8% of statements
 ok      github.com/skyoo2003/weft/internal/opensearch    coverage: 82.7% of statements
 ```
 
-255 tests across the two packages, both above the 80% line.
+255 tests across the two packages, both above the 80% line. Beyond them, `make compat`
+runs an official client against a live `weftd`:
+
+```text
+$ make compat PYTHON=/tmp/v/bin/python
+  ok  hybrid fuses a text stream and a vector stream
+  ok  three signals fuse in one query
+  ok  a search pipeline is refused with 400 (want 400)
+  ... 50 checks ...
+PASS: opensearch-py drove weftd unmodified.
+```
+
+That is milestone 24's judgment sentence, re-run after ten routes and a clause were
+added. It holding is the evidence the `/_weft/` namespace is invisible to a standard
+client, which is what D-033 is spending the prefix on.
 
 ## Known gaps
 
