@@ -95,8 +95,10 @@ var ledger = map[string]entry{
 	"engine.TopK":          {on: []string{surfWeftd}},
 	"engine.WithTokenizer": {on: []string{surfWeft}},
 
-	"engine.BlockCursor.Err":  {on: []string{surfWeft}},
-	"engine.BlockCursor.Next": {on: []string{surfWeft}},
+	// `.Err(` alone is satisfied by bufio.Scanner's, which the index command
+	// calls on stdin, so the cursor's own name is part of the proof here.
+	"engine.BlockCursor.Err":  {on: []string{surfWeft}, call: "cur.Err("},
+	"engine.BlockCursor.Next": {on: []string{surfWeft}, call: "cur.Next("},
 	"engine.Collector.Offer":  {why: collectorWhy},
 	"engine.Collector.Take":   {why: collectorWhy},
 

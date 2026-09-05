@@ -38,13 +38,16 @@ import (
 // what -h prints and what a leftover-argument error quotes back, so a drift
 // between the two tells an operator about a command they did not run.
 const (
-	cmdIndex  = "index"
-	cmdSearch = "search"
+	cmdIndex   = "index"
+	cmdSearch  = "search"
+	cmdInspect = "inspect"
+	cmdCheck   = "check"
+	cmdEncode  = "encode"
 )
 
 // subcommands is that same list in the order the help prints them, and is what
 // TestUsageListsEverySubcommand reads.
-var subcommands = []string{cmdIndex, cmdSearch}
+var subcommands = []string{cmdIndex, cmdSearch, cmdInspect, cmdCheck, cmdEncode}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -71,6 +74,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return report(stderr, indexCmd(rest, stdin, stdout, stderr))
 	case cmdSearch:
 		return report(stderr, searchCmd(rest, stdout, stderr))
+	case cmdInspect:
+		return report(stderr, inspectCmd(rest, stdout, stderr))
+	case cmdCheck:
+		return report(stderr, checkCmd(rest, stdout, stderr))
+	case cmdEncode:
+		return report(stderr, encodeCmd(rest, stdout, stderr))
 	case "help", "-h", "--help":
 		// Asking for the help is a request that succeeded; being handed it after
 		// typing nothing is a diagnostic. Different streams, different codes.
@@ -84,17 +93,24 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `usage: weft <index|search> [flags]
+	fmt.Fprint(w, `usage: weft <index|search|inspect|check|encode> [flags]
 
-  index   read documents as JSON lines on stdin, then commit them to -data.
-          One object per line: key, text, vector, links, time, fields. Deletes
-          and a segment merge happen in the same run, before the commit.
-  search  rank an index. Streams come from -scorers and from -q, weft's own
-          query string, and -weights discounts them by position. -breakdown
-          prints each scorer's own rank beside the fused one, which is how you
-          see that the fused order is nobody's order.
+  index    read documents as JSON lines on stdin, then commit them to -data.
+           One object per line: key, text, vector, links, time, fields. Deletes
+           and a segment merge happen in the same run, before the commit.
+  search   rank an index. Streams come from -scorers and from -q, weft's own
+           query string, and -weights discounts them by position. -breakdown
+           prints each scorer's own rank beside the fused one, which is how you
+           see that the fused order is nobody's order.
+  inspect  what the index says about itself: stats, one document, a term's
+           postings, the term space, the nearest vectors, the link graph, and
+           -analyze, which tokenizes text with no index at all.
+  check    verify a committed directory. Reports damage; repairs nothing,
+           because a re-index is the only repair weft has.
+  encode   print the order-preserving term an integer or a time is indexed
+           under, so a range bound can be written into -q by hand.
 
-Run either subcommand with -h for its flags. weft is not usable in production;
+Run any subcommand with -h for its flags. weft is not usable in production;
 docs/STATUS.md is the account.
 `)
 }
