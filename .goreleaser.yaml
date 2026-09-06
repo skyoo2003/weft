@@ -2,15 +2,16 @@ version: 2
 
 # What this ships and what it does not.
 #
-# It ships `cmd/weft`, the command line in front of the library. That is
-# genuinely all there is to ship: weft is a library, and a library is consumed
-# with `go get`, which needs no artefact from here. This file does not promote
-# the binary to a product — what the archives buy is that someone evaluating the
-# project can index a corpus and query it without a Go toolchain.
+# It ships `cmd/weft` and `cmd/weftd`, the two command lines in front of the
+# library. Neither is the product: weft is a library, and a library is consumed
+# with `go get`, which needs no artefact from here. What everything below buys
+# is that someone evaluating the project can index a corpus and query it
+# without a Go toolchain — from an archive, a Homebrew cask, or a container
+# image, whichever they already have the tooling for.
 #
-# No Docker image and no Homebrew tap. Both are distribution channels that have
-# to be maintained on a schedule this project cannot promise, and neither is on
-# the path of anyone deciding whether to depend on the library.
+# It does not ship `cmd/weft-eval`. That one drives the evaluation harness
+# against corpora it downloads, which is something a contributor does from a
+# checkout rather than something anyone installs.
 
 project_name: weft
 
@@ -37,7 +38,26 @@ builds:
     # metadata, so stamping would mean adding a symbol to main purely so that
     # this file had somewhere to write.
 
+  - id: weftd
+    main: ./cmd/weftd
+    binary: weftd
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
 archives:
+  # One archive, both binaries. No `ids:` filter, which is what makes that
+  # happen — a second archive would mean a second set of assets, a second
+  # checksum line and a second cask, to separate two files that weigh three
+  # megabytes together and that anyone trying weftd will want both of.
+  #
+  # v0.1.0's archive predates weftd and holds only `weft`. Nothing here can
+  # change that, and the Homebrew cask published for that tag says so.
   - id: weft
     formats: [tar.gz]
     format_overrides:
@@ -54,6 +74,76 @@ checksum:
 
 sboms:
   - artifacts: archive
+
+# Published to GitHub Packages. The tag is the only tag: no `latest`, and no
+# moving `v0.1` either. weft is v0.x, the API may break inside a minor, and
+# CHANGELOG.md says so — a tag that silently moves across a breaking change is
+# the one thing this repository's release procedure exists to avoid. Pin the
+# version you tested against.
+#
+# `--provenance=false` because attest-build-provenance in the workflow is what
+# signs the archives, and a second, differently-shaped attestation buried in
+# the image manifest would be two answers to one question. `sbom: false` for
+# the same reason: `sboms:` above already produces one per archive, and the
+# image holds the same binaries.
+dockers_v2:
+  - images:
+      - ghcr.io/skyoo2003/weft
+    dockerfile: Dockerfile.goreleaser
+    ids: [weft, weftd]
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    sbom: false
+    flags:
+      - "--provenance=false"
+    tags:
+      - "{{ .Tag }}"
+    labels:
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.source: "https://github.com/skyoo2003/weft"
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "Keyword, vector and graph search engine whose default operation is fusion"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.licenses: "Apache-2.0"
+
+# Published to skyoo2003/homebrew-tap. A cask rather than a formula because
+# GoReleaser deprecated `brews`, and because a formula that installs a
+# pre-built binary is what a cask has always been for. `brew install
+# skyoo2003/tap/weft` is the same either way, and weft has never been a formula
+# in that tap, so nothing needs a tap_migrations.json entry.
+#
+# The token is minted per job by the workflow. This repository's own
+# GITHUB_TOKEN cannot write to another repository, and a long-lived PAT would
+# be one more thing to rotate.
+homebrew_casks:
+  - ids: [weft]
+    binaries:
+      - weft
+      - weftd
+    repository:
+      owner: skyoo2003
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/skyoo2003/weft"
+    description: "Keyword, vector and graph search engine whose default operation is fusion"
+    license: "Apache-2.0"
+    # Nothing signs or notarizes these binaries, so Gatekeeper quarantines what
+    # the cask staged and the first run dies on a dialog rather than an error.
+    # Stripping the attribute is what makes an unsigned cask runnable; it is
+    # not an optional nicety.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/weft"]
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/weftd"]
+          end
+    caveats: |
+      weftd has no authentication and no TLS, and binds 127.0.0.1 for that
+      reason. This is not production software — see the Status and Limitations
+      sections of https://github.com/skyoo2003/weft.
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"

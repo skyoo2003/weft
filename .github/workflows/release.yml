@@ -4,9 +4,12 @@ name: Release
 # tag it reports rather than prevents. RELEASE.md is where the prevention
 # lives: confirm the commit is green, then tag it.
 #
-# The one thing this does refuse outright is a tag with no batched changie file.
-# That check belongs here rather than in CI because it is a release-time fact —
-# a commit is not wrong for lacking changes/v0.1.0.md until someone tags it.
+# Two things it does refuse outright, both within seconds and both for the same
+# reason: they are release-time facts, so CI cannot judge them. A commit is not
+# wrong for lacking changes/v0.1.0.md until someone tags it, and it is not wrong
+# for lacking a tap credential until someone asks it to publish a cask. Refusing
+# early is what keeps a missing secret from surfacing five minutes in, after
+# everything has been built and half of it published.
 
 on:
   push:
@@ -20,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write     # create the GitHub release and upload archives
+      packages: write     # push the container image to ghcr.io
       id-token: write     # keyless signing material for the attestation
       attestations: write # provenance for the archives
     steps:
@@ -41,10 +45,48 @@ jobs:
             exit 1
           fi
 
+      # Read as a value rather than tested with `secrets.X != ''`, because a
+      # workflow-level `if:` on a secret is exactly the shape that silently
+      # evaluates false and skips the step that was supposed to complain.
+      - name: Verify the Homebrew tap credentials exist
+        env:
+          TAP_APP_ID: ${{ secrets.TAP_APP_ID }}
+          TAP_APP_PRIVATE_KEY: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAP_APP_ID" ] || [ -z "$TAP_APP_PRIVATE_KEY" ]; then
+            echo "::error::TAP_APP_ID and TAP_APP_PRIVATE_KEY are not both set on this repository."
+            echo "::error::Install the tap GitHub App here, add both secrets, then re-run this workflow. See RELEASE.md."
+            exit 1
+          fi
+
       # `sboms:` in .goreleaser.yaml shells out to syft, which a clean runner
       # does not have. Without this the release fails after the archives are
       # built and before anything is published.
       - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # sbom-action v0.24.2
+
+      # No QEMU and no binfmt step. Dockerfile.goreleaser's final stage is
+      # COPY-only, so buildx assembles linux/arm64 on this amd64 runner without
+      # emulating anything. The Dockerfile says the same at the top, and the
+      # two have to stay true together.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # setup-buildx-action v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # login-action v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Expires with the job and can write to skyoo2003/homebrew-tap and
+      # nothing else. GITHUB_TOKEN above cannot reach another repository at
+      # all, which is the whole reason this step exists.
+      - name: Mint a Homebrew tap token
+        id: tap_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.TAP_APP_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: skyoo2003
+          repositories: homebrew-tap
 
       - name: Execute GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # goreleaser-action v7.2.3
@@ -54,6 +96,7 @@ jobs:
           args: release --clean --release-notes changes/${{ github.ref_name }}.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ steps.tap_token.outputs.token }}
 
       # The permissions above only authorize an attestation; this step is what
       # makes one. Named against the archives rather than checksums.txt so that
