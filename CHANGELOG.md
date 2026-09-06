@@ -16,6 +16,12 @@ Those three have kinds of their own below. A release that moved none of them and
 
 Entries are written with [changie](https://changie.dev) as the change is made, not reconstructed at release time. `make changelog-new` adds one.
 
+## Unreleased
+
+### Documentation
+
+- Every document is about half as long and says the same things. 17,198 lines become 7,240, and nothing measured was dropped — every figure, interval, verdict and falsification condition survives. What was cut is density: a sentence now carries one fact where it used to carry four joined by em-dashes, and a table cell is one line with the argument moved below the table. The 35 decision records share one metadata format instead of four and one structure — question, decision, why, what would show it wrong — with an index at the top; FORMAT's thirty-row rejection table is five tables by subject; PERF's graded prediction moved to the end, where it stopped interrupting the procedure it grades; and FINDINGS keeps its per-milestone verdict blocks and loses the asides between them. Three stale numbers were corrected against the code that decides them. The DSL refusal rate was published as 8 of 25 rows in the README and 5 of 25 in LIMITATIONS, and `TestTheRefusalRateIsCounted` logs 6 of 25, 24.0% — both now say that and name the six rows, while FINDINGS milestone 25 keeps the figure it measured at the time and carries a dated correction, because it is an append-only record. ARCHITECTURE claimed 2,753 implementation and 5,138 test lines under `pkg/` against an actual 11,039 and 15,427, and the counting method is now written down beside the figure rather than left to be guessed. The layout tree was missing `cmd/weftd`, `internal/opensearch` and `grpc/`. No exported API moved and no `.go` file was touched. ([#31](https://github.com/skyoo2003/weft/issues/31))
+
 ## [v0.1.0](https://github.com/skyoo2003/weft/releases/tag/v0.1.0) - 2026-09-06
 
 ### Exported API
