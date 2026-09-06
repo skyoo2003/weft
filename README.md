@@ -103,6 +103,7 @@ Each document answers one question, and only that one.
 | What does it *not* do? | [LIMITATIONS](docs/LIMITATIONS.md) |
 | How is the module shaped? | [ARCHITECTURE](docs/ARCHITECTURE.md) |
 | How do I plug my own signal in? | [SCORERS](docs/SCORERS.md) |
+| How do I ask it something OpenSearch cannot express? | [API](docs/API.md) |
 | What was actually measured, milestone by milestone? | [FINDINGS](docs/FINDINGS.md) |
 | What was decided, and why is it expensive to reverse? | [DECISIONS](docs/DECISIONS.md) |
 | What is on disk? | [FORMAT](docs/FORMAT.md) |

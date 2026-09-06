@@ -2320,3 +2320,74 @@ invisible to everyone who did not read this file. If adopters keep asking for a 
 been reachable under `/_weft/` for months, the prefix is not carrying the meaning it was supposed
 to carry, and the answer is documentation on the route that would have been sent anyway — not a
 second name for it.
+
+---
+
+## D-034 — The native surface is a second spelling, not a second engine
+
+**Date**: 2026-09-06 · **Milestone**: 30 · **Status**: accepted
+
+### The question
+
+A surface of weft's own was going to need three things the OpenSearch DSL cannot express: a
+request that *is* a positional stream list, a per-hit pre-fusion breakdown, and a fusion depth
+separate from the page size. The plan for it put those in a new package, `internal/weftapi`, with
+its own request types and its own stream parser — four stream kinds named after the four signals.
+
+Reading the code first made that plan wrong in three places at once, and the three have one cause.
+
+### The decision
+
+**`internal/opensearch/native.go`, mounted at `POST /{index}/_weft/search`, compiling streams with
+the compiler `_search` already has.**
+
+| The plan said | It is | Because |
+| --- | --- | --- |
+| a new package, `internal/weftapi` | a file in `internal/opensearch` | `compiler`, `plan`, `runSearch` and `apiError` are unexported. A new package would have had to export them or copy them, and `admin.go` already hosts `/_weft/*` in this package |
+| a parser for four stream kinds | `compiler.clause`, reused | eleven leaf kinds are streams on the day they land on `_search`, and there is no second list to keep in step |
+| the prefix `/_weft/v1/` | `/{index}/_weft/search` | the four routes that predate it are unversioned, there is no released tag yet, and a version segment nothing has needed is speculative |
+
+`hybrid`'s own loop moved out to `compiler.streams` and both callers share it. That is the finding
+under all three rows: **`hybrid` was always a wrapper around a stream list**, so the native surface
+is that list with the wrapper taken off rather than a new thing beside it.
+
+### What the shared compiler buys, and what it cost
+
+It buys the property that makes this a spelling and not an engine: a clause that works on one
+surface works on the other by being cut and pasted, every refusal is inherited rather than
+re-listed, and a signal added to `_search` is a native stream the same day. `pkg/` changed zero
+lines and `opensearch-py` still drives `weftd` unmodified.
+
+It cost one defect, and the defect is worth the record because the plan's separate parser would
+not have had it — it would have had a different one. A `streams` entry is not a scorer: a
+two-token `match` is two `query.Glob` streams, so the list the fuser sees is longer than the list
+the client wrote. The first cut of the breakdown truncated the scorer row to the entry count,
+which put **the second entry's rank under the first entry's label, for every multi-token query,
+silently**. That is D-028 arriving in a new place — the same finding that cost milestone 25 an
+`anyOf` when `bool.must` met it, and the second time this repository has paid for the gap between
+a clause and a stream.
+
+`compiler.streams` now returns the grouping, and the fold takes the best rank when an entry became
+several streams. Not an average: an average is a score by another name, and this engine never
+compares scores across streams.
+
+### Why the breakdown reads positions and nothing else
+
+A breakdown that knew stream 2 was a vector would be a fifth place to edit when a sixth signal
+arrives — and the whole claim being re-tested here is that there is no such place.
+`TestTheNativeFusionPathKnowsNoScorer` reads `native.go`'s AST and fails if `capture` or `rankOf`
+mentions a scorer constructor, which is the same lock
+`TestTheFusionCodeDoesNotKnowAboutTheFourthSignal` puts on `search.go`.
+
+### What would show this decision was wrong
+
+**A refusal that has to differ between the two surfaces.** Sharing the compiler means sharing
+every "no", and the bet is that a refusal is a property of the engine rather than of the protocol.
+If a native request needs to be allowed where the same clause is refused on `_search` — or refused
+where it is allowed — then the two surfaces do not share a semantics, only a parser, and the file
+should become the package the plan asked for.
+
+The weaker signal is the one D-025 registered and this makes cheaper to trip: a capability that
+lands on the native route and never reaches a `go get` user. The native surface is closer to the
+library's own shape than the compatibility surface is, which makes it a more tempting place to put
+something that belongs in `pkg/`.
