@@ -1097,7 +1097,8 @@ func (c *compiler) hybridQuery(body json.RawMessage) *apiError {
 	if len(h.Queries) == 0 {
 		return badRequest("parsing_exception", "a hybrid clause names no queries, so there is nothing to fuse")
 	}
-	return c.streams(h.Queries, h.Weights, "sub-query")
+	_, err := c.streams(h.Queries, h.Weights, "sub-query")
+	return err
 }
 
 // streams compiles a positional list of one-clause queries onto the plan, with an
@@ -1117,13 +1118,27 @@ func (c *compiler) hybridQuery(body json.RawMessage) *apiError {
 // gives them positions and `weigh` attaches a number to a position — so a signal
 // that does not exist yet costs this function zero lines, which is milestone 1's
 // claim standing on the far side of two protocols instead of one.
-func (c *compiler) streams(queries []map[string]json.RawMessage, weights []float64, noun string) *apiError {
+//
+// # The returned grouping, and the bug it exists to have already fixed
+//
+// groups maps a *scorer* position to the *entry* that produced it, and it is
+// returned because those two are not the same list. A two-token match is two
+// query.Glob streams, so one entry can be several positions — D-028's finding,
+// which cost milestone 25 an `anyOf` when `bool.must` met it.
+//
+// The hybrid caller ignores this, correctly: `weigh` already spends one weight
+// per scorer, so a client weighting a clause weights every stream the clause
+// became. The native surface cannot ignore it, because it reports a column per
+// entry the client wrote — and without this mapping the second entry's rank
+// would be printed under the first entry's label for every multi-token query.
+func (c *compiler) streams(queries []map[string]json.RawMessage, weights []float64, noun string) ([]int, *apiError) {
 	if weights != nil && len(weights) != len(queries) {
-		return badRequest(kindIllegalArgument,
+		return nil, badRequest(kindIllegalArgument,
 			"%d weights over %d entries: a weight is positional, so an unequal list would weight a %s the "+
 				"client did not mean", len(weights), len(queries), noun)
 	}
 
+	var groups []int
 	for i, one := range queries {
 		if len(one) != 1 {
 			names := make([]string, 0, len(one))
@@ -1131,9 +1146,10 @@ func (c *compiler) streams(queries []map[string]json.RawMessage, weights []float
 				names = append(names, name)
 			}
 			slices.Sort(names)
-			return badRequest("parsing_exception",
+			return nil, badRequest("parsing_exception",
 				"%s %d holds %d clauses and it holds exactly one (%v)", noun, i, len(names), names)
 		}
+		start := len(c.p.scorers)
 		for name, sub := range one {
 			if name == clauseBool {
 				// A bool sub-query is compiled in place, so its constraints land
@@ -1142,17 +1158,17 @@ func (c *compiler) streams(queries []map[string]json.RawMessage, weights []float
 				// than a fusion of its own.
 				before := len(c.p.scorers)
 				if err := c.boolQuery(sub); err != nil {
-					return err
+					return nil, err
 				}
 				c.weigh(weights, i, before)
 				continue
 			}
 			cl, err := c.clause(name, sub)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if len(cl.scorers) == 0 {
-				return badRequest("parsing_exception",
+				return nil, badRequest("parsing_exception",
 					"%s %d (%s) holds no term this index could have indexed, so it contributes no stream "+
 						"and the weights would shift under the client", noun, i, name)
 			}
@@ -1163,8 +1179,11 @@ func (c *compiler) streams(queries []map[string]json.RawMessage, weights []float
 			}
 			c.weigh(weights, i, before)
 		}
+		for range len(c.p.scorers) - start {
+			groups = append(groups, i)
+		}
 	}
-	return nil
+	return groups, nil
 }
 
 // weigh gives every stream a sub-query produced that sub-query's weight.

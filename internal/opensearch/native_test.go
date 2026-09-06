@@ -242,6 +242,53 @@ func TestNativeBreakdownReportsPreFusionRanks(t *testing.T) {
 	}
 }
 
+// A column per stream the client wrote, not per scorer the clause became.
+//
+// This is D-028's trap arriving in the breakdown. A two-token match is two
+// query.Glob streams, so the fused stream list is longer than the list in the
+// request — and a breakdown that reported scorer positions under stream labels
+// would be off by one from the second entry onwards, silently, for exactly the
+// queries a person is most likely to send.
+//
+// "rank fusion" is two tokens and both are in rrf alone; "pottery" is one token
+// and is in pottery alone. So entry 0 nominates rrf, entry 1 nominates pottery,
+// and the answer has two columns however many scorers ran underneath.
+func TestNativeBreakdownHasOneColumnPerStreamNotPerScorer(t *testing.T) {
+	srv := dslCorpus(t)
+
+	res := nativeResponse(t, srv, `{"streams":[
+		{"match":{"text":"rank fusion"}},
+		{"match":{"text":"pottery"}}],"size":5,"breakdown":true}`)
+
+	got := map[string][]*int{}
+	for _, h := range res.Hits.Hits {
+		got[h.ID] = h.Breakdown
+	}
+	for id, want := range map[string][2]bool{
+		"rrf":     {true, false},
+		"pottery": {false, true},
+	} {
+		b, ok := got[id]
+		if !ok {
+			t.Errorf("%q is not in the hits %v", id, res.ids())
+			continue
+		}
+		if len(b) != 2 {
+			t.Errorf("%q has %d breakdown columns; the request named 2 streams, and a column per scorer "+
+				"would put the second stream's rank under the first stream's label", id, len(b))
+			continue
+		}
+		for i, present := range want {
+			if present && b[i] == nil {
+				t.Errorf("%q: stream %d nominated it but the breakdown says null", id, i)
+			}
+			if !present && b[i] != nil {
+				t.Errorf("%q: stream %d did not nominate it but the breakdown says rank %d", id, i, *b[i])
+			}
+		}
+	}
+}
+
 // Not asked for, not paid for. A response without breakdown carries no breakdown
 // field at all rather than a column of nulls.
 func TestNativeBreakdownIsAbsentUnlessAsked(t *testing.T) {

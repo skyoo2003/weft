@@ -3,7 +3,10 @@
 package opensearch
 
 import (
+	"encoding/json"
 	"testing"
+
+	"github.com/skyoo2003/weft/pkg/engine"
 )
 
 // fuzzIndex is a one-document index built without going through HTTP, because a
@@ -94,6 +97,85 @@ func FuzzParseDSL(f *testing.F) {
 		// outcome — a malformed glob is reported by Candidates rather than at parse
 		// time — so what this asserts is that the line after it is reached at all.
 		_, _, _, _ = runSearch(t.Context(), x, p)
+	})
+}
+
+// FuzzParseNative is the same argument for the third body this server reads.
+//
+// The native surface shares a compiler with the DSL, so what is new here is not
+// the clauses — it is the position arithmetic around them. A request names N
+// entries, the compiler turns them into M scorers with M >= N, the fuser is
+// handed M streams, and the breakdown has to come back out with N columns. Four
+// lengths that have to agree, and the two that disagreed on the first multi-token
+// query are the ones TestNativeBreakdownHasOneColumnPerStreamNotPerScorer now
+// pins: `groups` exists because they did.
+//
+// # What a failure looks like
+//
+// An index out of range in rankOf, a column count that is not the entry count, or
+// a rank pointing past the end of a stream. None of those is reachable from the
+// table tests, because a table test writes the entries it already believes in.
+func FuzzParseNative(f *testing.F) {
+	f.Add(`{"streams":[{"match":{"text":"rank fusion"}}]}`)
+	f.Add(`{"streams":[{"match":{"text":"a b c"}},{"term":{"tag":"published"}}],"weights":[1,0.1],"breakdown":true}`)
+	f.Add(`{"streams":[{"bool":{"must":[{"match":{"text":"a"}}],"filter":[{"term":{"tag":"x"}}]}}],"breakdown":true}`)
+	f.Add(`{"streams":[{"range":{"views":{"gte":0}}}],"size":1,"from":0,"depth":10000,"breakdown":true}`)
+	f.Add(`{"streams":[],"weights":[1]}`)
+	f.Add(`{"streams":[{"match":{"text":"a"}}],"depth":-1}`)
+	f.Add("")
+
+	x := fuzzIndex(f)
+
+	f.Fuzz(func(t *testing.T, body string) {
+		var req nativeRequest
+		if body != "" && json.Unmarshal([]byte(body), &req) != nil {
+			return // the handler answers this with a 400 and never reaches the plan
+		}
+		if len(req.Streams) == 0 {
+			return
+		}
+
+		p := plan{size: defaultSize}
+		if apiErr := readNativeWindow(&p, req); apiErr != nil {
+			if apiErr.status < 400 || apiErr.reason == "" {
+				t.Fatalf("refusal with status %d and reason %q for %q", apiErr.status, apiErr.reason, body)
+			}
+			return
+		}
+		c := &compiler{ix: x.Engine(), m: x.Mapping(), p: &p}
+		groups, apiErr := c.streams(req.Streams, req.Weights, "stream")
+		if apiErr != nil {
+			if apiErr.status < 400 || apiErr.reason == "" {
+				t.Fatalf("refusal with status %d and reason %q for %q", apiErr.status, apiErr.reason, body)
+			}
+			return
+		}
+		// One entry per scorer, which is what the breakdown's column count rests
+		// on. A clause that added a stream without the loop noticing would break
+		// this here rather than in a client's display.
+		if len(groups) != len(p.scorers) {
+			t.Fatalf("%d groups for %d scorers in %q", len(groups), len(p.scorers), body)
+		}
+
+		ranks := map[engine.DocID][]int{}
+		p.fuse = capture(p.fuser(), ranks)
+		hits, _, _, err := runSearch(t.Context(), x, p)
+		if err != nil {
+			return // a malformed glob is reported by Candidates, not at parse time
+		}
+		attach(x, hits, ranks, groups, len(req.Streams))
+
+		for _, h := range hits {
+			if len(h.Breakdown) != len(req.Streams) {
+				t.Fatalf("hit %q has %d breakdown columns for %d streams in %q",
+					h.ID, len(h.Breakdown), len(req.Streams), body)
+			}
+			for i, at := range h.Breakdown {
+				if at != nil && *at < 0 {
+					t.Fatalf("hit %q reports rank %d in stream %d for %q", h.ID, *at, i, body)
+				}
+			}
+		}
 	})
 }
 

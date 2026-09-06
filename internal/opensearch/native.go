@@ -92,7 +92,8 @@ func (s *Server) nativeSearch(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	c := &compiler{ix: x.Engine(), m: x.Mapping(), p: &p}
-	if apiErr := c.streams(req.Streams, req.Weights, "stream"); apiErr != nil {
+	groups, apiErr := c.streams(req.Streams, req.Weights, "stream")
+	if apiErr != nil {
 		return apiErr
 	}
 
@@ -112,7 +113,7 @@ func (s *Server) nativeSearch(w http.ResponseWriter, r *http.Request) error {
 		return fmt.Errorf("native search %q: %w", x.Name(), err)
 	}
 	if req.Breakdown {
-		attach(x, hits, ranks, len(req.Streams))
+		attach(x, hits, ranks, groups, len(req.Streams))
 	}
 
 	writeHits(w, hits, total, exact, time.Since(start))
@@ -195,20 +196,44 @@ func capture(inner engine.Fuser, into map[engine.DocID][]int) engine.Fuser {
 	}
 }
 
-// rankOf turns one document's row into what the wire carries: a rank per stream
-// position, and null where that stream had no opinion.
+// rankOf folds one document's row of scorer ranks into what the wire carries: a
+// rank per *entry the client wrote*, and null where that entry had no opinion.
 //
-// A null and not a zero, and not the length of the stream either. "Absent" is a
-// third thing — the `-` column in examples/breakdown — and encoding it as a
-// number would make a document no stream nominated look like one every stream
-// ranked first.
-func rankOf(row []int, streams int) []*int {
-	out := make([]*int, streams)
-	for i := range row {
-		if i >= streams || row[i] < 0 {
+// The fold is the whole function, and it is here because the two lists are not
+// the same length. groups says which entry each scorer position came from, so a
+// two-token match — two query.Glob streams under one entry — reports one column
+// and not two. Without it the second entry's rank appears under the first
+// entry's label, for every multi-token query, silently.
+//
+// The best rank wins when an entry became several streams. "Where did this
+// stream put the document" has one honest answer when the stream is three token
+// scorers, and it is the nearest one of them to the top: the alternatives are an
+// average, which is a score by another name and this engine does not compare
+// scores, or the first position, which would depend on token order.
+//
+// A null and not a zero, and not the stream length either. "Absent" is a third
+// thing — the `-` column in examples/breakdown — and encoding it as a number
+// would make a document nothing nominated look like one everything ranked first.
+func rankOf(row, groups []int, entries int) []*int {
+	best := make([]int, entries)
+	for i := range best {
+		best[i] = -1
+	}
+	for at, entry := range groups {
+		if at >= len(row) || entry >= entries || row[at] < 0 {
 			continue
 		}
-		out[i] = &row[i]
+		if best[entry] < 0 || row[at] < best[entry] {
+			best[entry] = row[at]
+		}
+	}
+
+	out := make([]*int, entries)
+	for i := range best {
+		if best[i] < 0 {
+			continue
+		}
+		out[i] = &best[i]
 	}
 	return out
 }
@@ -221,16 +246,16 @@ func rankOf(row []int, streams int) []*int {
 // single caller.
 //
 // A hit with no row still gets a full row of nulls rather than no field: the
-// column count is the stream count, and a short row would have a client index
+// column count is the entry count, and a short row would have a client index
 // past the end of one document's breakdown and not another's.
-func attach(x *Index, hits []hit, ranks map[engine.DocID][]int, streams int) {
+func attach(x *Index, hits []hit, ranks map[engine.DocID][]int, groups []int, entries int) {
 	ix := x.Engine()
 	for i := range hits {
 		id, live := ix.Resolve(hits[i].ID)
 		if !live {
-			hits[i].Breakdown = rankOf(nil, streams)
+			hits[i].Breakdown = rankOf(nil, groups, entries)
 			continue
 		}
-		hits[i].Breakdown = rankOf(ranks[id], streams)
+		hits[i].Breakdown = rankOf(ranks[id], groups, entries)
 	}
 }

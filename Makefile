@@ -123,6 +123,7 @@ fuzz:
 	go test -fuzz=FuzzSegmentDecoding -fuzztime=$(FUZZTIME) -run '^$$' ./pkg/engine
 	go test -fuzz=FuzzParseSection -fuzztime=$(FUZZTIME) -run '^$$' ./pkg/engine
 	go test -fuzz=FuzzParseDSL -fuzztime=$(FUZZTIME) -run '^$$' ./internal/opensearch
+	go test -fuzz=FuzzParseNative -fuzztime=$(FUZZTIME) -run '^$$' ./internal/opensearch
 	go test -fuzz=FuzzParseBulk -fuzztime=$(FUZZTIME) -run '^$$' ./internal/opensearch
 
 # Every .go file carries its licence in a line a machine can find, which is
