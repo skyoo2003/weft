@@ -1,0 +1,5 @@
+kind: Documentation
+body: 'A changelog entry is one sentence now — two when the second says what you have to do about the first — and `changie` refuses a body past 500 characters, so the rule is enforced by `make changelog-new` rather than noticed in review. The 58 entries already written were rewritten to it: every figure and issue link survives, the file is 27.8 KB from 63.8 KB, and the argument each entry used to carry now sits in its pull request and in `docs/`.'
+time: 2026-09-06T19:04:20.826996+09:00
+custom:
+    Issue: "32"

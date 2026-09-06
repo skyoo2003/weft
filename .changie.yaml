@@ -30,9 +30,18 @@ newlines:
   # as a mismatch on every run — a check failing on what its own fixer did.
   endOfVersion: 1
 
+# One sentence. Two if the change forces work on a caller and the second one
+# says what to do about it. An entry is read in a list of other entries, so what
+# belongs here is the claim — the argument for it goes in the pull request, and
+# the mechanism in `docs/`, where it can be linked to rather than repeated.
+#
+# maxLength is that rule as something `changie new` refuses rather than
+# something a reviewer has to notice: 500 characters is a generous two sentences
+# and a miserly three, so it fires on the entry that turned into a paragraph.
 body:
   block: true
   minLength: 5
+  maxLength: 500
 
 # The first three are the ones the header calls out: they are what a caller can
 # be forced to act on. The rest exist so that a change genuinely worth

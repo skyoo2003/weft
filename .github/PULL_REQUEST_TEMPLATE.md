@@ -27,6 +27,10 @@ Example:
 - Removed duplicated validation logic from handlers
 - Standardized error wrapping and propagation
 - Added unit tests for the new validation behavior
+
+If a caller can notice this change, add a changelog entry with
+`make changelog-new`. One sentence, two when the second says what to do
+about the first; changie refuses a body past 500 characters.
 -->
 
 -
