@@ -53,7 +53,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # codeql-action v4
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938  # codeql-action v4
         with:
           languages: go
           # autobuild is `go build ./...` here, which is all the root module
@@ -63,6 +63,6 @@ jobs:
           # weft did not write.
           build-mode: autobuild
 
-      - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # codeql-action v4
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938  # codeql-action v4
         with:
           category: '/language:go'
