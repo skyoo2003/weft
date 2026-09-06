@@ -78,7 +78,7 @@ func (r nativeResult) ids() []string {
 
 // nativeRefusal runs a native search that is expected to fail and returns the
 // status and the reason, so a test can assert the client was told why.
-func nativeRefusal(t *testing.T, srv *httptest.Server, body string) (int, string) {
+func nativeRefusal(t *testing.T, srv *httptest.Server, body string) (status int, reason string) {
 	t.Helper()
 	status, raw := do(t, srv, http.MethodPost, "/papers/_weft/search", body)
 	var res struct {
@@ -149,18 +149,30 @@ func TestNativeWeightsArePositional(t *testing.T) {
 
 	streams := `{"match":{"text":"pottery"}},{"match":{"text":"fusion"}}`
 	even := nativeResponse(t, srv, `{"streams":[`+streams+`],"size":5}`)
-	tilted := nativeResponse(t, srv, `{"streams":[`+streams+`],"weights":[0.01,1],"size":5}`)
+	first := nativeResponse(t, srv, `{"streams":[`+streams+`],"weights":[1,0.01],"size":5}`)
+	second := nativeResponse(t, srv, `{"streams":[`+streams+`],"weights":[0.01,1],"size":5}`)
 
-	evenIDs, tiltedIDs := even.ids(), tilted.ids()
+	// Each stream nominates one document and each nominates it at rank 0, so an
+	// unweighted fusion is a tie broken by something neither stream said. The
+	// assertion is therefore between the two *weighted* runs rather than against
+	// the unweighted one: whichever way the tie falls, discounting one side has
+	// to lead with one document and discounting the other has to lead with the
+	// other. A test that read the unweighted leader would be asserting on the
+	// tiebreak.
+	if first.ids()[0] == second.ids()[0] {
+		t.Errorf("weights [1,0.01] and [0.01,1] both lead with %q: the weights did not reach "+
+			"fusion.FuseWeighted", first.ids()[0])
+	}
+
+	// And a weight votes, it does not filter. Discounting a stream to a hundredth
+	// must not remove anything it nominated — 0 would, which is D-029's trap and
+	// the reason a filter is not spelled as a weight.
+	evenIDs, tiltedIDs := even.ids(), second.ids()
 	slices.Sort(evenIDs)
 	slices.Sort(tiltedIDs)
 	if !slices.Equal(evenIDs, tiltedIDs) {
-		t.Fatalf("weights changed the eligible set from %v to %v: a weight votes, it does not filter",
+		t.Errorf("weights changed the eligible set from %v to %v: a weight votes, it does not filter",
 			evenIDs, tiltedIDs)
-	}
-	if even.ids()[0] == tilted.ids()[0] {
-		t.Errorf("both rankings lead with %q; discounting stream 0 to a hundredth changed nothing, so the "+
-			"weights did not reach fusion.FuseWeighted", even.ids()[0])
 	}
 }
 

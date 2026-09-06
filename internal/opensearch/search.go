@@ -1097,13 +1097,34 @@ func (c *compiler) hybridQuery(body json.RawMessage) *apiError {
 	if len(h.Queries) == 0 {
 		return badRequest("parsing_exception", "a hybrid clause names no queries, so there is nothing to fuse")
 	}
-	if h.Weights != nil && len(h.Weights) != len(h.Queries) {
+	return c.streams(h.Queries, h.Weights, "sub-query")
+}
+
+// streams compiles a positional list of one-clause queries onto the plan, with an
+// optional weight per entry.
+//
+// Two callers and one body, which is the honest shape of what milestone 30 found:
+// `hybrid` was always a wrapper around a stream list, and the native surface is
+// that list with the wrapper taken off. Had this stayed inside hybridQuery the
+// native route would have grown a second copy of it, and a second copy is where
+// the two surfaces begin disagreeing about what a weight attaches to.
+//
+// noun is what one entry is called in a refusal: a hybrid clause has sub-queries
+// and a native request has streams. It is the only thing the two callers differ
+// by, and it reaches nothing but the error text.
+//
+// Nothing here branches on what a clause produced. `clause` returns scorers, `add`
+// gives them positions and `weigh` attaches a number to a position — so a signal
+// that does not exist yet costs this function zero lines, which is milestone 1's
+// claim standing on the far side of two protocols instead of one.
+func (c *compiler) streams(queries []map[string]json.RawMessage, weights []float64, noun string) *apiError {
+	if weights != nil && len(weights) != len(queries) {
 		return badRequest(kindIllegalArgument,
-			"a hybrid clause has %d queries and %d weights: a weight is positional, so an unequal list "+
-				"would weight a query the client did not mean", len(h.Queries), len(h.Weights))
+			"%d weights over %d entries: a weight is positional, so an unequal list would weight a %s the "+
+				"client did not mean", len(weights), len(queries), noun)
 	}
 
-	for i, one := range h.Queries {
+	for i, one := range queries {
 		if len(one) != 1 {
 			names := make([]string, 0, len(one))
 			for name := range one {
@@ -1111,7 +1132,7 @@ func (c *compiler) hybridQuery(body json.RawMessage) *apiError {
 			}
 			slices.Sort(names)
 			return badRequest("parsing_exception",
-				"query %d of the hybrid holds %d clauses and it holds exactly one (%v)", i, len(names), names)
+				"%s %d holds %d clauses and it holds exactly one (%v)", noun, i, len(names), names)
 		}
 		for name, sub := range one {
 			if name == clauseBool {
@@ -1123,7 +1144,7 @@ func (c *compiler) hybridQuery(body json.RawMessage) *apiError {
 				if err := c.boolQuery(sub); err != nil {
 					return err
 				}
-				c.weigh(h.Weights, i, before)
+				c.weigh(weights, i, before)
 				continue
 			}
 			cl, err := c.clause(name, sub)
@@ -1132,15 +1153,15 @@ func (c *compiler) hybridQuery(body json.RawMessage) *apiError {
 			}
 			if len(cl.scorers) == 0 {
 				return badRequest("parsing_exception",
-					"query %d of the hybrid (%s) holds no term this index could have indexed, so it "+
-						"contributes no stream and the weights would shift under the client", i, name)
+					"%s %d (%s) holds no term this index could have indexed, so it contributes no stream "+
+						"and the weights would shift under the client", noun, i, name)
 			}
 			before := len(c.p.scorers)
 			at := c.add(cl.scorers...)
 			if cl.requireAll {
 				c.p.must = append(c.p.must, at...)
 			}
-			c.weigh(h.Weights, i, before)
+			c.weigh(weights, i, before)
 		}
 	}
 	return nil

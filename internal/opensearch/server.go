@@ -73,11 +73,19 @@ func badRequest(kind, format string, a ...any) *apiError {
 }
 
 // hit is one search result.
+//
+// Breakdown is the one field only the native surface ever fills: where each
+// stream placed this document before fusion saw any of them. It is on the shared
+// struct rather than on a native-only copy of it because omitempty makes it cost
+// the compatibility surface nothing — a hit that was not asked for a breakdown
+// encodes byte for byte as it did before this field existed, which
+// TestNativeBreakdownIsAbsentUnlessAsked and `make compat` are what hold.
 type hit struct {
-	Index  string          `json:"_index"`
-	ID     string          `json:"_id"`
-	Score  float64         `json:"_score"`
-	Source json.RawMessage `json:"_source"`
+	Index     string          `json:"_index"`
+	ID        string          `json:"_id"`
+	Score     float64         `json:"_score"`
+	Source    json.RawMessage `json:"_source"`
+	Breakdown []*int          `json:"breakdown,omitempty"`
 }
 
 func newHit(x *Index, id string, score float64) hit {
@@ -215,6 +223,7 @@ func NewServer(reg *Registry, maxBody int64) *Server {
 	s.mux.HandleFunc("GET /{index}/_weft/postings", s.handle(s.weftPostings))
 	s.mux.HandleFunc("POST /{index}/_weft/scrub", s.handle(s.weftScrub))
 	s.mux.HandleFunc("POST /{index}/_weft/query", s.handle(s.weftQuery))
+	s.mux.HandleFunc("POST /{index}/_weft/search", s.handle(s.nativeSearch))
 
 	// Routed so they are refused by name rather than by the catch-all 404. A 404
 	// on /_search/scroll reads as "wrong URL" and sends a client looking for a
