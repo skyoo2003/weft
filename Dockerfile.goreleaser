@@ -10,10 +10,10 @@
 # on an amd64 runner rather than under emulation. That is what keeps the final
 # stage COPY-only, and a COPY-only final stage is what lets buildx assemble
 # linux/arm64 with no QEMU and no binfmt.
-FROM --platform=$BUILDPLATFORM alpine:3.23 AS prep
+FROM --platform=$BUILDPLATFORM alpine:3.24 AS prep
 RUN mkdir -p /out/var/lib/weft && chown -R 65534:65534 /out/var/lib/weft
 
-FROM alpine:3.23
+FROM alpine:3.24
 ARG TARGETPLATFORM
 COPY --from=prep /out/ /
 COPY ${TARGETPLATFORM}/weft  /usr/bin/weft
