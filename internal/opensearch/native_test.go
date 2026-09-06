@@ -392,7 +392,7 @@ func TestNativeInheritsTheClauseRefusals(t *testing.T) {
 
 	for _, tc := range []struct{ name, body, want string }{
 		{"hybrid inside a stream", `{"streams":[{"hybrid":{"queries":[{"match":{"text":"a"}}]}}]}`, "hybrid"},
-		{"query_string", `{"streams":[{"query_string":{"query":"a"}}]}`, "query string"},
+		{clauseQueryString, `{"streams":[{"query_string":{"query":"a"}}]}`, "query string"},
 		{"nested bool", `{"streams":[{"bool":{"must":[{"bool":{}}]}}]}`, "bool"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -432,11 +432,6 @@ func TestTheNativeFusionPathKnowsNoScorer(t *testing.T) {
 		t.Fatalf("parse native.go: %v", err)
 	}
 
-	forbidden := []string{
-		"vector.New", "recency.New", "text.New", "graph.New",
-		"knn", "gauss", ".Vector", ".Time", "Document.",
-	}
-
 	found := 0
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -445,7 +440,10 @@ func TestTheNativeFusionPathKnowsNoScorer(t *testing.T) {
 		}
 		found++
 		body := string(src[fset.Position(fn.Pos()).Offset:fset.Position(fn.End()).Offset])
-		for _, word := range forbidden {
+		// The same list TestTheFusionCodeDoesNotKnowAboutTheFourthSignal uses on
+		// search.go, shared rather than copied: two copies would mean a fifth
+		// signal reaching one surface's list and not the other's.
+		for _, word := range forbiddenInFusion {
 			if strings.Contains(body, word) {
 				t.Errorf("the native fusion function %s mentions %q: a breakdown reports positions, and a "+
 					"position is the one thing that stays true when a sixth signal is added",

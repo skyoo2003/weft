@@ -205,6 +205,11 @@ const (
 	clauseTerm     = "term"
 	clauseTerms    = "terms"
 
+	// Named for the reason above and one more: it is the only clause spelled in
+	// both the refusal table and the tests that read it, and a typo in one would
+	// be a row silently checking nothing.
+	clauseQueryString = "query_string"
+
 	occMust    = "must"
 	occMustNot = "must_not"
 	occShould  = "should"
@@ -226,7 +231,7 @@ var notThisEngine = []string{"script_score", "neural", "neural_sparse", "rank_fe
 var notImplemented = map[string]string{
 	"ids": "an ids query is not implemented: document keys are not a term space in this index — engine.Index.Resolve " +
 		"reaches one key at a time and no scorer nominates a set of them. Fetch them through _doc",
-	"query_string": "query_string is not implemented: weft has a query string of its own (pkg/query.Parse) and it is " +
+	clauseQueryString: "query_string is not implemented: weft has a query string of its own (pkg/query.Parse) and it is " +
 		"not Lucene's — they disagree about +, OR and parentheses — so reading this one would run a query other " +
 		"than the one written. Build the clauses as a bool query",
 	"simple_query_string": "simple_query_string is not implemented, for the reason query_string is not: weft's own " +

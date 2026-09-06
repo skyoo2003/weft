@@ -238,6 +238,23 @@ func TestAFourthSignalOverHTTPIsUnderOneHundredLines(t *testing.T) {
 // streams mentioned a signal by name — the scorer packages, the vector, the
 // timestamp — then fusion would be branching on what a stream holds, and
 // "fusion cannot see any scorer" would be false one layer above pkg/.
+// forbiddenInFusion is the words a fusion function must not contain. Each names a
+// signal, the constructor that builds one, or the query-time input only one of
+// them reads.
+//
+// Spelled as constructors rather than as bare package names on purpose: a
+// forbidden list holding "text." also matches "context.Context", which is a false
+// positive that would make these tests look stricter than they are.
+//
+// One list for two tests — this one reads search.go and
+// TestTheNativeFusionPathKnowsNoScorer reads native.go. Two copies would mean a
+// fifth signal added to the list on one surface and not the other, which is the
+// same drift the list exists to prevent.
+var forbiddenInFusion = []string{
+	"vector.New", "recency.New", "text.New", "graph.New",
+	"knn", "gauss", ".Vector", ".Time", "Document.",
+}
+
 func TestTheFusionCodeDoesNotKnowAboutTheFourthSignal(t *testing.T) {
 	src, err := os.ReadFile("search.go")
 	if err != nil {
@@ -249,17 +266,6 @@ func TestTheFusionCodeDoesNotKnowAboutTheFourthSignal(t *testing.T) {
 		t.Fatalf("parse search.go: %v", err)
 	}
 
-	// The words a fusion function must not contain. Each names a signal, the
-	// constructor that builds one, or the query-time input only one of them reads.
-	//
-	// Spelled as constructors rather than as bare package names on purpose: a
-	// forbidden list of "text." also matches "context.Context", which is a false
-	// positive that would make this test look stricter than it is.
-	forbidden := []string{
-		"vector.New", "recency.New", "text.New", "graph.New",
-		"knn", "gauss", ".Vector", ".Time", "Document.",
-	}
-
 	found := 0
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -268,7 +274,7 @@ func TestTheFusionCodeDoesNotKnowAboutTheFourthSignal(t *testing.T) {
 		}
 		found++
 		body := string(src[fset.Position(fn.Pos()).Offset:fset.Position(fn.End()).Offset])
-		for _, word := range forbidden {
+		for _, word := range forbiddenInFusion {
 			if strings.Contains(body, word) {
 				t.Errorf("the fusion function %s mentions %q: fusion decides how streams combine and must not "+
 					"know what any of them holds — that is the claim this PRD re-tests over HTTP",
