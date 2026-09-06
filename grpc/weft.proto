@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package weft.v1;
+
+option go_package = "github.com/skyoo2003/weft/grpc/weftpb;weftpb";
+
+// Weft is weft's own search surface, in a second encoding.
+//
+// It is the same request and the same engine as POST /{index}/_weft/search —
+// see docs/API.md. Nothing here decides anything: the service converts protobuf
+// to opensearch.NativeRequest, calls opensearch.NativeSearch, and converts what
+// comes back. A test in this module fails the build if a field exists on one
+// side and not the other, because two surfaces that drift are two answers to
+// one question.
+service Weft {
+  // Search fuses the named streams and returns one page of the ranking.
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+message SearchRequest {
+  // The index to search. There is no cluster and no alias; this is a directory
+  // name under the server's data root.
+  string index = 1;
+
+  // One leaf clause per entry, as JSON, in the spelling `_search` already
+  // accepts: `{"match":{"text":"rank fusion"}}`, `{"knn":{"vec":{...}}}`,
+  // `{"weft_graph":{"seeds":["doc-3"]}}`.
+  //
+  // JSON and not a oneof over the clause kinds, which is a deliberate refusal
+  // rather than a shortcut. A oneof would be a second list of what a stream can
+  // be, kept in step by hand with `compiler.clause` — and D-034 rejected exactly
+  // that list on the HTTP side, on the grounds that it drifts on the first
+  // clause added to one surface and not the other. The query language here is
+  // JSON-shaped; typing it in proto would make this file its second definition.
+  //
+  // The *response* is fully typed, which is where a client actually wants types.
+  repeated string streams = 2;
+
+  // One weight per entry of streams, or empty for an unweighted fusion.
+  //
+  // Positional, which is what lets a weight exist without fusion learning what a
+  // stream holds. A list of a different length is refused rather than padded: an
+  // unequal list would weight a stream the client did not mean.
+  //
+  // A weight of 0 is not the short spelling of "do not vote" — it removes the
+  // document from the fused result entirely.
+  repeated double weights = 3;
+
+  // The page. Zero means the server default of 10.
+  int32 size = 4;
+  int32 from = 5;
+
+  // How many candidates the fusion produces before the page is cut. Zero means
+  // from+size. This is separate from size on purpose: rank fusion reads
+  // position, so a deeper fusion changes the ranking and not only its length.
+  int32 depth = 6;
+
+  // Ask for the pre-fusion rank of every stream, per hit.
+  bool breakdown = 7;
+}
+
+message SearchResponse {
+  repeated Hit hits = 1;
+
+  // How many candidates the fusion produced before the page was cut. It is a
+  // lower bound unless exact is set — the search returns a top-k, so a full
+  // prefix says only that at least this many matched.
+  int64 total = 2;
+  bool exact = 3;
+}
+
+message Hit {
+  string id = 1;
+  double score = 2;
+
+  // The document body as it was indexed, verbatim JSON.
+  bytes source = 3;
+
+  // One entry per stream the request named, in that order, holding where that
+  // stream ranked this document before fusion saw any of them. Empty unless the
+  // request asked for it.
+  repeated Rank breakdown = 4;
+}
+
+// Rank is a stream's own placement, or the absence of one.
+//
+// A message rather than a bare int32 because "this stream had no opinion" is a
+// third thing, and proto3 has no null: an absent document encoded as 0 would
+// look like one every stream ranked first. present=false is the `-` column in
+// examples/breakdown.
+message Rank {
+  bool present = 1;
+  int32 at = 2;
+}
