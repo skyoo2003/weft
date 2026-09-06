@@ -280,7 +280,7 @@ func TestAnUnsupportedQueryIsNotAnEmptyResult(t *testing.T) {
 		{"boost", `{"query":{"bool":{"must":[{"match":{"text":"a"}}],"boost":2}}}`},
 		{"deep paging", `{"query":{"match":{"text":"document"}},"from":10000,"size":10}`},
 		{"ids", `{"query":{"ids":{"values":["1"]}}}`},
-		{"query_string", `{"query":{"query_string":{"query":"document"}}}`},
+		{clauseQueryString, `{"query":{"query_string":{"query":"document"}}}`},
 		{"search_after", `{"query":{"match":{"text":"a"}},"search_after":[1]}`},
 		{"numeric range on an unmapped field", `{"query":{"range":{"n":{"gte":1}}}}`},
 		{"range format", `{"query":{"range":{"n":{"gte":"a","format":"epoch_millis"}}}}`},

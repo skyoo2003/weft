@@ -73,11 +73,19 @@ func badRequest(kind, format string, a ...any) *apiError {
 }
 
 // hit is one search result.
+//
+// Breakdown is the one field only the native surface ever fills: where each
+// stream placed this document before fusion saw any of them. It is on the shared
+// struct rather than on a native-only copy of it because omitempty makes it cost
+// the compatibility surface nothing — a hit that was not asked for a breakdown
+// encodes byte for byte as it did before this field existed, which
+// TestNativeBreakdownIsAbsentUnlessAsked and `make compat` are what hold.
 type hit struct {
-	Index  string          `json:"_index"`
-	ID     string          `json:"_id"`
-	Score  float64         `json:"_score"`
-	Source json.RawMessage `json:"_source"`
+	Index     string          `json:"_index"`
+	ID        string          `json:"_id"`
+	Score     float64         `json:"_score"`
+	Source    json.RawMessage `json:"_source"`
+	Breakdown []*int          `json:"breakdown,omitempty"`
 }
 
 func newHit(x *Index, id string, score float64) hit {
@@ -215,6 +223,7 @@ func NewServer(reg *Registry, maxBody int64) *Server {
 	s.mux.HandleFunc("GET /{index}/_weft/postings", s.handle(s.weftPostings))
 	s.mux.HandleFunc("POST /{index}/_weft/scrub", s.handle(s.weftScrub))
 	s.mux.HandleFunc("POST /{index}/_weft/query", s.handle(s.weftQuery))
+	s.mux.HandleFunc("POST /{index}/_weft/search", s.handle(s.nativeSearch))
 
 	// Routed so they are refused by name rather than by the catch-all 404. A 404
 	// on /_search/scroll reads as "wrong URL" and sends a client looking for a
@@ -261,7 +270,23 @@ func (s *Server) handle(fn func(http.ResponseWriter, *http.Request) error) http.
 }
 
 func (s *Server) writeError(w http.ResponseWriter, err error) {
-	status, kind := http.StatusInternalServerError, "internal_server_error"
+	status, kind := StatusOf(err)
+	writeJSON(w, status, map[string]any{
+		"error":  map[string]string{"type": kind, "reason": err.Error()},
+		"status": status,
+	})
+}
+
+// StatusOf reports the HTTP status and error type an error should be answered
+// with. Anything it does not recognise is a 500, because an error this package
+// cannot classify is one it did not mean to produce.
+//
+// Exported for the gRPC surface, which cannot reach apiError and has to map these
+// onto gRPC codes. One classifier rather than two is the point: a refusal that is
+// a 400 over HTTP and an Unknown over gRPC would be the same engine giving two
+// answers about whose fault a request was.
+func StatusOf(err error) (status int, kind string) {
+	status, kind = http.StatusInternalServerError, "internal_server_error"
 
 	var api *apiError
 	var tooLarge *http.MaxBytesError
@@ -279,11 +304,7 @@ func (s *Server) writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrClosed):
 		status, kind = http.StatusServiceUnavailable, "cluster_block_exception"
 	}
-
-	writeJSON(w, status, map[string]any{
-		"error":  map[string]string{"type": kind, "reason": err.Error()},
-		"status": status,
-	})
+	return status, kind
 }
 
 // acknowledge is the answer to a request that changed an index's shape and has

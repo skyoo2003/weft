@@ -1,0 +1,25 @@
+kind: Added
+body: '**weft speaks gRPC, and it cost the root module nothing.** `grpc/` is a
+  second Go module — the shape `bench/` already uses to keep bleve out — so
+  `go list -m all` at the repository root still prints one line and a `go get`
+  user pulls in exactly what they did before. `weftg` serves the same requests
+  `POST /{index}/_weft/search` serves: a positional stream list, positional
+  weights, a fusion depth separate from the page, and a per-hit pre-fusion
+  breakdown. Search only; writes go through `weftd`, because one writer per index
+  is an invariant two processes over one directory would both violate. The service
+  **decides nothing** — every method is conversion either side of one call into
+  `opensearch.NativeSearch`, the same function the HTTP handler calls, so no
+  ranking and no refusal is written twice. Three tests hold that rather than
+  claiming it: the same request must rank identically over both wires, a refusal
+  must arrive as a gRPC code and never as an empty result list, and a field on one
+  side without a counterpart on the other **fails the build** — which is the one
+  that matters, because a request field the wire cannot carry is a feature that
+  silently does not exist. `make compat-grpc` generates a client from `weft.proto`
+  with stock `grpcio-tools` and drives `weftg` with it, the same shape as
+  `make compat` and skipped the same way when the client is absent. `streams` is
+  JSON on the wire rather than a typed `oneof`, deliberately: a union would be a
+  second list of what a stream can be, and it drifts on the first clause added to
+  one surface and not the other.'
+time: 2026-09-06T11:00:00.000000000+09:00
+custom:
+  Issue: 28

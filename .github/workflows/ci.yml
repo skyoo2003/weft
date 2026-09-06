@@ -42,7 +42,12 @@ jobs:
           # `make bench-build` below pulls all of them. Keyed on that file alone,
           # because it is the only one in the repository the cache can be keyed on.
           cache: true
-          cache-dependency-path: bench/go.sum
+          # Both nested modules. grpc/ joined bench/ in the same premise: the root
+          # module still has no go.sum, and the quarantined ones are the only files
+          # here a dependency cache can be keyed on.
+          cache-dependency-path: |
+            bench/go.sum
+            grpc/go.sum
 
       # fmt + build + vet + test -race.
       - run: make all
@@ -56,6 +61,11 @@ jobs:
       # also means nothing above would notice bench/main.go failing to build, and
       # it is the entire bleve half of milestone 5's order-of-magnitude claim.
       - run: make bench-build
+
+      # And grpc/, for the identical reason. It is the second quarantined module
+      # and the one that carries a running surface rather than a measurement, so
+      # nothing above compiling it means a broken gRPC server would reach a tag.
+      - run: make grpc-build
 
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # golangci-lint-action v9.3.0
@@ -73,6 +83,12 @@ jobs:
         with:
           version: v2.12.2
           working-directory: bench
+
+      - name: Lint the gRPC module
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # golangci-lint-action v9.3.0
+        with:
+          version: v2.12.2
+          working-directory: grpc
 
       - name: Lint documentation
         uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff  # markdownlint-cli2-action v24.2.0

@@ -2320,3 +2320,154 @@ invisible to everyone who did not read this file. If adopters keep asking for a 
 been reachable under `/_weft/` for months, the prefix is not carrying the meaning it was supposed
 to carry, and the answer is documentation on the route that would have been sent anyway — not a
 second name for it.
+
+---
+
+## D-034 — The native surface is a second spelling, not a second engine
+
+**Date**: 2026-09-06 · **Milestone**: 30 · **Status**: accepted
+
+### The question
+
+A surface of weft's own was going to need three things the OpenSearch DSL cannot express: a
+request that *is* a positional stream list, a per-hit pre-fusion breakdown, and a fusion depth
+separate from the page size. The plan for it put those in a new package, `internal/weftapi`, with
+its own request types and its own stream parser — four stream kinds named after the four signals.
+
+Reading the code first made that plan wrong in three places at once, and the three have one cause.
+
+### The decision
+
+**`internal/opensearch/native.go`, mounted at `POST /{index}/_weft/search`, compiling streams with
+the compiler `_search` already has.**
+
+| The plan said | It is | Because |
+| --- | --- | --- |
+| a new package, `internal/weftapi` | a file in `internal/opensearch` | `compiler`, `plan`, `runSearch` and `apiError` are unexported. A new package would have had to export them or copy them, and `admin.go` already hosts `/_weft/*` in this package |
+| a parser for four stream kinds | `compiler.clause`, reused | eleven leaf kinds are streams on the day they land on `_search`, and there is no second list to keep in step |
+| the prefix `/_weft/v1/` | `/{index}/_weft/search` | the four routes that predate it are unversioned, there is no released tag yet, and a version segment nothing has needed is speculative |
+
+`hybrid`'s own loop moved out to `compiler.streams` and both callers share it. That is the finding
+under all three rows: **`hybrid` was always a wrapper around a stream list**, so the native surface
+is that list with the wrapper taken off rather than a new thing beside it.
+
+### What the shared compiler buys, and what it cost
+
+It buys the property that makes this a spelling and not an engine: a clause that works on one
+surface works on the other by being cut and pasted, every refusal is inherited rather than
+re-listed, and a signal added to `_search` is a native stream the same day. `pkg/` changed zero
+lines and `opensearch-py` still drives `weftd` unmodified.
+
+It cost one defect, and the defect is worth the record because the plan's separate parser would
+not have had it — it would have had a different one. A `streams` entry is not a scorer: a
+two-token `match` is two `query.Glob` streams, so the list the fuser sees is longer than the list
+the client wrote. The first cut of the breakdown truncated the scorer row to the entry count,
+which put **the second entry's rank under the first entry's label, for every multi-token query,
+silently**. That is D-028 arriving in a new place — the same finding that cost milestone 25 an
+`anyOf` when `bool.must` met it, and the second time this repository has paid for the gap between
+a clause and a stream.
+
+`compiler.streams` now returns the grouping, and the fold takes the best rank when an entry became
+several streams. Not an average: an average is a score by another name, and this engine never
+compares scores across streams.
+
+### Why the breakdown reads positions and nothing else
+
+A breakdown that knew stream 2 was a vector would be a fifth place to edit when a sixth signal
+arrives — and the whole claim being re-tested here is that there is no such place.
+`TestTheNativeFusionPathKnowsNoScorer` reads `native.go`'s AST and fails if `capture` or `rankOf`
+mentions a scorer constructor, which is the same lock
+`TestTheFusionCodeDoesNotKnowAboutTheFourthSignal` puts on `search.go`.
+
+### What would show this decision was wrong
+
+**A refusal that has to differ between the two surfaces.** Sharing the compiler means sharing
+every "no", and the bet is that a refusal is a property of the engine rather than of the protocol.
+If a native request needs to be allowed where the same clause is refused on `_search` — or refused
+where it is allowed — then the two surfaces do not share a semantics, only a parser, and the file
+should become the package the plan asked for.
+
+The weaker signal is the one D-025 registered and this makes cheaper to trip: a capability that
+lands on the native route and never reaches a `go get` user. The native surface is closer to the
+library's own shape than the compatibility surface is, which makes it a more tempting place to put
+something that belongs in `pkg/`.
+
+---
+
+## D-035 — gRPC is a second module, because the dependency metric is not negotiable
+
+**Date**: 2026-09-06 · **Milestone**: 31 · **Status**: accepted
+
+### The question
+
+gRPC cannot be spoken without `google.golang.org/grpc`, which brings protobuf, `x/net` and
+`genproto` behind it. The founding PRD registers an operational metric — *`go list -m all` prints
+this module and nothing else* — and `pkg/engine`'s `TestNoExternalDependencies` fails the build if
+it does not. A gRPC surface in the root module trades a founding property for a protocol.
+
+Two ways out were real, and they differ by a factor of five in cost.
+
+### The decision
+
+**A nested module at `grpc/`, with a `replace ../`.** The maintainer chose it on 2026-09-06 over
+the alternative below.
+
+The precedent is exact rather than analogous: `bench/` has quarantined bleve since milestone 5,
+for a requirement that read the same way — milestone 5 needed a comparison against a real engine
+and the root module was not allowed to see one. `go list -m all` at the root prints one line with
+`grpc/` in the tree, checked.
+
+The quarantine works because **Go's `internal/` is enforced by import path prefix and not by
+module**. `github.com/skyoo2003/weft/grpc` sits under `github.com/skyoo2003/weft/`, so it may
+import `internal/opensearch`; `bench/main.go` has relied on exactly this for `internal/eval` since
+it was written.
+
+### The alternative, and why it lost
+
+**Hand-rolled: h2c from the standard library, plus a protobuf codec.** Go 1.24 added
+`http.Protocols.SetUnencryptedHTTP2`, so cleartext HTTP/2 no longer needs `x/net/http2/h2c`, and
+gRPC's framing is a five-byte prefix and two trailers. One module, zero dependencies, and entirely
+in the spirit of a repository that wrote its own inverted index, its own IVF and its own DSL
+parser.
+
+It lost on what it cannot buy. **The point of gRPC is the client ecosystem**, and a hand-rolled
+wire is only worth having if every stock client drives it — which is 400 to 600 lines of protocol
+code whose failure mode is silent misencoding against clients this repository cannot run. Five
+days against one, and the risk is permanent rather than paid once.
+
+Registered so a later reader does not have to re-derive it: if the nested module becomes the thing
+nobody remembers to build, the hand-rolled version is still available and Go 1.24 is why.
+
+### What this costs
+
+`cd grpc && go run ./cmd/weftg` rather than `go run ./cmd/weftg`, one more `go.sum` in the CI
+cache key, and a second module that `go build ./...` does not reach. That last one is the real
+cost and it has a name: **`bench/` rotted between the runs that used it**, which is why
+`bench-build` exists. `grpc-build` is the same target for the same reason, and it is in CI from
+the first commit rather than after the first rot.
+
+### The one thing that is not conversion
+
+`SearchRequest.streams` is `repeated string` — leaf clauses as JSON — and not a `oneof` over the
+clause kinds. That is D-034's finding applied to the second wire: a typed union would be a second
+list of what a stream can be, kept in step by hand with `compiler.clause`, and it drifts on the
+first clause added to one surface and not the other. The *response* is fully typed, which is where
+a client wants types.
+
+The trade is honest and it is a trade: a gRPC client gets no compile-time help writing a query. If
+that turns out to be the thing adopters trip over, the answer is a generated `oneof` **derived
+from** the clause table rather than written beside it.
+
+### What would show this decision was wrong
+
+**A second module nobody runs.** `make grpc-build` in CI is the mitigation and not the proof; the
+proof would be a release where the gRPC surface was broken for weeks and no one noticed, which is
+the failure `bench/` already had once. The answer then is not a third module — it is folding the
+surface into the root and paying the dependency, with the metric formally withdrawn in a decision
+of its own rather than quietly.
+
+The weaker signal: `TestTheProtoAndTheCoreDoNotDrift` starting to need exceptions. It has one
+today (`index`, which lives in the URL path on HTTP and has nowhere to sit in a body-decoded
+struct) and the reason is structural. A second and a third would mean the two surfaces are no
+longer one request in two encodings, and the drift test would be documenting the drift instead of
+preventing it.

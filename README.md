@@ -93,6 +93,27 @@ Three signals, one request, no search pipeline and no normalization processor. T
 
 The library is still the product. The server is a `cmd/`, and the DSL, the mappings, `_bulk` and the hybrid together changed **zero lines under `pkg/`** — which is the assertion rather than the aspiration. Adding recency as a *fourth* signal to the HTTP surface changed zero lines of fusion code and 57 lines in its query clause; what it did cost is an index-time binding, because a JSON body has no field for "this date is the document's time" ([FINDINGS](docs/FINDINGS.md) milestone 26). The production warning above applies to it unchanged, and it binds to loopback because there is no authentication and no TLS.
 
+### Or in weft's own terms, where the DSL runs out
+
+`hybrid` is a wrapper around a list of streams. On weft's own route the list *is* the request, and two things the OpenSearch response has nowhere to put come back with it:
+
+```bash
+curl -XPOST localhost:9200/papers/_weft/search -H 'Content-Type: application/json' -d '{
+  "streams": [{"match": {"text": "rank fusion"}},
+              {"knn": {"vec": {"vector": [0.1, 0.9, 0.2], "k": 10}}}],
+  "weights": [1, 0.5], "depth": 100, "breakdown": true}'
+```
+
+`breakdown` is each stream's own rank *before* fusion — the `-` column the first example prints, per hit, with `null` for a stream that had no opinion. `depth` is the fusion depth, which on `_search` is tangled with `knn`'s `k` and cannot be set at all for a text-only query. A stream is a leaf clause in the spelling `_search` already accepts, compiled by the same function, so every clause and every refusal is shared rather than reimplemented. [API](docs/API.md) is the reference.
+
+### Or over gRPC
+
+```bash
+cd grpc && go run ./cmd/weftg -data ../.weftd-data     # 127.0.0.1:9201
+```
+
+The same request in a second encoding, and **the root module still has no dependencies**: `grpc/` is a nested module with a `replace ../`, the shape [`bench/`](bench/README.md) already uses to keep bleve out, so `go list -m all` here prints one line. The service decides nothing — it converts protobuf to the same struct the HTTP handler builds and calls the same function — and a field on one side without a counterpart on the other fails the build. [grpc/README.md](grpc/README.md) is why it is a module, and `make compat-grpc` is a stock `grpcio` client driving it with stubs it generated from `weft.proto` itself.
+
 ## Documentation
 
 Each document answers one question, and only that one.
@@ -103,6 +124,7 @@ Each document answers one question, and only that one.
 | What does it *not* do? | [LIMITATIONS](docs/LIMITATIONS.md) |
 | How is the module shaped? | [ARCHITECTURE](docs/ARCHITECTURE.md) |
 | How do I plug my own signal in? | [SCORERS](docs/SCORERS.md) |
+| How do I ask it something OpenSearch cannot express? | [API](docs/API.md) |
 | What was actually measured, milestone by milestone? | [FINDINGS](docs/FINDINGS.md) |
 | What was decided, and why is it expensive to reverse? | [DECISIONS](docs/DECISIONS.md) |
 | What is on disk? | [FORMAT](docs/FORMAT.md) |
