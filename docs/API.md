@@ -1,6 +1,10 @@
 # weft's own API
 
-`weftd` answers on two surfaces. Everything under `_search` is [the OpenSearch subset](LIMITATIONS.md) — weft answering a question somebody else's protocol knows how to ask, so that an existing client connects without being changed. This document is the other one: the things weft does that the OpenSearch DSL has no way to ask for at all.
+`weftd` answers on two surfaces.
+
+Everything under `_search` is [the OpenSearch subset](LIMITATIONS.md): weft answering a question somebody else's protocol knows how to ask, so an existing client connects without being changed.
+
+This document is the other one — the things weft does that the OpenSearch DSL has no way to ask for.
 
 The route is `POST /{index}/_weft/search`. It lives under `/_weft/` because what OpenSearch has no name for gets a name OpenSearch does not use ([DECISIONS](DECISIONS.md) D-033), and it cannot collide with an index of yours because an index name may not begin with an underscore.
 
@@ -23,11 +27,13 @@ curl -XPOST localhost:9200/papers/_weft/search -H 'Content-Type: application/jso
 
 ### 1. The request *is* the stream list
 
-On the compatibility surface, fusing several signals means a `hybrid` clause wrapping a list of sub-queries, and weighting them means `weights` — which is weft's extension to that wrapper, because OpenSearch puts normalization in a search pipeline instead (D-030).
+On the compatibility surface, fusing several signals means a `hybrid` clause wrapping a list of sub-queries, and weighting them means `weights` — weft's extension to that wrapper, because OpenSearch puts normalization in a search pipeline instead (D-030).
 
 Here the list is the query. There is no wrapper to open, and a weight is what a positional weight always was: **an index into a list the client wrote**. That is the whole reason `fusion.FuseWeighted` can exist without fusion learning what a scorer is, arriving as the shape of the protocol rather than as a field inside a clause.
 
-A `streams` entry is one leaf clause, spelled exactly as `_search` spells it. All eleven leaf kinds work here — `match`, `match_phrase`, `term`, `terms`, `prefix`, `wildcard`, `fuzzy`, `range`, `exists`, `knn`, `function_score` — plus `weft_graph` and one level of `bool`. They are compiled by the same function `_search` compiles a leaf with, so a clause that works on one surface works on the other by cutting and pasting it, and every refusal in [LIMITATIONS](LIMITATIONS.md) is inherited rather than re-listed.
+A `streams` entry is one leaf clause, spelled exactly as `_search` spells it. All eleven leaf kinds work here — `match`, `match_phrase`, `term`, `terms`, `prefix`, `wildcard`, `fuzzy`, `range`, `exists`, `knn`, `function_score` — plus `weft_graph` and one level of `bool`.
+
+They are compiled by the same function `_search` compiles a leaf with, so a clause that works on one surface works on the other by cutting and pasting it. Every refusal in [LIMITATIONS](LIMITATIONS.md) is inherited rather than re-listed.
 
 ### 2. `breakdown` — where each stream ranked the document before fusion
 
@@ -38,13 +44,15 @@ A `streams` entry is one leaf clause, spelled exactly as `_search` spells it. Al
 ]}}
 ```
 
-One column per stream, in the order the request named them, holding that stream's own rank for this document **before** fusion saw any of them. `null` is the stream having no opinion — the document is absent from it, deliberately withheld, or simply below the cut. This is the `-` column [`examples/breakdown`](../examples/breakdown/main.go) prints and `weft search -breakdown` prints, and an OpenSearch response has nowhere to put it: a client on the compatibility surface can see that a document was ranked and never why.
+One column per stream, in the order the request named them, holding that stream's own rank for this document **before** fusion saw any of them. `null` is the stream having no opinion: the document is absent from it, deliberately withheld, or below the cut.
 
-Two details are load-bearing.
+This is the `-` column [`examples/breakdown`](../examples/breakdown/main.go) prints and `weft search -breakdown` prints. An OpenSearch response has nowhere to put it, so a client on the compatibility surface can see that a document was ranked and never why.
 
-**A column is a stream you wrote, not a scorer it became.** A two-token `match` is two `query.Glob` streams, so the list the fuser sees is longer than the list in your request. The columns follow your request. When one entry became several streams, the column reports the **best** rank among them — an average would be a score by another name, and this engine never compares scores across streams.
+Three details are load-bearing:
 
-**`null` is not zero.** A document nothing nominated would otherwise look like one everything ranked first.
+- **A column is a stream you wrote, not a scorer it became.** A two-token `match` is two `query.Glob` streams, so the list the fuser sees is longer than the list in your request. The columns follow your request.
+- **When one entry became several streams, the column reports the best rank among them.** An average would be a score by another name, and this engine never compares scores across streams.
+- **`null` is not zero.** A document nothing nominated would otherwise look like one everything ranked first.
 
 The breakdown is taken from the streams that were actually fused, not from a second round of calls to each scorer. The two can disagree the moment a scorer is not deterministic, which is exactly what a breakdown exists to rule out.
 
@@ -54,7 +62,7 @@ The breakdown is taken from the streams that were actually fused, not from a sec
 
 On `_search` those are tangled: a `knn` clause's `k` raises the candidate depth of *every* stream at once, and a text-only query has no way to ask for a deeper fusion than the page it wants. They were always two ideas, so here they are two numbers.
 
-A deeper fusion changes the ranking and not only the length of it — rank fusion reads position, and a document that only appears at depth 80 in one stream cannot be voted for by that stream at depth 10.
+A deeper fusion changes the ranking, not only the length of it. Rank fusion reads position, and a document that only appears at depth 80 in one stream cannot be voted for by that stream at depth 10.
 
 ## Refusals
 
@@ -82,10 +90,10 @@ Four routes predate this one and answer questions about the index rather than ov
 | `POST /{index}/_weft/query` | runs weft's own query string — `{"q": "+fusion -draft"}`, the syntax `pkg/query.Parse` documents |
 | `POST /{index}/_weft/scrub` | verifies the committed directory on disk |
 
-`query_string` on `_search` stays a 501 while `/_weft/query` answers, and that is not a contradiction: the refusal is about reading Lucene's language as if it were this one, and here a client has asked for weft's language by name.
+`query_string` on `_search` stays a 501 while `/_weft/query` answers, and that is not a contradiction. The refusal is about reading Lucene's language as if it were this one; here a client has asked for weft's language by name.
 
 ## What this surface does not change
 
 It is not a second engine and it did not become the product. `pkg/` changed **zero lines** for it, `go list -m all` still prints one module, and `opensearch-py` still drives `weftd` unmodified — `make compat` is that check.
 
-The production warning applies here exactly as it does everywhere else: sustained load collapses at 27 queries a second rather than degrading, a commit holds the writer for 11 seconds on a 20,000-document batch, and there is no authentication and no TLS. [STATUS](STATUS.md) and [LIMITATIONS](LIMITATIONS.md) are the full account.
+The production warning applies here exactly as everywhere else: sustained load collapses at 27 queries a second rather than degrading, a commit holds the writer for 11 seconds on a 20,000-document batch, and there is no authentication and no TLS. [STATUS](STATUS.md) and [LIMITATIONS](LIMITATIONS.md) are the full account.
