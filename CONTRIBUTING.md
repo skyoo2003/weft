@@ -14,19 +14,22 @@ That needs nothing installed but the Go toolchain, which is deliberate: you can 
 
 Both linters are in `all` because of what happened without them: for five commits `make all` passed a tree CI rejected, because the only gates reading [.golangci.yaml](.golangci.yaml) and [.markdownlint.yaml](.markdownlint.yaml) lived in CI — and the Go one failing first meant the docs one had never run at all, so five documents reached 76 findings unread. A local run still cannot promise a CI pass — CI installs pinned versions and yours may be newer, which `make lint` warns about — but it can stop CI from being where a finding is first seen.
 
-Three more checks run in CI and are Makefile targets too, kept out of `make all` because each costs a tool to install or a minute of wall clock:
+Four more checks run in CI and are Makefile targets too, kept out of `make all` because each costs a tool to install or a minute of wall clock:
 
 ```bash
 make spdx         # every .go file carries its licence line; make spdx-fix adds them
 make bench-build  # vet + test the bleve comparison, which is its own module
-make fuzz         # 30s each against the two segment-decoder fuzz targets
+make grpc-build   # vet + test the gRPC server, which is the second one
+make fuzz         # 30s each against the five fuzz targets
 ```
 
-`make lint` and `make lint-docs` are those same two runs asked for by name: they fail rather than skip when the tool is missing, and `make lint` covers `bench/` too.
+`make lint` and `make lint-docs` are those same two runs asked for by name: they fail rather than skip when the tool is missing, and `make lint` covers `bench/` and `grpc/` too.
 
-`bench-build` is separate from `make all` for a structural reason rather than a cost one: `bench/` is a nested module, so neither `go build ./...` nor `golangci-lint run ./...` at the root descends into it, and without a target naming it the bleve half of milestone 5's comparison would rot unnoticed between the runs that use it.
+`bench-build` and `grpc-build` are separate from `make all` for a structural reason rather than a cost one: each is a nested module, so neither `go build ./...` nor `golangci-lint run ./...` at the root descends into it. Without a target naming them, the bleve half of milestone 5's comparison and the whole of the gRPC surface would rot unnoticed between the runs that use them — and for `grpc/` that means a broken server could reach a tag.
 
-`make lint` needs `golangci-lint` and `make lint-docs` needs `markdownlint-cli2` or an `npx` to fetch it with; each target says so and names the install command rather than failing obscurely. `make fuzz` needs nothing but time, and it is the one most likely to find something no test covers — [SECURITY.md](SECURITY.md) names the segment decoder as the first place a hostile file lands. There is an optional [pre-commit config](.pre-commit-config.yaml) that runs `make all`, `make spdx` and `make lint`; nothing requires it, and CI does not use it.
+`make lint` needs `golangci-lint` and `make lint-docs` needs `markdownlint-cli2` or an `npx` to fetch it with; each target says so and names the install command rather than failing obscurely. `make fuzz` needs nothing but time, and it is the one most likely to find something no test covers — [SECURITY.md](SECURITY.md) names the segment decoder as the first place a hostile file lands, and the three parsers under `internal/opensearch` are where a hostile *request* lands. There is an optional [pre-commit config](.pre-commit-config.yaml) that runs `make all`, `make spdx` and `make lint`; nothing requires it, and CI does not use it.
+
+Two further targets are checks that CI does not run, because each needs a Python client CI does not install: `make compat` drives `weftd` with `opensearch-py`, and `make compat-grpc` drives `weftg` with a stock `grpcio` client using stubs it generates from `weft.proto` itself. Both skip rather than fail when the client is absent, and the Makefile gives the virtualenv recipe above each one. `PYTHON=` overrides the interpreter so neither needs a global install.
 
 One gate has no Makefile target and no local half: [CodeQL](.github/workflows/codeql.yml), which runs on its own workflow against Go changes and once a week. It is absent from `make all` because it cannot be there — it builds a dataflow database before it can ask anything, which is minutes rather than seconds. It asks a different question from `golangci-lint` too: not whether a file is correct Go, but where a value the caller chose ends up. Its findings land on the Security tab rather than in a pull request check, so the way you meet it is by being told, not by a red build.
 
@@ -41,18 +44,25 @@ Generated from the `Makefile`, which is the source of truth. `make help` is not 
 | `make deps` | The two architecture properties cheap enough to check by hand: zero dependencies, and fusion sees no scorer |
 | `make lint`, `make lint-docs` | The two linters by name — these fail rather than skip when the tool is missing |
 | `make spdx`, `make spdx-fix` | Every `.go` file carries its licence line; `-fix` adds the missing ones |
-| `make fuzz` | 30 seconds each against the two segment-decoder fuzz targets |
+| `make fuzz` | 30 seconds each against the five fuzz targets: the segment decoder and section parser in `pkg/engine`, the DSL, native and bulk parsers in `internal/opensearch` |
 | `make run`, `make example` | The interactive demo; the minimal embedding under `examples/` |
+| `make serve`, `make serve-grpc` | `weftd` on `127.0.0.1:9200`, `weftg` on `127.0.0.1:9201`. Both default to `.weftd-data`, so two terminals are two surfaces over one index rather than two empty ones |
+| `make compat`, `make compat-grpc` | `opensearch-py` drives `weftd` unmodified; a stock `grpcio` client drives `weftg` from stubs it generates from `weft.proto`. Both skip without the Python client; `PYTHON=` picks the interpreter |
+| `make grpc-build` | vet + test the gRPC module, which `./...` at the root never reaches |
 | `make eval` | Milestone 4's published nDCG table, reprinted from an already-built index |
 | `make eval-full` | Adds the degeneracy diagnostic, the frozen arms and the 28-configuration sweep. Slower |
 | `make eval-data` | Refuses to call corpus preparation complete until the query vectors exist — without them `text+vector` arms silently measure text only |
 | `make recall` | Overlap with a brute-force scan, which is what nDCG cannot see about an approximate vector index |
 | `make bench` | Milestone 5's latency ladder. Long: the lowest rung alone sends 10,000 queries |
+| `make bench-preflight` | The ladder's top rung alone, about a minute. Run it first and read two lines — three ladders have been spent on machines that could not reproduce their own published figures |
+| `make bench-http` | The same ladder through a socket. Starts `weftd`, drives it over HTTP, stops it, so the only difference from `bench` is the surface and the second process |
 | `make bench-build`, `make bench-compare`, `make bench-head` | The bleve comparison, which is its own module: vet + test it; run the ladder against bleve; the head-to-head microbenchmark milestone 22 reads |
 | `make changelog`, `make changelog-new`, `make changelog-check` | Render `CHANGELOG.md`; start an entry; fail if it was hand-edited |
 | `make docs-site`, `make release-check`, `make clean` | Render the docs site from `/docs`; dry-run the release pipeline before the tag is unwithdrawable; remove build output |
 
-Everything needing a prepared corpus — `eval`, `eval-full`, `recall`, `bench`, `bench-compare` — needs data that is not in the repository. [EVAL.md §7](docs/EVAL.md) lists the downloads and the one-time `weft-eval prepare` step.
+`fmt`, `build`, `vet` and `test` are the four `all` is made of and can be run by name; `lint-if-present` and `lint-docs-if-present` are how `all` reaches the two linters without requiring them, and are not meant to be typed.
+
+Everything needing a prepared corpus — `eval`, `eval-full`, `recall`, `bench`, `bench-preflight`, `bench-http`, `bench-compare` — needs data that is not in the repository. [EVAL.md §7](docs/EVAL.md) lists the downloads and the one-time `weft-eval prepare` step.
 
 ## What not to break
 
