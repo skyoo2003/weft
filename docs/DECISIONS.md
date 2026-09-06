@@ -2391,3 +2391,83 @@ The weaker signal is the one D-025 registered and this makes cheaper to trip: a 
 lands on the native route and never reaches a `go get` user. The native surface is closer to the
 library's own shape than the compatibility surface is, which makes it a more tempting place to put
 something that belongs in `pkg/`.
+
+---
+
+## D-035 — gRPC is a second module, because the dependency metric is not negotiable
+
+**Date**: 2026-09-06 · **Milestone**: 31 · **Status**: accepted
+
+### The question
+
+gRPC cannot be spoken without `google.golang.org/grpc`, which brings protobuf, `x/net` and
+`genproto` behind it. The founding PRD registers an operational metric — *`go list -m all` prints
+this module and nothing else* — and `pkg/engine`'s `TestNoExternalDependencies` fails the build if
+it does not. A gRPC surface in the root module trades a founding property for a protocol.
+
+Two ways out were real, and they differ by a factor of five in cost.
+
+### The decision
+
+**A nested module at `grpc/`, with a `replace ../`.** The maintainer chose it on 2026-09-06 over
+the alternative below.
+
+The precedent is exact rather than analogous: `bench/` has quarantined bleve since milestone 5,
+for a requirement that read the same way — milestone 5 needed a comparison against a real engine
+and the root module was not allowed to see one. `go list -m all` at the root prints one line with
+`grpc/` in the tree, checked.
+
+The quarantine works because **Go's `internal/` is enforced by import path prefix and not by
+module**. `github.com/skyoo2003/weft/grpc` sits under `github.com/skyoo2003/weft/`, so it may
+import `internal/opensearch`; `bench/main.go` has relied on exactly this for `internal/eval` since
+it was written.
+
+### The alternative, and why it lost
+
+**Hand-rolled: h2c from the standard library, plus a protobuf codec.** Go 1.24 added
+`http.Protocols.SetUnencryptedHTTP2`, so cleartext HTTP/2 no longer needs `x/net/http2/h2c`, and
+gRPC's framing is a five-byte prefix and two trailers. One module, zero dependencies, and entirely
+in the spirit of a repository that wrote its own inverted index, its own IVF and its own DSL
+parser.
+
+It lost on what it cannot buy. **The point of gRPC is the client ecosystem**, and a hand-rolled
+wire is only worth having if every stock client drives it — which is 400 to 600 lines of protocol
+code whose failure mode is silent misencoding against clients this repository cannot run. Five
+days against one, and the risk is permanent rather than paid once.
+
+Registered so a later reader does not have to re-derive it: if the nested module becomes the thing
+nobody remembers to build, the hand-rolled version is still available and Go 1.24 is why.
+
+### What this costs
+
+`cd grpc && go run ./cmd/weftg` rather than `go run ./cmd/weftg`, one more `go.sum` in the CI
+cache key, and a second module that `go build ./...` does not reach. That last one is the real
+cost and it has a name: **`bench/` rotted between the runs that used it**, which is why
+`bench-build` exists. `grpc-build` is the same target for the same reason, and it is in CI from
+the first commit rather than after the first rot.
+
+### The one thing that is not conversion
+
+`SearchRequest.streams` is `repeated string` — leaf clauses as JSON — and not a `oneof` over the
+clause kinds. That is D-034's finding applied to the second wire: a typed union would be a second
+list of what a stream can be, kept in step by hand with `compiler.clause`, and it drifts on the
+first clause added to one surface and not the other. The *response* is fully typed, which is where
+a client wants types.
+
+The trade is honest and it is a trade: a gRPC client gets no compile-time help writing a query. If
+that turns out to be the thing adopters trip over, the answer is a generated `oneof` **derived
+from** the clause table rather than written beside it.
+
+### What would show this decision was wrong
+
+**A second module nobody runs.** `make grpc-build` in CI is the mitigation and not the proof; the
+proof would be a release where the gRPC surface was broken for weeks and no one noticed, which is
+the failure `bench/` already had once. The answer then is not a third module — it is folding the
+surface into the root and paying the dependency, with the metric formally withdrawn in a decision
+of its own rather than quietly.
+
+The weaker signal: `TestTheProtoAndTheCoreDoNotDrift` starting to need exceptions. It has one
+today (`index`, which lives in the URL path on HTTP and has nowhere to sit in a body-decoded
+struct) and the reason is structural. A second and a third would mean the two surfaces are no
+longer one request in two encodings, and the drift test would be documenting the drift instead of
+preventing it.

@@ -270,7 +270,23 @@ func (s *Server) handle(fn func(http.ResponseWriter, *http.Request) error) http.
 }
 
 func (s *Server) writeError(w http.ResponseWriter, err error) {
-	status, kind := http.StatusInternalServerError, "internal_server_error"
+	status, kind := StatusOf(err)
+	writeJSON(w, status, map[string]any{
+		"error":  map[string]string{"type": kind, "reason": err.Error()},
+		"status": status,
+	})
+}
+
+// StatusOf reports the HTTP status and error type an error should be answered
+// with. Anything it does not recognise is a 500, because an error this package
+// cannot classify is one it did not mean to produce.
+//
+// Exported for the gRPC surface, which cannot reach apiError and has to map these
+// onto gRPC codes. One classifier rather than two is the point: a refusal that is
+// a 400 over HTTP and an Unknown over gRPC would be the same engine giving two
+// answers about whose fault a request was.
+func StatusOf(err error) (status int, kind string) {
+	status, kind = http.StatusInternalServerError, "internal_server_error"
 
 	var api *apiError
 	var tooLarge *http.MaxBytesError
@@ -288,11 +304,7 @@ func (s *Server) writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrClosed):
 		status, kind = http.StatusServiceUnavailable, "cluster_block_exception"
 	}
-
-	writeJSON(w, status, map[string]any{
-		"error":  map[string]string{"type": kind, "reason": err.Error()},
-		"status": status,
-	})
+	return status, kind
 }
 
 // acknowledge is the answer to a request that changed an index's shape and has

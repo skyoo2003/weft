@@ -96,7 +96,8 @@ func call(t *testing.T, srv *httptest.Server, method, path, body string, want in
 func dial(t *testing.T, reg *opensearch.Registry) weftpb.WeftClient {
 	t.Helper()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -369,17 +370,27 @@ func TestTheProtoAndTheCoreDoNotDrift(t *testing.T) {
 }
 
 // snake turns an exported Go field name into the proto spelling of it.
+//
+// A run of capitals is one word, so `ID` is `id` and not `i_d`. Without that the
+// drift check would report a mismatch on the one field every message has, which
+// is the shape of failure that gets a test disabled rather than read.
 func snake(name string) string {
+	upper := func(r byte) bool { return r >= 'A' && r <= 'Z' }
+	lower := func(r byte) bool { return r >= 'a' && r <= 'z' }
+
 	var b strings.Builder
-	for i, r := range name {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteRune(r + ('a' - 'A'))
+	for i := range len(name) {
+		c := name[i]
+		if !upper(c) {
+			b.WriteByte(c)
 			continue
 		}
-		b.WriteRune(r)
+		// A boundary is a capital following a lower-case letter, or one that
+		// begins a word: the last capital of a run before a lower-case tail.
+		if i > 0 && (lower(name[i-1]) || (i+1 < len(name) && lower(name[i+1]))) {
+			b.WriteByte('_')
+		}
+		b.WriteByte(c + ('a' - 'A'))
 	}
 	return b.String()
 }

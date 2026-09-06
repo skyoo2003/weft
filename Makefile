@@ -1,4 +1,4 @@
-.PHONY: all fmt build vet test lint lint-if-present lint-docs lint-docs-if-present spdx fuzz arch deps run serve compat example clean \
+.PHONY: all fmt build vet test lint lint-if-present lint-docs lint-docs-if-present spdx fuzz arch deps run serve serve-grpc compat compat-grpc grpc-build example clean \
 	changelog changelog-new changelog-check docs-site release-check \
 	eval eval-full eval-data recall bench bench-preflight bench-compare bench-build bench-head bench-http
 
@@ -64,6 +64,9 @@ lint:
 	# in the repository no lint gate ever reads. It picks up this same .golangci.yaml
 	# by walking up from bench/.
 	cd bench && golangci-lint run ./...
+	# grpc/ too, and for the identical reason: a second nested module is a second
+	# place `./...` does not reach.
+	cd grpc && golangci-lint run ./...
 
 # `lint`, minus the refusal to run without the tool. This is what `all` calls, so
 # that the gate a contributor runs and the gate CI runs judge the same rules
@@ -398,6 +401,10 @@ eval-data:
 	fi
 	go run ./cmd/weft-eval build
 
+# The default data directory both servers read, so `make serve` and `make serve-grpc`
+# in two terminals are two surfaces over one index rather than two empty ones.
+WEFTD_DATA ?= .weftd-data
+
 run:
 	go run ./cmd/weft
 
@@ -437,6 +444,37 @@ compat:
 		echo "SKIP: $(PYTHON) has no opensearch-py. See the PYTHON note above this target in the Makefile."; \
 	fi
 
+# Milestone 31's judgment sentence: a stock gRPC client drives weftg unmodified.
+#
+# Same shape as `compat` and there for the same reason. The Go tests in grpc/
+# already drive every one of these calls in-process; what only a foreign
+# toolchain can say is whether the descriptor this repository ships is one it can
+# compile and talk to. The script generates its own stubs from weft.proto, so a
+# .proto that drifted from the service fails here and nowhere else.
+#
+#	python3 -m venv /tmp/weft-grpc-venv
+#	/tmp/weft-grpc-venv/bin/pip install grpcio grpcio-tools
+#	make compat-grpc PYTHON=/tmp/weft-grpc-venv/bin/python
+compat-grpc:
+	@if command -v $(PYTHON) >/dev/null && $(PYTHON) -c 'import grpc_tools' >/dev/null 2>&1; then \
+		$(PYTHON) grpc/testdata/compat_grpc.py; \
+	else \
+		echo "SKIP: $(PYTHON) has no grpcio-tools. See the note above this target in the Makefile."; \
+	fi
+
+# The gRPC side type-checked and tested. Its own target because it is its own
+# module, exactly as bench-build is: `go build ./...` at the root does not descend
+# into a nested module, so without this nothing in the gate ever compiles grpc/
+# and it rots silently between the runs that use it.
+#
+# It also re-checks the generated code against the .proto by compiling both, which
+# is the cheap half of what compat-grpc pays for properly.
+grpc-build:
+	cd grpc && go vet ./... && go test ./...
+
+serve-grpc:
+	cd grpc && go run ./cmd/weftg -data ../$(WEFTD_DATA)
+
 example:
 	go run ./examples/basic
 
@@ -447,3 +485,4 @@ clean:
 	# `go build` run there by hand leaves a 20 MiB executable named after the directory.
 	cd bench && go clean ./...
 	rm -f bench/bench
+	cd grpc && go clean ./...

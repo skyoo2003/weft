@@ -127,7 +127,7 @@ func FuzzParseNative(f *testing.F) {
 	x := fuzzIndex(f)
 
 	f.Fuzz(func(t *testing.T, body string) {
-		var req nativeRequest
+		var req NativeRequest
 		if body != "" && json.Unmarshal([]byte(body), &req) != nil {
 			return // the handler answers this with a 400 and never reaches the plan
 		}

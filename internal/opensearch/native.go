@@ -3,6 +3,7 @@
 package opensearch
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -43,14 +44,21 @@ import (
 // gets a name OpenSearch does not use. It cannot collide with an index either,
 // because validName rejects a leading underscore.
 
-// nativeRequest is a search in weft's own terms.
+// NativeRequest is a search in weft's own terms.
+//
+// Exported, along with NativeResult and NativeHit, because HTTP is not the only
+// encoding of it: `grpc/` is a second module that converts protobuf to this
+// struct and calls NativeSearch, so the two surfaces cannot disagree about what a
+// request means without one of them failing to compile. The struct tags are
+// HTTP's; the field names are the contract, and a test in that module fails the
+// build if a field here has no counterpart in the .proto.
 //
 // Streams is []map[string]json.RawMessage and not a named union on purpose: an
 // entry is exactly one leaf clause, in the spelling `_search` already accepts, so
 // a client that knows one surface moves a clause to the other by cutting and
 // pasting it. Naming the kinds here would be a second list to keep in step with
 // `compiler.clause`, and the two would drift on the first signal added to one.
-type nativeRequest struct {
+type NativeRequest struct {
 	Streams []map[string]json.RawMessage `json:"streams"`
 	Weights []float64                    `json:"weights"`
 
@@ -59,6 +67,81 @@ type nativeRequest struct {
 	Depth *int `json:"depth"`
 
 	Breakdown bool `json:"breakdown"`
+}
+
+// NativeHit is one result, in the shape both encodings build their own from.
+//
+// Breakdown holds one entry per stream the request named, nil where that stream
+// had no opinion. HTTP writes it as JSON null; the gRPC service writes a Rank
+// with present=false, because proto3 has no null and a zero would read as rank 0.
+type NativeHit struct {
+	ID        string
+	Score     float64
+	Source    json.RawMessage
+	Breakdown []*int
+}
+
+// NativeResult is one page of a ranking.
+//
+// Total is how many candidates the fusion produced before the page was cut, and
+// it is a lower bound unless Exact — the search returns a top-k, so a full prefix
+// says only that at least this many matched.
+type NativeResult struct {
+	Hits  []NativeHit
+	Total int
+	Exact bool
+}
+
+// NativeSearch fuses the streams a request names and returns one page of the
+// ranking.
+//
+// This is the whole of the native surface. Both encodings are conversion either
+// side of this call and neither decides anything — which is what makes "one
+// engine, two wires" a property of the code rather than a claim about it.
+func NativeSearch(ctx context.Context, x *Index, req NativeRequest) (NativeResult, error) {
+	if len(req.Streams) == 0 {
+		return NativeResult{}, badRequest(kindIllegalArgument,
+			"a native search names no streams: the request *is* the stream list, so an empty one is not an "+
+				`empty ranking but a body that forgot its query. Send {"streams":[{"match":{"text":"..."}}]}`)
+	}
+
+	p := plan{size: defaultSize}
+	if apiErr := readNativeWindow(&p, req); apiErr != nil {
+		return NativeResult{}, apiErr
+	}
+
+	c := &compiler{ix: x.Engine(), m: x.Mapping(), p: &p}
+	groups, apiErr := c.streams(req.Streams, req.Weights, "stream")
+	if apiErr != nil {
+		return NativeResult{}, apiErr
+	}
+
+	// The fuser is wrapped rather than the streams re-derived. Calling every
+	// scorer a second time to find out where it put a document would be a second
+	// opinion about a ranking that has already happened, and the two can disagree
+	// the moment a scorer is not deterministic — which is exactly what a
+	// breakdown exists to rule out. cmd/weft's -breakdown does it this way for
+	// the same reason.
+	ranks := map[engine.DocID][]int{}
+	if req.Breakdown {
+		p.fuse = capture(p.fuser(), ranks)
+	}
+
+	hits, total, exact, err := runSearch(ctx, x, p)
+	if err != nil {
+		return NativeResult{}, fmt.Errorf("native search %q: %w", x.Name(), err)
+	}
+	if req.Breakdown {
+		attach(x, hits, ranks, groups, len(req.Streams))
+	}
+
+	out := NativeResult{Hits: make([]NativeHit, 0, len(hits)), Total: total, Exact: exact}
+	for _, h := range hits {
+		out.Hits = append(out.Hits, NativeHit{
+			ID: h.ID, Score: h.Score, Source: h.Source, Breakdown: h.Breakdown,
+		})
+	}
+	return out, nil
 }
 
 // nativeSearch answers POST /{index}/_weft/search.
@@ -74,49 +157,28 @@ func (s *Server) nativeSearch(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	var req nativeRequest
+	var req NativeRequest
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &req); err != nil {
 			return badRequest("parsing_exception", "the search body did not decode as JSON: %v", err)
 		}
 	}
-	if len(req.Streams) == 0 {
-		return badRequest(kindIllegalArgument,
-			"a native search names no streams: the request *is* the stream list, so an empty one is not an "+
-				`empty ranking but a body that forgot its query. Send {"streams":[{"match":{"text":"..."}}]}`)
-	}
 
-	p := plan{size: defaultSize}
-	if apiErr := readNativeWindow(&p, req); apiErr != nil {
-		return apiErr
-	}
-
-	c := &compiler{ix: x.Engine(), m: x.Mapping(), p: &p}
-	groups, apiErr := c.streams(req.Streams, req.Weights, "stream")
-	if apiErr != nil {
-		return apiErr
-	}
-
-	// The fuser is wrapped rather than the streams re-derived. Calling every
-	// scorer a second time to find out where it put a document would be a second
-	// opinion about a ranking that has already happened, and the two can disagree
-	// the moment a scorer is not deterministic — which is exactly what a
-	// breakdown exists to rule out. cmd/weft's -breakdown does it this way for
-	// the same reason.
-	ranks := map[engine.DocID][]int{}
-	if req.Breakdown {
-		p.fuse = capture(p.fuser(), ranks)
-	}
-
-	hits, total, exact, err := runSearch(r.Context(), x, p)
+	res, err := NativeSearch(r.Context(), x, req)
 	if err != nil {
-		return fmt.Errorf("native search %q: %w", x.Name(), err)
-	}
-	if req.Breakdown {
-		attach(x, hits, ranks, groups, len(req.Streams))
+		return err
 	}
 
-	writeHits(w, hits, total, exact, time.Since(start))
+	// Back into the shape writeHits already writes, so the two surfaces answer in
+	// one dialect: the null-versus-empty-array rule and the took field go right
+	// once rather than once per encoding.
+	hits := make([]hit, 0, len(res.Hits))
+	for _, h := range res.Hits {
+		hits = append(hits, hit{
+			Index: x.Name(), ID: h.ID, Score: h.Score, Source: h.Source, Breakdown: h.Breakdown,
+		})
+	}
+	writeHits(w, hits, res.Total, res.Exact, time.Since(start))
 	return nil
 }
 
@@ -128,7 +190,7 @@ func (s *Server) nativeSearch(w http.ResponseWriter, r *http.Request) error {
 // handed, and runSearch hands it max(from+size, depth). A depth a request names is
 // therefore a remote allocation primitive exactly as a size is, and it is refused
 // before it is allocated rather than after.
-func readNativeWindow(p *plan, req nativeRequest) *apiError {
+func readNativeWindow(p *plan, req NativeRequest) *apiError {
 	if req.Size != nil {
 		if *req.Size < 0 {
 			return badRequest(kindIllegalArgument, "size is not negative, got %d", *req.Size)
