@@ -1,14 +1,13 @@
 version: 2
 
-# Only github-actions. There is no gomod entry because there is nothing for one
-# to watch: go.mod has no require block, there is no go.sum, and
+# Actions and one base image. There is no gomod entry because there is nothing
+# for one to watch: go.mod has no require block, there is no go.sum, and
 # TestNoExternalDependencies fails the build if that ever stops being true.
 #
-# The actions are therefore the entire external supply chain of this repository
-# — someone else's code, running with this repository's token. They are pinned
-# to commit SHAs in the workflow files, which is what makes a moved tag
-# harmless and what makes this file necessary: a pin with no way to move is a
-# pin that rots.
+# Those two are therefore the entire external supply chain of this repository —
+# someone else's code, running with this repository's token or shipped inside
+# its image. Both are pinned, which is what makes a moved tag harmless and what
+# makes this file necessary: a pin with no way to move is a pin that rots.
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -31,3 +30,19 @@ updates:
       actions:
         patterns:
           - "*"
+
+  # Dockerfile.goreleaser's `FROM alpine:3.23`, in both stages. No grouping and
+  # no limit worth setting: there is one image, so there is at most one pull
+  # request, and it is the one that carries whatever alpine has patched.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

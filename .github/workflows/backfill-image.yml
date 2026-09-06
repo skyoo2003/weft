@@ -1,0 +1,103 @@
+name: Backfill image
+
+# Publishes ghcr.io/skyoo2003/weft for a tag that already exists: one cut before
+# the image did, or one whose release job died between the archives and the
+# push. Run it by hand from the Actions tab.
+#
+# It does not use GoReleaser, and that is the point. GoReleaser's release
+# pipeline wants to own the GitHub release, and aiming it at a tag that already
+# has one is how assets people have already downloaded get replaced. Everything
+# here is `go build` and `docker buildx`, which touch the registry and nothing
+# else — the release page is not writable from this job at all.
+#
+# The image will not be byte-identical to a release-job image for the same tag.
+# `go build` stamps the main module version and the VCS revision from the
+# checkout it runs in, so two builds of the same source differ in those bytes.
+# The compiled code is the same; the metadata records where it was assembled.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build the image from, e.g. v0.1.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io; deliberately no contents: write
+    steps:
+      # Two checkouts, because the tag being backfilled predates the packaging.
+      # The default branch supplies Dockerfile.goreleaser; the tag supplies the
+      # source. Taking the Dockerfile from the tag would mean this workflow
+      # could only ever backfill tags that did not need backfilling.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # checkout v7.0.1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # checkout v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          path: src
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # setup-go v7.0.0
+        with:
+          go-version-file: src/go.mod
+          cache: false
+
+      # The flags are .goreleaser.yaml's, copied rather than shared because
+      # there is nothing to share them through. If that file's builds change,
+      # this is the second place to change.
+      - name: Build the binaries the image will hold
+        working-directory: src
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          set -eux
+          for arch in amd64 arm64; do
+            mkdir -p "../context/linux/${arch}"
+            for cmd in weft weftd; do
+              GOARCH="${arch}" go build -trimpath -ldflags '-s -w' \
+                -o "../context/linux/${arch}/${cmd}" "./cmd/${cmd}"
+            done
+          done
+          cp ../Dockerfile.goreleaser ../context/
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # setup-buildx-action v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # login-action v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One tag, the one that was asked for. A backfill must not move `latest`
+      # or a `v0.1` at a moment chosen by whoever clicked the button.
+      - name: Build and push
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eux
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file context/Dockerfile.goreleaser \
+            --provenance=false \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label "org.opencontainers.image.source=https://github.com/skyoo2003/weft" \
+            --label "org.opencontainers.image.title=weft" \
+            --label "org.opencontainers.image.description=Keyword, vector and graph search engine whose default operation is fusion" \
+            --label "org.opencontainers.image.revision=$(git -C src rev-parse HEAD)" \
+            --label "org.opencontainers.image.version=${TAG#v}" \
+            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            --tag "ghcr.io/skyoo2003/weft:${TAG}" \
+            --push context
+
+      - name: Show what was published
+        env:
+          TAG: ${{ inputs.tag }}
+        run: docker buildx imagetools inspect "ghcr.io/skyoo2003/weft:${TAG}"

@@ -1,0 +1,5 @@
+kind: Added
+body: weft now publishes a container image to `ghcr.io/skyoo2003/weft` and a Homebrew cask to `skyoo2003/homebrew-tap` on every tag, both carrying `weftd` alongside the `weft` CLI. v0.1.0 was backfilled into both channels, and its cask installs the CLI alone because that is all its archives held.
+time: 2026-09-06T19:31:00.712225+09:00
+custom:
+    Issue: "33"

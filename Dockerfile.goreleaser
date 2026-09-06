@@ -1,0 +1,33 @@
+# The image exists for the reason the archives do: so that someone evaluating
+# weft can index a corpus and query it without a Go toolchain. It is not a
+# deployment artefact. weftd has no authentication and no TLS, sustained load
+# collapses rather than degrades, and docs/LIMITATIONS.md is the full account.
+#
+# Two binaries, one image. ENTRYPOINT is weftd because a server is what a
+# container is for; the CLI is reached with `--entrypoint weft`.
+
+# The one RUN in this file is pinned to BUILDPLATFORM, so it executes natively
+# on an amd64 runner rather than under emulation. That is what keeps the final
+# stage COPY-only, and a COPY-only final stage is what lets buildx assemble
+# linux/arm64 with no QEMU and no binfmt.
+FROM --platform=$BUILDPLATFORM alpine:3.23 AS prep
+RUN mkdir -p /out/var/lib/weft && chown -R 65534:65534 /out/var/lib/weft
+
+FROM alpine:3.23
+ARG TARGETPLATFORM
+COPY --from=prep /out/ /
+COPY ${TARGETPLATFORM}/weft  /usr/bin/weft
+COPY ${TARGETPLATFORM}/weftd /usr/bin/weftd
+
+# weftd binds 127.0.0.1 by default, and cmd/weftd says why: no authentication,
+# no TLS. Inside a container that default makes a published port unreachable,
+# so the CMD overrides it — which moves the decision to whoever passes `-p`. A
+# published port here is an open one.
+#
+# No VOLUME. Declaring one makes every `docker run` without `-v` leave an
+# anonymous volume behind, and the index this writes is the thing you most want
+# to still be able to find afterwards.
+EXPOSE 9200
+USER 65534:65534
+ENTRYPOINT ["weftd"]
+CMD ["-addr", "0.0.0.0:9200", "-data", "/var/lib/weft"]
