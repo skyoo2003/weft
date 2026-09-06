@@ -14,4 +14,4 @@ Those three have kinds of their own below. A release that moved none of them and
 
 **The module version and the format version are independent.** `v0.2.0` does not imply format 2, and a format bump does not force a major version, because weft is v0.x and its API can break inside a minor either way. They count two different things: one an API you compile against, one bytes already on your disk.
 
-Entries are written with [changie](https://changie.dev) as the change is made, not reconstructed at release time. `make changelog-new` adds one.
+Entries are written with [changie](https://changie.dev) as the change is made, not reconstructed at release time. `make changelog-new` adds one, and an entry is one sentence — two when the second says what you have to do about the first.

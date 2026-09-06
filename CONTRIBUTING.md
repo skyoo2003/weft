@@ -57,7 +57,7 @@ Generated from the `Makefile`, which is the source of truth. `make help` is not 
 | `make bench-preflight` | The ladder's top rung alone, about a minute. Run it first and read two lines — three ladders have been spent on machines that could not reproduce their own published figures |
 | `make bench-http` | The same ladder through a socket. Starts `weftd`, drives it over HTTP, stops it, so the only difference from `bench` is the surface and the second process |
 | `make bench-build`, `make bench-compare`, `make bench-head` | The bleve comparison, which is its own module: vet + test it; run the ladder against bleve; the head-to-head microbenchmark milestone 22 reads |
-| `make changelog`, `make changelog-new`, `make changelog-check` | Render `CHANGELOG.md`; start an entry; fail if it was hand-edited |
+| `make changelog`, `make changelog-new`, `make changelog-check` | Render `CHANGELOG.md`; start an entry — one sentence, two at most, which `changie` refuses past 500 characters; fail if it was hand-edited |
 | `make docs-site`, `make release-check`, `make clean` | Render the docs site from `/docs`; dry-run the release pipeline before the tag is unwithdrawable; remove build output |
 
 `fmt`, `build`, `vet` and `test` are the four `all` is made of and can be run by name; `lint-if-present` and `lint-docs-if-present` are how `all` reaches the two linters without requiring them, and are not meant to be typed.
@@ -86,6 +86,8 @@ The main extension path is written down once, in [docs/SCORERS.md](docs/SCORERS.
 ## Pull requests
 
 Fill in [the template](.github/PULL_REQUEST_TEMPLATE.md). Its five sections ask what changed and why, how you verified it, what deserves attention, and what might bite later; answering them is most of the review.
+
+A change a caller can notice also needs a changelog entry, and `make changelog-new` writes one into `changes/unreleased/`. It is one sentence — two when the second says what you have to do about the first — and `changie` refuses a body past 500 characters, which is that rule as something the command enforces rather than something a reviewer has to notice. What belongs in the entry is the claim; the argument for it belongs in this pull request and the mechanism in [docs/](docs/), both of which an entry can link to rather than repeat.
 
 Commit messages: say why. `git log -p` already says what.
 
