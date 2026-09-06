@@ -29,7 +29,7 @@ Milestone 4 ran ahead of 3 because the dataset fits in memory and the project's 
 
 ## Versioning
 
-No tag yet; the first will be `v0.1.0`. Until then `go get` resolves to a pseudo-version naming a commit, which is the honest state — a tag would give you a shorter name without changing anything the production warning above says.
+`v0.1.0` is the first tag. It gives you a shorter name than the pseudo-version `go get` resolved to before it, and it changes nothing the production warning above says — a tag is a commit you can name, not a claim that the code became ready.
 
 [CHANGELOG](../CHANGELOG.md) is where a version tells you whether you have work to do, and it records three things only: the exported API of every package under `pkg/`, the on-disk format version, and the minimum Go version. The milestone numbers in the table above are not among them.
 

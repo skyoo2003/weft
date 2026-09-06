@@ -1,8 +1,8 @@
 name: Release
 
 # Runs on a tag that has already been pushed, so like the CI run on the same
-# tag it reports rather than prevents. CONTRIBUTING's "Cutting a release" is
-# where the prevention lives: confirm the commit is green, then tag it.
+# tag it reports rather than prevents. RELEASE.md is where the prevention
+# lives: confirm the commit is green, then tag it.
 #
 # The one thing this does refuse outright is a tag with no batched changie file.
 # That check belongs here rather than in CI because it is a release-time fact —
@@ -37,7 +37,7 @@ jobs:
         run: |
           if [ ! -f "changes/${GITHUB_REF_NAME}.md" ]; then
             echo "::error::changes/${GITHUB_REF_NAME}.md not found."
-            echo "::error::Run 'changie batch ${GITHUB_REF_NAME}' and 'make changelog', commit, then tag that commit. See CONTRIBUTING.md#cutting-a-release."
+            echo "::error::Run 'changie batch ${GITHUB_REF_NAME}' and 'make changelog', commit, then tag that commit. See RELEASE.md step 1."
             exit 1
           fi
 
