@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-There are no releases yet, so there is nothing to backport to. Fixes land on `main`, and `main` is the only thing supported.
+`main` is the only thing supported. Fixes land there and reach you in the next release; nothing is backported to an earlier tag, because one maintainer cannot promise to maintain two lines. If a fix matters to you before the release carrying it is cut, depend on the commit.
 
 ## Reporting a vulnerability
 

@@ -1,5 +1,5 @@
 # Changie configuration — https://changie.dev/config/
-# The release procedure that uses it is in CONTRIBUTING.md, "Cutting a release".
+# The release procedure that uses it is in RELEASE.md.
 #
 # What this changes about how weft records releases: entries are written when
 # the change is made, into changes/unreleased/, instead of being reconstructed
