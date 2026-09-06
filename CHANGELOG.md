@@ -18,6 +18,10 @@ Entries are written with [changie](https://changie.dev) as the change is made, n
 
 ## Unreleased
 
+### Added
+
+- weft now publishes a container image to `ghcr.io/skyoo2003/weft` and a Homebrew cask to `skyoo2003/homebrew-tap` on every tag, both carrying `weftd` alongside the `weft` CLI. v0.1.0 was backfilled into both channels, and its cask installs the CLI alone because that is all its archives held. ([#33](https://github.com/skyoo2003/weft/issues/33))
+
 ### Documentation
 
 - Every document is about half as long and says the same things: 17,198 lines become 7,240 with every figure, interval, verdict and falsification condition intact, because what was cut is density rather than measurement. Three stale numbers were corrected against the code that decides them — the DSL refusal rate is 6 of 25 rows, 24.0%, and `pkg/` holds 11,039 implementation and 15,427 test lines — and no exported API moved and no `.go` file was touched. ([#31](https://github.com/skyoo2003/weft/issues/31))

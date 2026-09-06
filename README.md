@@ -79,6 +79,28 @@ go run ./cmd/weft inspect -data ./ix -term fusion
 
 `weft` has five subcommands: `index`, `search`, `inspect`, `check` and `encode`. Between them they reach every callable symbol the library exports but three, and those three are named with their reason in `cmd/weft/coverage_test.go`. That test reads the golden API files as data, so an export no command can call fails the build.
 
+### Without a checkout
+
+Everything above assumes a clone and a Go toolchain. Two ways to the same binaries without either:
+
+```bash
+brew install skyoo2003/tap/weft    # macOS and Linux; v0.1.0 installs weft alone, weftd from the next tag
+docker run --rm -p 9200:9200 -v weft-data:/var/lib/weft ghcr.io/skyoo2003/weft:v0.1.0
+```
+
+The image holds both binaries and runs `weftd`. The CLI is one flag away:
+
+```bash
+docker run --rm -i -v weft-data:/var/lib/weft --entrypoint weft \
+  ghcr.io/skyoo2003/weft:v0.1.0 index -data /var/lib/weft < corpus.jsonl
+```
+
+Three things the image does that the commands above do not:
+
+- **It binds `0.0.0.0`.** The loopback default `weftd` uses everywhere else would make a published port unreachable, so the image overrides it — which means what `-p` publishes is open, and there is still no authentication and no TLS.
+- **It runs as uid 65534.** A named volume inherits that ownership and works as written; a bind mount does not, so pass `--user "$(id -u):$(id -g)"` if you mount a host directory.
+- **It has no `latest` tag**, and no moving `v0.1` either. The API may break inside a minor while this is v0.x, so the version you pin is the version you tested.
+
 ### Over HTTP
 
 ```bash
