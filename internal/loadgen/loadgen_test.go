@@ -130,7 +130,7 @@ func TestOpenLoopDoesNotLetTheServerSlowTheLoad(t *testing.T) {
 		}
 	}
 
-	samples, shed := Drive(context.Background(), rate, n, 256, do)
+	samples, shed, _ := Drive(context.Background(), rate, n, 256, do)
 	if len(samples)+shed != n {
 		t.Fatalf("samples %d + shed %d != %d requested", len(samples), shed, n)
 	}
@@ -161,7 +161,7 @@ func TestOpenLoopDoesNotLetTheServerSlowTheLoad(t *testing.T) {
 func TestOpenLoopShedsRatherThanBlocks(t *testing.T) {
 	const n = 60
 	start := time.Now()
-	samples, shed := Drive(context.Background(), 1000, n, 2, func(int) {
+	samples, shed, _ := Drive(context.Background(), 1000, n, 2, func(int) {
 		time.Sleep(30 * time.Millisecond)
 	})
 	elapsed := time.Since(start)
@@ -179,6 +179,47 @@ func TestOpenLoopShedsRatherThanBlocks(t *testing.T) {
 	}
 }
 
+// TestDispatchLatenessIsMeasuredBeforeTheShedBranch pins the reading that acquits the
+// generator, and pins it where it has to be taken.
+//
+// Every latency here is measured from the intended send time, which is what the test
+// above is about. What that cannot say is whether the send loop met the schedule at
+// all: a loop running behind charges its own lateness to the server, and the report
+// then blames the engine for the instrument. Four ladders came back void with that
+// question open and nothing in the data to close it.
+//
+// Two assertions, and the first is the one with a wrong answer available. A lateness
+// sampled after the shed branch would be a sample of the requests the cap admitted —
+// and the cap binds in the same stretch where the loop is behind, so the sample would
+// systematically omit the interval it exists to describe. Counting entries against n
+// is what forbids that placement.
+func TestDispatchLatenessIsMeasuredBeforeTheShedBranch(t *testing.T) {
+	// The configuration of TestOpenLoopShedsRatherThanBlocks, which sheds by
+	// construction: 1000/s of 30ms work against a cap of 2.
+	const n = 60
+	_, shed, late := Drive(context.Background(), 1000, n, 2, func(int) {
+		time.Sleep(30 * time.Millisecond)
+	})
+	if shed == 0 {
+		t.Fatal("the shedding configuration shed nothing, so this test is not measuring what it says")
+	}
+	if len(late) != n {
+		t.Errorf("%d dispatch samples over %d requests with %d shed; the shed requests are "+
+			"missing, which drops exactly the stretch where the loop falls behind",
+			len(late), n, shed)
+	}
+
+	// With room to spare the loop should be on schedule. 5ms is four times the worst
+	// dispatch lateness measured at the ladder's top rate on the reference machine, so
+	// a failure here is a real regression rather than a busy CI runner.
+	_, _, idle := Drive(context.Background(), 100, 50, 64, func(int) {})
+	if p50 := Summarize(idle).P50; p50 > 5*time.Millisecond {
+		t.Errorf("dispatch p50 %v at 100/s of no work: the send loop is late against its own "+
+			"schedule, so every latency it reports carries the generator's lateness as the "+
+			"server's", p50)
+	}
+}
+
 // TestOpenLoopRespectsCancellation keeps a long ladder interruptible. A rung is
 // minutes of wall clock and Ctrl-C has to end it.
 func TestOpenLoopRespectsCancellation(t *testing.T) {
@@ -186,7 +227,7 @@ func TestOpenLoopRespectsCancellation(t *testing.T) {
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
 
 	start := time.Now()
-	samples, _ := Drive(ctx, 100, 10000, 64, func(int) {})
+	samples, _, _ := Drive(ctx, 100, 10000, 64, func(int) {})
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("10000 samples at 100/s ran %v after cancellation at 50ms", elapsed)
 	}
@@ -336,10 +377,16 @@ func TestGCPauseTotalDoesNotAllocate(t *testing.T) {
 func TestDriveRejectsANonPositiveRate(t *testing.T) {
 	for _, rate := range []float64{0, -5, math.NaN()} {
 		var ran atomic.Int64
-		samples, shed := Drive(context.Background(), rate, 100, 8, func(int) { ran.Add(1) })
+		samples, shed, late := Drive(context.Background(), rate, 100, 8, func(int) { ran.Add(1) })
 		if len(samples) != 0 || shed != 0 || ran.Load() != 0 {
 			t.Errorf("Drive at rate %v sent %d requests (%d samples, %d shed); a "+
 				"non-positive rate has no schedule", rate, ran.Load(), len(samples), shed)
+		}
+		// A schedule that does not exist has no lateness either. An empty slice here
+		// would summarize to a zero p50 and print as a loop dispatching perfectly.
+		if len(late) != 0 {
+			t.Errorf("Drive at rate %v returned %d dispatch samples for a rung it never sent",
+				rate, len(late))
 		}
 	}
 }
@@ -359,7 +406,7 @@ func TestOpenLoopCancelsWhenBehindSchedule(t *testing.T) {
 
 	// 1e9/s: interval rounds to a nanosecond, so the schedule is behind from the
 	// first iteration and time.Until(due) is never positive.
-	samples, shed := Drive(ctx, 1e9, 1_000_000, 8, func(int) {})
+	samples, shed, _ := Drive(ctx, 1e9, 1_000_000, 8, func(int) {})
 	if len(samples)+shed > 1000 {
 		t.Errorf("an already-cancelled Drive sent %d of 1,000,000 requests; the "+
 			"cancellation check is only reachable while the loop is ahead of schedule",
@@ -439,7 +486,7 @@ func TestSaturationIsTheFirstRungPastTwiceTheUnloadedMedian(t *testing.T) {
 // which is the one clock both the driver and whatever it is racing against share.
 func TestSampleCarriesItsOffset(t *testing.T) {
 	const n = 8
-	samples, shed := Drive(context.Background(), 200, n, 8, func(int) {})
+	samples, shed, _ := Drive(context.Background(), 200, n, 8, func(int) {})
 	if len(samples)+shed != n {
 		t.Fatalf("samples %d + shed %d != %d", len(samples), shed, n)
 	}

@@ -352,6 +352,70 @@ func TestPrepareRefusesAJoinWithNoEvidenceItCanWork(t *testing.T) {
 	}
 }
 
+// TestPrepareRefusesToRunBesideAnotherPrepare is the guard D-037 exists for.
+//
+// Two prepares against one cache do not error and do not conflict in any way either of
+// them can see: the second resumes correctly, skipping what the first has written, and
+// then both fetch the same remaining documents and append both copies. On 2026-09-08
+// that put 30,192 keys in the file twice. The only symptom reached `build`, which
+// blamed a cause that had not happened.
+//
+// The refusal has to name the file, because the one case the lock cannot distinguish is
+// a run that was killed — and the operator resolving that needs the path, not advice.
+func TestPrepareRefusesToRunBesideAnotherPrepare(t *testing.T) {
+	dir := evalDir(t, map[string]string{
+		corpusFile:   twoDocCorpus,
+		metadataFile: "cord_uid,doi,pmcid,pubmed_id,s2_id\na,,,,100\nb,,,,200\n",
+	})
+	lock := filepath.Join(dir, s2LockFile)
+	if err := os.WriteFile(lock, []byte("pid 1\nstarted 2026-09-08T01:00:00+09:00\n"), 0o644); err != nil {
+		t.Fatalf("seeding the lock: %v", err)
+	}
+
+	err := prepare(context.Background(), []string{"-data", dir, "-any-snapshot"})
+	if err == nil {
+		t.Fatal("prepare started while the cache was locked; two of them append to one file " +
+			"and the duplicates are invisible until build refuses the result")
+	}
+	if !strings.Contains(err.Error(), s2LockFile) {
+		t.Errorf("error %q does not name the lockfile, which is the one thing an operator "+
+			"resolving a killed run needs", err)
+	}
+	// The refusal must be inert. A prepare that declined to run and then removed
+	// somebody else's lock on the way out is worse than one that never checked.
+	if _, statErr := os.Stat(lock); statErr != nil {
+		t.Errorf("the refused run removed the holder's lock: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, s2UnpinnedFile)); statErr == nil {
+		t.Error("the refused run wrote the unpinned marker, so the lock is taken too late " +
+			"to stop this command from touching the data directory")
+	}
+}
+
+// TestPrepareReleasesTheCacheLock: the other half, and the half that decides whether
+// anyone can use this command twice. A lock that outlives its run turns the next
+// prepare into a support question.
+func TestPrepareReleasesTheCacheLock(t *testing.T) {
+	dir := evalDir(t, map[string]string{
+		corpusFile:   twoDocCorpus,
+		metadataFile: "cord_uid,doi,pmcid,pubmed_id,s2_id\nx,,,,999\n",
+		s2File:       `{"key":"a","corpus_id":"100"}` + "\n",
+	})
+
+	if err := prepare(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, s2LockFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the lock outlived the run that took it (stat: %v); the next prepare refuses "+
+			"and the operator has no way to know it is stale", err)
+	}
+	// A second run has to be able to start. This is the assertion that would have
+	// failed had the release been deferred in the wrong scope.
+	if err := prepare(context.Background(), []string{"-data", dir, "-any-snapshot"}); err != nil {
+		t.Errorf("a second prepare after the first returned: %v", err)
+	}
+}
+
 // TestReadS2RecordsAcceptsTombstones: prepare records a key-only entry for a document
 // with no Semantic Scholar side, so a resume stops asking about it. build has to read
 // those back as "known, nothing attached" rather than reject them.

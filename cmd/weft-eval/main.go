@@ -62,6 +62,20 @@ const (
 	// already in the file. Deleting s2.jsonl is what starts over.
 	s2UnpinnedFile = "s2.unpinned"
 
+	// s2LockFile is held for the whole of a prepare, and is what stops a second one
+	// from appending to the cache the first is still writing.
+	//
+	// Nothing stopped that until milestone 14's corpus build, and the failure it
+	// produced is the quiet kind. A second run resumes correctly — it skips what the
+	// first has written — and then both fetch the same remaining targets and append
+	// both copies. On 2026-09-08 that put 30,192 keys in twice, and neither process
+	// reported anything wrong; `build` refused the result with its "two caches
+	// concatenated?" message, which is the diagnosis for a different cause.
+	//
+	// Beside the cache rather than in it: the cache is append-only and is the artifact,
+	// and a lock is a fact about right now. See D-037.
+	s2LockFile = "s2.jsonl.lock"
+
 	// queryVecFile is written by internal/eval/testdata/gen_query_vectors.py. It is
 	// optional; run reports its absence rather than quietly measuring a text-only
 	// baseline.
@@ -185,6 +199,54 @@ func dataFlags(name string, args []string, extra func(*flag.FlagSet)) (*string, 
 
 // ---------------------------------------------------------------- prepare
 
+// lockCache takes the cache's exclusive lock and returns the function that drops it.
+//
+// O_EXCL is the whole mechanism: the create either happens or it does not, and there
+// is no window between checking and taking. Anything built on Stat-then-Create has
+// that window, and two prepares started from two terminals seconds apart is exactly
+// the case that finds it.
+//
+// The contents are for the person who reads them. Nothing here parses the file back,
+// and it deliberately does not act on the pid: pids are reused, so a liveness check
+// on a stale lock whose number now belongs to something else reads as live, and
+// stealing the lock on that reading is the failure this exists to prevent. An
+// operator can tell a six-minute-old run from a two-day-old corpse; this program
+// cannot. D-037 records the alternatives.
+func lockCache(path string) (func(), error) {
+	// 0600, which is what s2.jsonl beside it already carries. The lock is owner-only
+	// state about one machine, and a mode another user could write is a lock another
+	// user could forge.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil, fmt.Errorf("%s exists, so another prepare is already writing this cache. "+
+			"Two runs resume from the same file, fetch the same remaining documents and append "+
+			"both copies, which produces a cache build refuses. Wait for it to finish, or delete "+
+			"%s if a previous run was killed", path, path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("creating %s: %w", path, err)
+	}
+	// Written and closed here rather than held open, because the lock is the file's
+	// existence and not the handle. On the error paths the lock is removed first: a
+	// run that failed to record who holds it must not leave one that says nobody does.
+	_, werr := fmt.Fprintf(f, "pid %d\nstarted %s\n", os.Getpid(), time.Now().Format(time.RFC3339))
+	cerr := f.Close()
+	if err := errors.Join(werr, cerr); err != nil {
+		if rmErr := os.Remove(path); rmErr != nil {
+			return nil, fmt.Errorf("writing %s: %w (and removing it: %v)", path, err, rmErr)
+		}
+		return nil, fmt.Errorf("writing %s: %w", path, err)
+	}
+	return func() {
+		// Warned rather than returned. The fetch has already happened by the time this
+		// runs, so failing the command here would report a successful hours-long run as
+		// an error; what the operator needs is the filename, which is in the message.
+		if err := os.Remove(path); err != nil {
+			log.Printf("WARNING: could not remove %s: %v — delete it before the next prepare", path, err)
+		}
+	}, nil
+}
+
 func prepare(ctx context.Context, args []string) error {
 	var apiKey string
 	var limit int
@@ -214,6 +276,16 @@ func prepare(ctx context.Context, args []string) error {
 	corpusPath := filepath.Join(*data, corpusFile)
 	metaPath := filepath.Join(*data, metadataFile)
 	outPath := filepath.Join(*data, s2File)
+
+	// After the flags are validated and before anything is written, including the
+	// unpinned marker below. Ordered that way so a typo in a flag does not leave a
+	// lockfile behind for the next operator to puzzle over, and so nothing this
+	// command creates predates the claim that it is the only one creating it.
+	release, err := lockCache(filepath.Join(*data, s2LockFile))
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	// Before anything is written. This command's output is a cache that later commands
 	// trust as a record of what was asked, so a truncated metadata file here becomes a

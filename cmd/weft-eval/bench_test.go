@@ -4,12 +4,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/skyoo2003/weft/internal/eval"
 	"github.com/skyoo2003/weft/internal/loadgen"
 )
 
@@ -316,6 +319,182 @@ func TestBenchSummaryPrintsNothingWhenNothingWasMeasured(t *testing.T) {
 //
 // The writer is a parameter for the same reason benchSummary's is: printing to
 // os.Stdout is what the command wants and is also why none of this was ever asserted.
+
+// TestBenchWarmupDoesNotCallAQuietMachineSuspended is the false-positive half of
+// milestone 32's third change.
+//
+// The suspension check now spans the cold pass and the sequential replay, and it is
+// fatal — an unloaded median measured across a sleep would scale every rung on the
+// ladder from a machine that was not running. Whether it *fires* correctly is
+// loadgen.unaccounted's own test, which can lie to a clock this one cannot; what has to
+// hold here is that an ordinary warm-up on an awake machine is not refused. A check
+// comparing against the wrong bound would pass review and fail every run.
+func TestBenchWarmupDoesNotCallAQuietMachineSuspended(t *testing.T) {
+	qs := []eval.Query{{ID: "1"}, {ID: "2"}}
+	var failed atomic.Int64
+
+	unloaded, err := benchWarmup(context.Background(), qs, func(int) {
+		time.Sleep(time.Millisecond)
+	}, &failed)
+	if err != nil {
+		t.Fatalf("a warm-up on an awake machine was refused: %v", err)
+	}
+	if unloaded <= 0 {
+		t.Errorf("unloaded median %v; the ladder would derive every rate from it", unloaded)
+	}
+}
+
+// The preflight gate is the pass line docs/PERF.md §5.9 and D-036 registered, and it
+// spent four ladders as a comment. What follows holds it to its own wording — the
+// threshold is loadgen.SaturationRate's constant, it is strictly past, and it reads
+// every rung it was given.
+
+// TestBenchFlagsParsesPreflight: off unless asked for. A gate that defaulted on would
+// turn every exploratory `-rate` run into a failed command.
+func TestBenchFlagsParsesPreflight(t *testing.T) {
+	o, err := benchFlags([]string{"-data", t.TempDir()})
+	if err != nil {
+		t.Fatalf("benchFlags: %v", err)
+	}
+	if o.preflight {
+		t.Error("-preflight defaulted on; an ordinary ladder would exit non-zero for saturating")
+	}
+	o, err = benchFlags([]string{"-data", t.TempDir(), "-preflight"})
+	if err != nil {
+		t.Fatalf("benchFlags -preflight: %v", err)
+	}
+	if !o.preflight {
+		t.Error("-preflight was accepted and ignored")
+	}
+}
+
+// TestPreflightRefusesAMachineThatSaturates is the gate doing the job the comment in
+// the Makefile promised it would do after a fourth void ladder.
+//
+// The boundary case is the one worth having: a rung sitting at exactly twice the
+// unloaded median passes, because SaturationRate is strictly past and a gate that drew
+// the line differently would be a second spelling of saturation.
+func TestPreflightRefusesAMachineThatSaturates(t *testing.T) {
+	const unloaded = 35 * time.Millisecond
+	for _, tc := range []struct {
+		name string
+		p50  time.Duration
+		shed int
+		want bool // want an error
+	}{
+		{"comfortably under", 37 * time.Millisecond, 0, false},
+		{"exactly twice is not saturation", 70 * time.Millisecond, 0, false},
+		{"a hair past twice", 71 * time.Millisecond, 0, true},
+		{"the void machine, 78x", 2730 * time.Millisecond, 0, true},
+		{"shed one, p50 fine", 37 * time.Millisecond, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reports := benchLadderReports([]float64{27.28}, []time.Duration{tc.p50})
+			reports[0].shed = tc.shed
+			err := preflightGate(reports, unloaded)
+			if (err != nil) != tc.want {
+				t.Fatalf("preflightGate(p50 %v, shed %d) = %v, want error: %v",
+					tc.p50, tc.shed, err, tc.want)
+			}
+			if err == nil {
+				return
+			}
+			// The message is the whole product on the failing path: an operator reading
+			// it decides whether to spend three hours.
+			for _, want := range []string{"27.28", "FAILED"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestPreflightReadsEveryRungItWasGiven: -preflight is a gate on whatever rates it was
+// handed, and a probe that checked only the first would pass a ladder whose second rung
+// collapsed.
+func TestPreflightReadsEveryRungItWasGiven(t *testing.T) {
+	const unloaded = 35 * time.Millisecond
+	reports := benchLadderReports(
+		[]float64{3.41, 27.28},
+		benchMillis(37, 2730),
+	)
+	err := preflightGate(reports, unloaded)
+	if err == nil {
+		t.Fatal("a ladder whose second rung sat at 78x the unloaded median passed the gate")
+	}
+	if !strings.Contains(err.Error(), "27.28") {
+		t.Errorf("error %q blames a rung other than the one that failed", err)
+	}
+}
+
+// TestPreflightRefusesARunThatMeasuredNothing. An interrupted run reaches the gate with
+// no rungs, and a loop over nothing reports success — which is the exact failure the
+// gate exists to prevent, arrived at from the other side.
+func TestPreflightRefusesARunThatMeasuredNothing(t *testing.T) {
+	if err := preflightGate(nil, 35*time.Millisecond); err == nil {
+		t.Error("preflight passed a run that measured no rungs")
+	}
+}
+
+// TestPreflightVerdictIsSilentWhenNotAskedFor: an ordinary ladder must not exit
+// non-zero for saturating, which is what the top rung of a five-rung sweep is *for*.
+// The gate is a mode, not a rule the command acquired.
+func TestPreflightVerdictIsSilentWhenNotAskedFor(t *testing.T) {
+	// A ladder that would fail the gate twice over: past twice the median, and shed.
+	reports := benchLadderReports([]float64{27.28}, benchMillis(2730))
+	reports[0].shed = 1438
+	if err := preflightVerdict(false, reports, 35*time.Millisecond); err != nil {
+		t.Errorf("a run without -preflight was judged by the gate anyway: %v", err)
+	}
+	if err := preflightVerdict(true, reports, 35*time.Millisecond); err == nil {
+		t.Error("the same rungs passed with -preflight on")
+	}
+}
+
+// TestBenchReportPrintsTheSendLoopsOwnLateness is the column that says whether the
+// column above it is the server's. Without it a generator running behind its own
+// schedule charges its lateness to the engine and the report reads as an engine that
+// got slower — which is a reading four void rounds could not rule out from the data.
+func TestBenchReportPrintsTheSendLoopsOwnLateness(t *testing.T) {
+	var w bytes.Buffer
+	r := benchReport{
+		rate:     27.28,
+		all:      loadgen.Quantiles{N: 12000, P50: 37 * time.Millisecond, P50ok: true},
+		dispatch: loadgen.Quantiles{N: 12000, P50: 437 * time.Microsecond, P50ok: true, Max: 1218 * time.Microsecond},
+		faults:   loadgen.FaultCounts{Minor: 10},
+		peakRSS:  345 << 20,
+		elapsed:  6 * time.Minute,
+	}
+
+	r.print(&w)
+
+	got := w.String()
+	for _, want := range []string{"dispatch", "437µs", "1.218ms"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestBenchReportOmitsTheDispatchQuantileWhenTooThin: the same rule every other
+// quantile on the line follows. A rung cut short has a handful of dispatch samples, and
+// a p50 printed off them reads as a loop that was on schedule.
+func TestBenchReportOmitsTheDispatchQuantileWhenTooThin(t *testing.T) {
+	var w bytes.Buffer
+	r := benchReport{
+		rate:     27.28,
+		all:      loadgen.Quantiles{N: 12, P50: 37 * time.Millisecond},
+		dispatch: loadgen.Quantiles{N: 12, P50: 400 * time.Microsecond, Max: time.Millisecond},
+		elapsed:  time.Second,
+	}
+
+	r.print(&w)
+
+	if strings.Contains(w.String(), "400µs") {
+		t.Errorf("a 12-sample dispatch p50 was printed as a measurement:\n%s", w.String())
+	}
+}
 
 // TestBenchReportSaysWhichRungRaisedThePeak: the rung that sets the mark is the one
 // whose memory it describes, and it is the only rung that can say so.

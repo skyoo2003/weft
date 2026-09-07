@@ -715,6 +715,8 @@ make bench-http BENCHFLAGS='-rates 3.41,6.82,13.64,27.28 -rotations 200'
 
 `make bench-http` starts `weftd`, waits for it to listen, runs the ladder and stops it. Started by the target rather than by hand, because a run against a server somebody else started is a run whose data directory and uptime are recorded nowhere.
 
+**There is a step missing from that block, and it is registered here rather than discovered at hour three.** `make bench-http` guards on `$(EVAL_DATA)/index`, which is the *engine's* index — what `make eval-data` produces. The load is served from `$(EVAL_DATA)/weftd` (`cmd/weft-eval/bench.go`, `-http-index papers`), and weftd wants its own layout beside the segments: `_source.json` and `_mapping.json`. **Nothing in this repository populates that directory.** Standing it up is a bulk load of all 171,332 documents over HTTP, it is not in the §5.8 budget above, and until it exists the guard passes and the ladder searches an index with nothing in it. Found twice by two readers and written down neither time; this is the writing down.
+
 Three preconditions, and they are the ones four previous rounds failed on rather than a formality:
 
 1. a quiet 3.1-hour window,
@@ -728,6 +730,56 @@ Detach with the `perl` `fork`/`setsid`/`exec` form; a session-managed background
 The two arms do not run the same query. In-process, the `text` arm scores with `scorer/text`'s BM25; over HTTP, a `match` becomes one `query.Glob` stream per token, fused.
 
 The work has the same shape — a vocabulary lookup and a posting walk per token, then a fusion, then a top-k — and the scoring does not. **No nDCG figure may be derived from this arm**, and a latency difference between the two is a difference between two query plans as well as between two transports.
+
+### 5.9 Milestone 32's instrument changes — registered before the run
+
+Four ladders have come back void and none of them was the engine: a run terminated during the index load, a run on a machine that was not quiet, a SIGTERM at 46 minutes, and a lid that closed. What this section registers is four changes to the *instrument*, made before the next ladder rather than after reading it.
+
+They are registered here because [D-012](DECISIONS.md) forbids the opposite. A rule is worth something only if it was not available to be chosen once the numbers were on screen, and "we increased the sample size because the run we did not like fell under the floor" is exactly the move that constraint exists against. Nothing below changes a pass line. The three clauses that live on the ladder keep their wording and their denominators.
+
+#### Change 1 — `-rotations` default 200 → 240
+
+`loadgen.Printable` requires 100 samples beyond a quantile, so a p99 needs 10,000. The default was 200 rotations over 50 judged queries, which is **exactly** 10,000. One shed request at the top rung therefore erases the figure the ladder exists to produce, and the top rung is where shedding happens. This is not hypothetical: milestone 7's repetitions 2 and 3 shed 1,456 and 1,082 and became unpublishable that way ([FINDINGS M7](FINDINGS.md)).
+
+240 rotations is 12,000 samples — the 10,000 a p99 needs, plus 20% headroom for shed.
+
+**What this can move, stated before it does.** The memory clause reads the *ladder's* peak `ru_maxrss` against 120 MiB, with a published denominator of 100.7 MiB ([D-014](DECISIONS.md)). Twenty percent more requests per rung is twenty percent more opportunity for the mark to rise. If clause 3 comes back missed, this change is a candidate explanation and is on the record as one **before** the run rather than offered afterwards. The other two clauses are insensitive to sample count: shed 0 is shed 0, and a p50 over 12,000 samples is the same statistic as a p50 over 10,000.
+
+`bench/`'s own default stays at 200. The bleve comparison is not held against these clauses, and raising both would only make `make bench-compare` longer.
+
+#### Change 2 — the report prints the send loop's own lateness
+
+`loadgen.Drive` measures each latency from the time the request was *due*, which is the coordinated-omission correction §2.1 is about. What no run has ever printed is whether the send loop met that schedule. Absent it, every void round leaves "was it the instrument?" open to be re-litigated from outside the data.
+
+`Drive` now returns the dispatch lateness of every request — including shed ones, because the loop falling behind and the cap binding happen in the same stretch — and the rung prints its p50 and max. Measured before the `GCPauseTotal` read and appended to a preallocated slice, so the instrument does not become what it measures.
+
+This moves nothing. It is a column that did not exist.
+
+#### Change 3 — the suspension check covers the warm-up
+
+`loadgen.Elapsed` compares monotonic against wall clock and is how a run learns the machine slept. It was called from `benchRung` and nowhere else. `benchCold`, `benchUnloaded` and the span between them used plain `time.Since`.
+
+That is the wrong span to leave uncovered. The unloaded p50 is the denominator of every rung's arrival rate and the reference `SaturationRate` compares each rung against, so a machine that slept through the sequential replay scales the entire ladder from a median of a machine that was not running. Milestone 14's slept arm is where this shows: its unloaded p50 was 39.134 ms against a 32.8–35.1 ms band across the other runs, the single outlier, and nothing in the instrument remarked on it.
+
+The check is now one span across the whole warm-up, and exceeding `SuspendTolerance` is fatal rather than a printed caveat — for the same reason an erroring warm-up is already fatal. These are not requests the run reports; they are what every rate is derived from.
+
+#### Change 4 — `-preflight` exits non-zero
+
+`make bench-preflight` has been a documented step whose pass line was a person reading two printed lines. Its own comment registered the escalation: *"If a fourth ladder still comes back void, this becomes a `-preflight` flag with an exit code."* Four have.
+
+`-preflight` applies the registered pass line — every rung's p50 at most twice this run's unloaded p50, and shed 0 — and returns an error, which the command turns into a non-zero exit. The threshold is `loadgen.SaturationRate`'s constant rather than a number chosen here, and it is strictly past, so a rung sitting exactly at twice still passes. A run that measured no rungs fails: a gate that passes without a measurement is the failure it exists to prevent.
+
+The rate stays in the Makefile. Putting 27.28 in the binary would be a second spelling of the ladder's top rung.
+
+#### The procedure this buys
+
+```bash
+make bench-preflight && make bench    # the gate now blocks the ladder
+```
+
+The three preconditions of §5.7 and §5.8 are unchanged and are still the ones four rounds failed on: a quiet window, **the lid open**, and a preflight pass immediately before each arm. What changes is that the third is now enforced by the exit code instead of by a person.
+
+The window is longer. Twenty percent more requests per rung puts a two-arm ladder near 3.5 hours rather than 3.2.
 
 ## 6. The prediction being graded
 

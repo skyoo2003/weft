@@ -78,6 +78,10 @@ type benchOpts struct {
 	memprofile  string
 	writes      bool
 	writedocs   int
+	// preflight turns the run into a gate: the rungs are still measured and printed,
+	// and the command exits non-zero unless every one of them passed the line D-024
+	// registered. It does not choose the rates — the Makefile names them.
+	preflight bool
 	// http is the address of a running weftd. Empty is the in-process arm every
 	// milestone before 27 measured. Set, the ladder drives the server through a
 	// socket and reads *its* counters rather than this process's — see
@@ -95,7 +99,14 @@ func benchFlags(args []string) (benchOpts, error) {
 		fs.Float64Var(&o.rate, "rate", 0, "arrival rate in queries/sec; 0 sweeps the ladder")
 		fs.StringVar(&ratesRaw, "rates", "", "comma-separated arrival rates to run in order, instead of "+
 			"the sweep -rate 0 derives; the load-point rule is not applied to a ladder you chose")
-		fs.IntVar(&o.rotations, "rotations", 200, "passes over the query set per rung (50 queries x 200 = 10,000 samples)")
+		// 240 rather than 200, and the twenty percent is not slack. 200 over 50 judged
+		// queries is exactly 10,000, and loadgen.Printable wants exactly 10,000 for a
+		// p99 — so one shed request at the top rung erased the figure the ladder exists
+		// to produce, which is how milestone 7's second and third repetitions died.
+		// Registered in docs/PERF.md section 5.9 before the run that uses it, with what
+		// it can move: the memory clause reads a peak the extra requests can raise.
+		fs.IntVar(&o.rotations, "rotations", 240, "passes over the query set per rung "+
+			"(50 queries x 240 = 12,000 samples: the 10,000 a p99 needs, plus 20% headroom for shed)")
 		fs.IntVar(&o.inflight, "inflight", 0, "cap on concurrent requests; 0 is 4 per core")
 		fs.StringVar(&o.arm, "arm", benchArmText, "scorers to load: text or text+vector")
 		fs.StringVar(&o.cpuprofile, "cpuprofile", "", "write a CPU profile of the whole run here")
@@ -103,6 +114,9 @@ func benchFlags(args []string) (benchOpts, error) {
 			"it says what the rung's KiB/query line cannot, which call sites the bytes came from")
 		fs.BoolVar(&o.writes, "writes", false, "instead of the ladder, drop one Commit into a read load and price the write lock (copies the index first)")
 		fs.IntVar(&o.writedocs, "writedocs", 1, "documents the -writes commit adds; past ivfMinDocs the commit trains a partition, which is the expensive case")
+		fs.BoolVar(&o.preflight, "preflight", false, "exit non-zero unless every rung's p50 is at most "+
+			"twice this run's unloaded p50 and nothing was shed; the gate that decides whether the "+
+			"ladder is worth its window")
 		fs.StringVar(&o.http, "http", "", "drive a running weftd at this address instead of searching in-process; "+
 			"memory and collector figures then come from the server's GET /_nodes/stats")
 		fs.StringVar(&o.httpIndex, "http-index", "papers", "index name to search when -http is set")
@@ -270,6 +284,11 @@ func bench(ctx context.Context, args []string) error {
 	// interrupted ladder indistinguishable from a complete shorter one by the time the
 	// rule saw it.
 	benchSummary(os.Stdout, o.arm, ruleLadder, rates, p50s, reports, unloaded)
+
+	// After the summary, so a failing probe still shows the operator how bad it was.
+	if err := preflightVerdict(o.preflight, reports, unloaded); err != nil {
+		return err
+	}
 	if f := failed.Load(); f > 0 {
 		fmt.Printf("\nWARNING: %d requests returned an error and are counted in the distributions above\n", f)
 	}
@@ -371,6 +390,12 @@ func benchDo(ctx context.Context, qs []eval.Query, scorers []engine.Scorer, fail
 // benchWarmup runs the two preliminaries and returns the number the ladder is
 // scaled from.
 func benchWarmup(ctx context.Context, qs []eval.Query, do func(int), failed *atomic.Int64) (time.Duration, error) {
+	// One span across both preliminaries below, checked once at the bottom. Until
+	// milestone 32 loadgen.Elapsed was called from benchRung and nowhere else, so this
+	// stretch — the only one that produces a number every rung is scaled from — was the
+	// one the suspension detector could not see.
+	start := time.Now()
+
 	// Cold first, and only once: these are the numbers that exist for exactly one
 	// pass, because the second pass finds every page the first one faulted in. A
 	// p99 is impossible here — 50 samples — so what is printed is the maximum and
@@ -385,6 +410,21 @@ func benchWarmup(ctx context.Context, qs []eval.Query, do func(int), failed *ato
 	// did not occur — the ladder path returns ctx.Err() for the same event.
 	if ctx.Err() != nil {
 		return 0, ctx.Err()
+	}
+	// Fatal, and for the same reason the error count below is: these requests are not a
+	// distribution the run reports — the median they produce is the denominator of every
+	// rung's arrival rate and the reference SaturationRate compares each rung against. A
+	// machine that slept through the sequential replay scales the whole ladder from a
+	// median of a machine that was not running, and nothing downstream can tell.
+	//
+	// Milestone 14's discarded arm is where that showed: its unloaded p50 was 39.134 ms
+	// against a 32.8-35.1 ms band across every other run, the single outlier, and the
+	// instrument said nothing because the check ran on rungs only.
+	if _, unaccounted := loadgen.Elapsed(start); unaccounted > loadgen.SuspendTolerance {
+		return 0, fmt.Errorf("the process did not run for %v of the cold pass and the sequential "+
+			"replay, so the unloaded median every rung is scaled from was measured across a "+
+			"suspension. Re-run it with the lid open — caffeinate does not prevent clamshell sleep",
+			unaccounted.Round(time.Second))
 	}
 	if unloaded <= 0 {
 		return 0, errors.New("the sequential replay measured no time at all")
@@ -535,10 +575,15 @@ func benchSummary(w io.Writer, arm string, ruleLadder bool, rates []float64, p50
 		if reports[i].unaccounted <= loadgen.SuspendTolerance {
 			continue
 		}
+		// The remedy this used to name was `caffeinate -dimsu`, and it was wrong for
+		// nine milestones: caffeinate holds PreventUserIdleSystemSleep and has no power
+		// over clamshell sleep, which is what discarded both of milestone 14's arms on
+		// a machine at 100% on AC. The mitigation the failure mode actually needs is
+		// physical.
 		outf(w, "\nDISCARD this run: the process did not run for %v of the rung at "+
 			"%.2f/s, so the ladder was measured across a suspension. There is no headline. "+
-			"Re-run it on a machine that stays awake — `caffeinate -dimsu make bench` — and "+
-			"publish the discard.\n",
+			"Re-run it on a machine that stays awake — the lid open, because caffeinate does "+
+			"not prevent clamshell sleep — and publish the discard.\n",
 			reports[i].unaccounted.Round(time.Second), reports[i].rate)
 		return
 	}
@@ -572,6 +617,60 @@ func benchSummary(w io.Writer, arm string, ruleLadder bool, rates []float64, p50
 			rung("HEADLINE", &reports[i])
 		}
 	}
+}
+
+// preflightVerdict is the gate as the command uses it: a no-op unless -preflight was
+// passed, an error when a rung failed, and one printed line when none did.
+//
+// Split from preflightGate so the rule below stays a pure function of the rungs and the
+// denominator — the same reason benchSummary is not written at the bottom of bench.
+// Returned as an error rather than printed as a verdict, because main turns that into a
+// non-zero exit, and `make bench-preflight && make bench` is the whole point: the rounds
+// this replaces were not a failed comparison, they were a comparison nobody made.
+func preflightVerdict(on bool, reports []benchReport, unloaded time.Duration) error {
+	if !on {
+		return nil
+	}
+	if err := preflightGate(reports, unloaded); err != nil {
+		return err
+	}
+	fmt.Printf("\npreflight PASSED: %d rung(s) within 2x the unloaded p50 of %v, nothing shed\n",
+		len(reports), unloaded.Round(time.Microsecond))
+	return nil
+}
+
+// preflightGate is the pass line Makefile registered and nobody ran.
+//
+// Twice the unloaded median is loadgen.SaturationRate's constant rather than a number
+// picked here — the first rung past twice it is saturation, and 27.28 q/s was not
+// saturation on the published ladder. A machine that saturates in a one-minute probe
+// cannot reproduce that ladder, and the honest move is to not spend the window. Strictly
+// past, so a rung sitting exactly at twice still passes: that is the same boundary
+// SaturationRate draws, and drawing it differently here would be a second spelling.
+//
+// Every rung rather than the first. -preflight is a gate on whatever rungs it was given,
+// and a probe that checked one of them would pass a ladder whose second rung collapsed.
+//
+// A function rather than four lines inside bench, for the reason benchSummary is one: a
+// rule checked by no test is a rule right up until the day it is not — and this rule is
+// the one four void rounds were spent for want of.
+func preflightGate(reports []benchReport, unloaded time.Duration) error {
+	// A gate that passes without a measurement is the failure it exists to prevent. An
+	// interrupted run reaches here with no rungs, and the loop below would say nothing.
+	if len(reports) == 0 {
+		return errors.New("preflight measured no rungs, so there is nothing for it to have passed: " +
+			"the run was cut short before its first rate reported")
+	}
+	for i := range reports {
+		r := &reports[i]
+		if r.all.P50 > 2*unloaded || r.shed > 0 {
+			return fmt.Errorf("preflight FAILED at %.2f q/s: p50 %v against an unloaded %v "+
+				"(pass is at most 2x) and shed %d (pass is 0). This machine cannot reproduce the "+
+				"published ladder right now — do not spend the window on it",
+				r.rate, r.all.P50.Round(time.Microsecond), unloaded.Round(time.Microsecond), r.shed)
+		}
+	}
+	return nil
 }
 
 // benchReport is one rung.
@@ -614,6 +713,14 @@ type benchReport struct {
 	// the summary refuses to quote it. loadgen.Elapsed says why this is not derivable
 	// from elapsed alone.
 	unaccounted time.Duration
+
+	// dispatch is the send loop's own lateness, and it is the only column here that
+	// describes the instrument rather than the engine. Every latency above is measured
+	// from a request's due time, so a generator that fell behind its own schedule would
+	// charge its lateness to the server and nothing in the report would say so. Four
+	// ladders came back void with that question open; this is what closes it from
+	// inside a run. loadgen.Drive is where it is sampled and why it includes the shed.
+	dispatch loadgen.Quantiles
 }
 
 // benchRung applies one arrival rate and collects everything measured around it.
@@ -646,7 +753,7 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int),
 	start := time.Now()
 	stopProgress := progress.Report(os.Stdout, n, loadgen.ProgressEvery)
 
-	samples, shed := loadgen.Drive(ctx, rate, n, inflight, do)
+	samples, shed, late := loadgen.Drive(ctx, rate, n, inflight, do)
 
 	// Stopped here rather than deferred, and the position is the same argument the
 	// snapshot ordering below makes. Deferred, the reporter would still be ticking
@@ -683,6 +790,10 @@ func benchRung(ctx context.Context, rate float64, n, inflight int, do func(int),
 		rssRaised:   after.maxRSS - before.maxRSS,
 		elapsed:     elapsed,
 		unaccounted: unaccounted,
+		// Reduced here with the rest, which is after the second snapshot above and
+		// therefore outside the measured window — the same ordering the comment above
+		// gives for the two Summarize calls it already made.
+		dispatch: loadgen.Summarize(late),
 	}
 }
 
@@ -773,6 +884,12 @@ func (r benchReport) print(w io.Writer) {
 		fmtQ(r.all.P50, r.all.P50ok), fmtQ(r.all.P95, r.all.P95ok),
 		fmtQ(r.all.P99, r.all.P99ok), fmtQ(r.all.P999, r.all.P999ok),
 		r.all.Max.Round(time.Microsecond))
+	// Directly under latency, because it is the line that says whether the line above
+	// is the server's. A p50 in the hundreds of microseconds is a loop dispatching on
+	// schedule; a p50 that grows with the rate is a generator reporting its own
+	// lateness as the engine's.
+	outf(w, "  dispatch  p50 %s  max %v  (the send loop's own lateness, shed included)\n",
+		fmtQ(r.dispatch.P50, r.dispatch.P50ok), r.dispatch.Max.Round(time.Microsecond))
 	outf(w, "  minus STW p50 %s  p95 %s  p99 %s  p99.9 %s\n",
 		fmtQ(r.exGC.P50, r.exGC.P50ok), fmtQ(r.exGC.P95, r.exGC.P95ok),
 		fmtQ(r.exGC.P99, r.exGC.P99ok), fmtQ(r.exGC.P999, r.exGC.P999ok))
@@ -899,7 +1016,11 @@ func benchWrites(ctx context.Context, o benchOpts, qs []eval.Query, n int, unloa
 	probe := make(chan benchCommitWindow, 1)
 	go func() { probe <- benchCommitProbe(ctx, wix, dst, o.writedocs, fireAt, runStart) }()
 
-	samples, shed := loadgen.Drive(ctx, rate, n, o.inflight, wdo)
+	// Dispatch lateness is dropped here rather than reported. The write arm is not a
+	// rung and none of the three clauses that live on the ladder is judged from it;
+	// what it prices is one Commit against the reads due during it, and the send
+	// loop's own punctuality is not part of that comparison.
+	samples, shed, _ := loadgen.Drive(ctx, rate, n, o.inflight, wdo)
 
 	// Joined, and joined before the window is read. Unsynchronised, an unfinished
 	// commit read as `to == 0` and threw the whole run away with an error blaming the
