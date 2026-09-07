@@ -625,15 +625,26 @@ make bench-preflight
 make -C ../weft-m12-baseline bench EVAL_DATA=$PWD/.eval-data \
   BENCHFLAGS='-rates 27.28 -rotations 10'
 
-# The ladder, baseline first. About 92 minutes each.
+# The ladder, baseline first. About 110 minutes each. -rotations is spelled on both
+# arms and must stay that way — see the correction below.
 date; uptime; caffeinate -dimsu make -C ../weft-m12-baseline bench \
-  EVAL_DATA=$PWD/.eval-data BENCHFLAGS='-rates 3.41,6.82,13.64,27.28'; uptime; date
+  EVAL_DATA=$PWD/.eval-data BENCHFLAGS='-rates 3.41,6.82,13.64,27.28 -rotations 240'; uptime; date
 date; uptime; caffeinate -dimsu make bench \
-  BENCHFLAGS='-rates 3.41,6.82,13.64,27.28'; uptime; date
+  BENCHFLAGS='-rates 3.41,6.82,13.64,27.28 -rotations 240'; uptime; date
 
 # Milestone 9's clause. First to be cut.
 date; uptime; caffeinate -dimsu make bench BENCHFLAGS='-writes -writedocs 20000'; uptime; date
 ```
+
+`caffeinate` above prevents idle sleep and nothing else. **The lid stays open** — that is not a belt-and-braces addition, it is the mitigation for the failure mode that discarded both arms of the previous attempt.
+
+**Correction, made before this round's arms were run rather than after: `-rotations` is now spelled on both arms.**
+
+Milestone 32 raised the flag's default from 200 to 240 (§5.9), and it raised it on `main` only. `700a178` predates that change and still defaults to 200. The commands above passed `-rates` alone and took the default for everything else, so run as they were previously written the baseline arm would send 10,000 requests per rung and the HEAD arm 12,000 — **the arms would differ by 20% of the work, and the difference would be the instrument rather than the code under test.** That is the confound this section's "same sitting" rule exists to prevent, arriving through a flag default instead of through a busy machine.
+
+240 on both rather than 200 on both, because §5.9 registered the reason for 240 — a p99 needs exactly 10,000 samples, so the old default left a rung one shed request away from having no headline — and the baseline arm accepts the flag: milestone 32 moved the default, not the flag.
+
+**A second asymmetry between the arms is named rather than removed.** The warm-up suspension check (§5.9, change 3) is also `main`-only, so a machine that slept during the baseline arm's cold pass or sequential replay would be caught on the HEAD arm and not on the baseline one. The per-rung check that discards a whole ladder is present on both, and it is the one that has ever fired. Backporting a check into a historical commit would make the baseline arm no longer that commit's code, which costs more than the asymmetry does.
 
 #### The four readings, fixed now
 
@@ -649,11 +660,11 @@ Readings 1 and 4 are new against §5.6. Reading 4 renames §5.5's reading 3; rea
 | run | command | machine time | cut |
 | --- | --- | --- | --- |
 | preflight ×2 | `make bench-preflight` | ~2 min | **not cut** |
-| ladder — baseline | `-rates 3.41,6.82,13.64,27.28` @ `700a178` | ~92 min | **not cut** |
-| ladder — HEAD | the same ladder @ `eedc04a` | ~92 min | **not cut** |
+| ladder — baseline | `-rates 3.41,6.82,13.64,27.28 -rotations 240` @ `700a178` | ~110 min | **not cut** |
+| ladder — HEAD | the same ladder and the same flags @ `main` | ~110 min | **not cut** |
 | write arm ×2 | `-writes -writedocs 20000` | ~90 min | **cut first** |
 
-**3.2 hours** for the core, **4.8** with the write arms.
+**3.5 hours** for the core, **5.1** with the write arms. The core was 3.2 until milestone 32 took `-rotations` to 240; twenty percent more requests per rung is twenty percent more wall clock, and the window has to be booked against the new figure rather than the one every earlier round quoted.
 
 The write arms go first — what is lost is milestone 9's read clause alone, and the other three clauses live on the ladder. **Running one ladder arm is not a cut, it is void production** — that is exactly what §5.6 paid for, so the ladder **runs on both arms or on neither.**
 
@@ -746,6 +757,8 @@ They are registered here because [D-012](DECISIONS.md) forbids the opposite. A r
 **What this can move, stated before it does.** The memory clause reads the *ladder's* peak `ru_maxrss` against 120 MiB, with a published denominator of 100.7 MiB ([D-014](DECISIONS.md)). Twenty percent more requests per rung is twenty percent more opportunity for the mark to rise. If clause 3 comes back missed, this change is a candidate explanation and is on the record as one **before** the run rather than offered afterwards. The other two clauses are insensitive to sample count: shed 0 is shed 0, and a p50 over 12,000 samples is the same statistic as a p50 over 10,000.
 
 `bench/`'s own default stays at 200. The bleve comparison is not held against these clauses, and raising both would only make `make bench-compare` longer.
+
+**A default that moves on one arm and not the other is a confound, so §5.7 now spells the flag on both.** The A/B's baseline is a worktree at a commit predating this change, which still defaults to 200; taking the default on each arm would have sent 10,000 requests per rung on one and 12,000 on the other — a difference between the arms that is not the code under test. Only the default moved in this milestone, not the flag, so `-rotations 240` is accepted by both.
 
 #### Change 2 — the report prints the send loop's own lateness
 
