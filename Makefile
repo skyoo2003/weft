@@ -388,6 +388,13 @@ eval-full:
 # and is resumable, so rerunning it continues rather than starting over. See
 # docs/EVAL.md section 3 for the downloads it expects to already be in place.
 #
+# Rerunning it while it is *already running* is the thing that is not safe, and this
+# target is how that happened: it passes no -data, so two people — or one person and
+# a forgotten detached run — contend for the same default .eval-data. Both resume
+# correctly and both append, which is invisible until `build` refuses the result.
+# prepare now takes .eval-data/s2.jsonl.lock and refuses to start beside itself; if a
+# run was killed, delete that file. D-037.
+#
 # The query vectors sit between the two Go steps and are not one of them: they come
 # out of a PyTorch model this repository deliberately does not depend on, so the step
 # is checked rather than run. Without it `make eval` still succeeds — loadQueries
