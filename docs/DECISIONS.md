@@ -1523,3 +1523,49 @@ The narrower alternative — take change 1 only, skip 2 through 4 — lost for l
 **A ladder that still comes back void on a quiet, awake machine after a passing preflight.** That is D-024's falsification condition restated, and it has already fired once. If it fires again with all four defects closed, the problem is not the instrument's configuration — it is the instrument's design, and the next decision is about `internal/loadgen` rather than about how it is invoked.
 
 The weaker signal: clause 3 coming back missed by a margin near 20%. That would make change 1 the likelier explanation than the engine, and the honest answer is to re-run the memory clause at 200 rotations rather than to argue the reading either way.
+
+## D-037 — `prepare` takes the cache's lock, or does not start
+
+Milestone 14's corpus build · accepted 2026-09-08
+
+### Question
+
+`weft-eval prepare` appends to `s2.jsonl` and resumes by skipping what is already in it. Nothing stops two of them running at once, and on 2026-09-08 two did.
+
+The second started when the first had written 141,140 records. It resumed correctly — it skipped exactly those — and then both processes fetched the same remaining 30,192 targets and appended both copies. The file ended at 201,524 lines holding 171,332 keys, 30,192 of them twice, and the duplicate region begins precisely at the record the second run resumed from.
+
+**The failure is quiet in the way that matters.** Neither process errored. Both finished. `build` refused the result, correctly, with its "two caches concatenated?" message — which is the diagnosis for a different cause, so the operator is told the right thing to do for the wrong reason. Nothing in `prepare`'s own output at any point said a second writer existed.
+
+Two things make this worth a decision rather than a note.
+
+**It races with this repository's own instructions.** `make eval-data` runs `go run ./cmd/weft-eval prepare` with no `-data`, so it takes the default `.eval-data`. The documented way to build the corpus is therefore also the way to start a second writer against a shared file, and the target says nothing about it.
+
+**The run is hours long and resumable, which is what makes a second one attractive.** An operator who sees no progress, or who forgets a detached run, has every reason to start another — and resumability, which exists to make that safe, is what makes it silently destructive.
+
+### Decision
+
+**An exclusive lockfile beside the cache. `prepare` refuses to start while it is held.**
+
+`os.O_CREATE|os.O_EXCL` on `<data>/s2.jsonl.lock`, taken after flag validation and before anything is written, released on return. The refusal names the file and says to delete it if a previous run was killed. Standard library only, no new dependency.
+
+The lock records a pid and a start time **for the person reading it**. Nothing parses it back. A run that has been going for six minutes and one that has been dead for two days are the same empty file otherwise, and the operator is the one who can tell them apart.
+
+### The alternative, and why it lost
+
+**Detect the duplicates instead of preventing them.** `prepare` already scans the cache to resume, so it could notice a key it has seen and refuse or deduplicate. That is strictly weaker: it finds the damage after both processes have spent hours of rate-limited API budget fetching the same 30,192 documents twice, and it cannot tell a concurrent write from a cache concatenated by hand — which is the ambiguity that made `build`'s existing message misleading.
+
+**A pid-based liveness check** — read the lock, signal 0 to the pid, steal it if the process is gone. It removes the one operator step this design keeps, and buys it with a race: pids are reused, so a stale lock from a killed run whose pid now belongs to something else reads as live. The cost of the manual step is one line in an error message; the cost of the race is another silent double-fetch.
+
+**`flock` rather than a lockfile.** It releases automatically when the process dies, which is genuinely better on the stale-lock question. It is also not in the standard library portably, and the staleness it would fix is a message rather than a corruption.
+
+### What this costs
+
+**A killed run leaves a file someone has to delete.** That is the whole cost, it is paid by the rarest path, and the error message is written for exactly the person paying it.
+
+It does not protect `build`, `run`, `sweep`, `weights` or `diagnose`. Those read the cache and write elsewhere, and two of them racing produces two correct answers. `prepare` is the only appender.
+
+### What would show this was wrong
+
+**A cache corrupted with the lock in place.** That would mean the append path has a second writer this does not cover — a `-data` pointed at the same directory by two different paths, most likely, which `filepath.Join` does not canonicalise.
+
+The weaker signal: operators routinely deleting the lockfile to get past it. That would mean runs are dying often enough that staleness is the common case rather than the rare one, and the answer then is `flock` on the platforms that have it, not a shorter message.
