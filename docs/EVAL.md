@@ -199,6 +199,8 @@ The full values are in `cmd/weft-eval/snapshot.go`, which is the authority; the 
 
 `s2.jsonl` and `query-vectors.jsonl` are deliberately not pinned — they are generated from API responses and a local model, and what covers them is `prepare`'s model tally, `build`'s coverage gate and the query-vector text pairing. `-any-snapshot` skips the check for a deliberately different corpus, and says in its own help text that numbers measured that way are not the ones this document publishes.
 
+**Those three cover completeness rather than identity, and §5.15 is what that turned out to mean**: the same endpoint served a materially different vector for one paper minutes apart, and a rebuild three and a half weeks later differs from §5.6 by 304 in-corpus edges. The unpinned half of the data is unpinnable from here — the section records it and says what it does and does not put at risk.
+
 Two things differ from what the plan assumed, both in the cheaper direction:
 
 - **No API key is required.** The plan listed a Semantic Scholar key as a blocker. The unauthenticated endpoint serves the same fields under a lower shared rate limit; a key only makes it faster. `-api-key` and `S2_API_KEY` are honoured when one is available.
@@ -539,6 +541,66 @@ The binding graph verdict is unmoved at −0.1228 [−0.1555, −0.0905].
 That claim was already a hundredth of a point from undetermined at 50 queries, and the approximation spent it. The honest statement after this milestone is that the vector scorer's contribution over text is **not distinguishable from zero on this benchmark**. It is a small enough corpus of queries that this says as much about the benchmark as about the scorer, which is why §5.6's coverage note and §6 both matter more than the point estimate.
 
 **And the exact path is still reachable.** A segment with no partition answers with every id it holds, so a format v2 index — which is what this directory was until milestone 3b rebuilt it — is scored exactly. Run against it, `text+vector` was 0.6233: the same corpus, read by the same build, with the approximation switched off by the bytes on disk rather than by a flag.
+
+### 5.15 The corpus is pinned; what it is joined to is not, and cannot be
+
+Found on 2026-09-08, rebuilding `.eval-data` from scratch on a machine that had lost it.
+
+§5.1 pins four downloads by size and sha256, and says of the fifth artifact:
+
+> `s2.jsonl` and `query-vectors.jsonl` are deliberately not pinned — they are generated from API responses and a local model, and what covers them is `prepare`'s model tally, `build`'s coverage gate and the query-vector text pairing.
+
+**Those three cover completeness. None of them covers identity.** A cache with a vector for every document passes the tally and the gate whatever the vectors are, and Semantic Scholar does not promise the same answer twice.
+
+#### The mechanism, measured directly
+
+An accident supplied the experiment. Two `prepare` runs overlapped (D-037), and the second re-fetched 30,192 documents the first had already fetched — the same keys, from the same endpoint, minutes apart. The concurrent cache was kept at `s2.jsonl.raw-concurrent`, which makes it a paired sample of the API against itself.
+
+201,524 records, 171,332 distinct keys, 30,192 of them fetched twice. **Two pairs disagree:**
+
+| Key | What differs |
+| --- | --- |
+| `s6ezxi5r` | vectors byte-identical; **references 122 → 123** |
+| `tp6qq2pu` | same `corpus_id` 214767979, same `model` `specter_v2`, both 768-dimensional; **vectors differ, cosine 0.910736**, mean absolute difference 0.2603 per component |
+
+`tp6qq2pu` is the one that matters. That is not a rounding difference or a truncated response — it is a materially different embedding served for one paper within minutes, under the same model name. Nothing in this pipeline could have detected it: the width matched, the model string matched, the coverage tally was identical either way.
+
+Two in 30,192 over about three minutes is a rate, not a certainty, and it is small. The next table is what that rate integrates to.
+
+#### The same corpus, three and a half weeks later
+
+Rebuilt from byte-identical inputs — `corpus.jsonl`, `queries.jsonl`, `qrels/test.tsv` and `metadata.csv` all matching the §5.1 hashes, and `index/provenance.json` recording `corpus_sha256: aded6989…04ed00d7`, `partial: false`, no `prepare_unpinned` marker.
+
+| Quantity | §5.6, fetched 2026-08-14 | Rebuilt 2026-09-08 | Δ |
+| --- | --- | --- | --- |
+| Documents with a vector | 148,232 | 148,233 | +1 |
+| Documents with an in-corpus edge | 48,194 | 48,216 | +22 |
+| In-corpus edges | 579,719 | 580,023 | +304 |
+| Dangling references | 1,692,610 | 1,692,091 | −519 |
+| Papers Semantic Scholar could not find | 2,321 | 2,359 | +38 |
+
+Every delta is Semantic Scholar's side moving. The corpus side is identical by hash.
+
+#### Why this is a caveat on §5 and not a defect in either build
+
+§5.13 measured the sensitivity and its title is the finding: **one edge in 579,720 moved the binding delta by 0.0025.** This rebuild differs by 304 edges. So the numbers in §5.8 through §5.11 will not reprint exactly from a fresh fetch — and the third decimal of any individual graph arm was already declared unreliable there for a different reason: degeneracy, a tie group most of the graph stream lives inside, where a single changed adjacency re-decides the group.
+
+**The verdict is not at risk, and the reason is structural rather than reassurance.** §6 rests on 28 configurations with 0 sign flips and no interval near zero; a delta of −0.1227 does not become positive because 304 edges appeared. What is at risk is anyone who reruns §7 and expects the published figures back.
+
+Two consequences that land differently and should not be conflated:
+
+- **The latency ladder is indifferent.** `docs/PERF.md`'s clauses measure how long a query takes, not which documents it finds. Its numbers do not depend on which edges exist, so a perf run on a rebuilt index is comparable to the published one.
+- **The ranking numbers are not.** Anything re-deriving §5's table is measuring a different graph than the one published, and should say which fetch it used.
+
+#### What this does not do
+
+It does not fix anything. `s2.jsonl` could be hashed once built and the digest carried into `provenance.json`, which would turn "the same corpus" into a checkable claim and let a rerun say *this is not the fetch that produced the published table* instead of silently producing another one. That is a real change to the provenance chain and belongs in a decision of its own; it is named here so the gap is on the record rather than rediscovered a third time.
+
+§5.12 and §5.13 both found non-determinism inside this repository and fixed it. This one is outside it, and cannot be fixed from here — only recorded, and pinned after the fact.
+
+#### Provenance of this section
+
+The paired-sample analysis — the record counts, the two disagreeing keys, the cosine and the component-wise difference — was computed from the retained `s2.jsonl.raw-concurrent` and is reproducible from it. The coverage table is reported from the rebuild's own `build` output and was not independently re-derived; the provenance record it cites was read from the built index.
 
 ---
 
