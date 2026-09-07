@@ -1478,3 +1478,48 @@ The *response* is fully typed, which is where a client wants types. The trade is
 **A second module nobody runs.** `make grpc-build` in CI is the mitigation and not the proof; the proof would be a release where the gRPC surface was broken for weeks and no one noticed, which is the failure `bench/` already had once. The answer then is not a third module — it is folding the surface into the root and paying the dependency, with the metric formally withdrawn in a decision of its own rather than quietly.
 
 The weaker signal: `TestTheProtoAndTheCoreDoNotDrift` starting to need exceptions. It has one today (`index`, which lives in the URL path on HTTP and has nowhere to sit in a body-decoded struct) and the reason is structural. A second and a third would mean the two surfaces are no longer one request in two encodings, and the drift test would be documenting the drift instead of preventing it.
+
+## D-036 — Fix the instrument before running the ladder again
+
+Milestone 32 · accepted 2026-09-07
+
+### Question
+
+Four ladders have come back void and **not one of them was the engine**: milestone 11's run A died during the index load, milestone 13's ran on a machine that had just done a 626 MiB `make eval`, a `go test -race` and two lint passes, milestone 14's first attempt took a SIGTERM at 46 minutes as a session-managed background job, and its second completed all eight rungs and printed `DISCARD this run` on both arms because the lid was closed.
+
+Both detectors worked correctly every time. The preflight probe passed 4/4 at 1.00×–1.05×, and `SuspendTolerance` caught the sleep with durations attached. What failed was the mitigation, and D-024's own falsification condition fired on its first serious use.
+
+So the question is not whether the engine is slow. It is whether the next 3.2-hour window is worth spending on an instrument that has four ways to produce an unjudgeable run and reports none of them until afterwards.
+
+### Decision
+
+**Close four instrument defects before the next ladder, and register every one of them in [PERF](PERF.md) §5.9 first.** The maintainer chose it on 2026-09-07.
+
+1. `-rotations` default 200 → 240. The default produced exactly 10,000 samples and `Printable` requires exactly 10,000 for a p99, so one shed request at the top rung erased the deliverable — which is how milestone 7's repetitions 2 and 3 died.
+2. `Drive` returns the send loop's own dispatch lateness, and the rung prints it. The one measurement that can acquit the generator from inside the run.
+3. The suspension check covers the warm-up. It ran on rungs only, and the span it did not cover produces the unloaded p50 — the denominator of every rung's rate.
+4. `-preflight` returns an error, which the command turns into a non-zero exit.
+
+**None of these changes a pass line.** The three clauses that live on the ladder keep their wording and their published denominators. That distinction is the whole of why this is a decision rather than a chore: changing an instrument between a measurement and its repetition is ordinarily how a number is made to say what its author wants, and the separation from D-012 is that these four are registered before the run and none of them is a threshold.
+
+Change 4 is not a new idea. `Makefile`'s own comment registered it: *"If a fourth ladder still comes back void, this becomes a `-preflight` flag with an exit code (~30 lines in `cmd/weft-eval/bench.go`)."* Four have. The escalation was pre-committed and this is it firing.
+
+### The alternative, and why it lost
+
+**Run it as it stands, and keep the comparison basis byte-identical to milestone 8's published ladder.** There is a real argument here — the published figures came off this exact instrument, and every change is one more difference between the run being compared and the run it is compared against.
+
+It lost on change 1 alone. The price of byte-identity is that a single shed request at the top rung deletes the p99, and the top rung under a suspected collapse is precisely where shedding happens. An instrument configured so that the condition it exists to characterise erases its own output is not preserving a comparison; it is declining to make one.
+
+The narrower alternative — take change 1 only, skip 2 through 4 — lost for less: they cost under an hour together, three of them are strictly additive, and the two failures the last two rounds actually died of are the ones changes 3 and 4 catch in band.
+
+### What this costs
+
+**Twenty percent more wall clock per rung.** A two-arm ladder goes from about 3.2 hours to about 3.5. The window was already the binding constraint, and this makes it slightly worse.
+
+**A candidate explanation attached to clause 3 in advance.** The memory clause reads the ladder's peak `ru_maxrss` against 120 MiB with a published denominator of 100.7 MiB (D-014). Twenty percent more requests per rung is twenty percent more chance for the mark to rise, so if clause 3 comes back missed there are now two readings of it and PERF §5.9 says so before the run rather than after.
+
+### What would show this was wrong
+
+**A ladder that still comes back void on a quiet, awake machine after a passing preflight.** That is D-024's falsification condition restated, and it has already fired once. If it fires again with all four defects closed, the problem is not the instrument's configuration — it is the instrument's design, and the next decision is about `internal/loadgen` rather than about how it is invoked.
+
+The weaker signal: clause 3 coming back missed by a margin near 20%. That would make change 1 the likelier explanation than the engine, and the honest answer is to re-run the memory clause at 200 rotations rather than to argue the reading either way.
