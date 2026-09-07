@@ -301,16 +301,29 @@ func GCCycles() uint64 {
 // do must be safe for concurrent use. It is handed the request's index so a caller
 // can rotate through a query set without sharing a cursor.
 //
+// late is the send loop's own lateness: how far past its due time each request was
+// when the loop reached it. Every latency here is measured from the due time, which
+// is the coordinated-omission correction — but nothing said whether the loop met that
+// schedule in the first place, and four void ladders left "was it the instrument?"
+// open to be argued from outside the data. This is the reading that closes it from
+// inside a run.
+//
+// Every request has an entry, shed ones included. A sample taken only from admitted
+// requests would drop exactly the stretch it exists to describe: the loop falling
+// behind and the in-flight cap binding are the same stretch.
+//
 // rate must be positive; a non-positive rate has no schedule and returns nothing.
 // Callers validate the flag and say so in words — this is the backstop that keeps
 // a bad value out of time.Duration(float64(time.Second)/rate), whose float-to-int
 // conversion at ±Inf is undefined in Go and differs between amd64 and arm64.
-func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) (samples []Sample, shed int) {
+func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) (
+	samples []Sample, shed int, late []time.Duration,
+) {
 	if maxInflight < 1 {
 		maxInflight = 1
 	}
 	if !(rate > 0) { //nolint:staticcheck // written this way to reject NaN as well as <= 0
-		return nil, 0
+		return nil, 0, nil
 	}
 	interval := time.Duration(float64(time.Second) / rate)
 
@@ -319,6 +332,10 @@ func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) 
 		wg sync.WaitGroup
 	)
 	samples = make([]Sample, 0, n)
+	// Sized once here rather than grown. An append that reallocates inside the send
+	// loop delays the loop, and this slice exists to measure that delay — the same
+	// sentence pauseBuf is written under.
+	late = make([]time.Duration, 0, n)
 	slots := make(chan struct{}, maxInflight)
 	start := time.Now()
 
@@ -334,7 +351,7 @@ func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) 
 			// rather than overloading. The report prints the sample count
 			// alongside, which is what says the run was cut short.
 			wg.Wait()
-			return samples, shed
+			return samples, shed, late
 		}
 		offset := time.Duration(i) * interval
 		due := start.Add(offset)
@@ -345,9 +362,15 @@ func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) 
 			case <-ctx.Done():
 				t.Stop()
 				wg.Wait()
-				return samples, shed
+				return samples, shed, late
 			}
 		}
+		// Before the GCPauseTotal read below, and before the shed branch. That read
+		// takes the runtime's metrics semaphore and reaches 377 µs at the p99 under
+		// concurrency, which would arrive here as the instrument's own cost rather
+		// than as the loop's lateness. Before the shed branch for the reason the doc
+		// comment gives: the loop is behind and the cap binds over the same stretch.
+		late = append(late, time.Since(due))
 		// Read here, not inside the goroutine, and the reason is in Sample.GCPause:
 		// this is the closest the loop can get to the due time the latency is
 		// measured from, and a pause charged over a shorter window than the latency
@@ -374,7 +397,7 @@ func Drive(ctx context.Context, rate float64, n, maxInflight int, do func(int)) 
 		}()
 	}
 	wg.Wait()
-	return samples, shed
+	return samples, shed, late
 }
 
 // RuleApplies reports whether SaturationRate and HeadlineRate have a ladder to apply

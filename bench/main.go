@@ -416,7 +416,12 @@ func measureRung(ctx context.Context, r float64, n, inflight int, do func(int)) 
 	gcCPU0, totalCPU0 := loadgen.GCCPUSeconds()
 	start := time.Now()
 	stopProgress := progress.Report(os.Stdout, n, loadgen.ProgressEvery)
-	samples, shed := loadgen.Drive(ctx, r, n, inflight, do)
+	// Dispatch lateness is dropped on this side. weft's ladder prints it because the
+	// question it answers — was a void run the generator's fault — is asked of that
+	// ladder; the bleve comparison shares the driver precisely so that no such
+	// difference exists between the two arms, and a column on one side only would
+	// invite the reading that one does.
+	samples, shed, _ := loadgen.Drive(ctx, r, n, inflight, do)
 
 	// Stopped before the counters are read, not deferred: a reporter still ticking
 	// would charge this rung with its own progress lines, and its next line would land
@@ -475,9 +480,16 @@ func summarize(w io.Writer, rungs []rung, rates []float64, p50s []time.Duration,
 		if rungs[i].unaccounted <= loadgen.SuspendTolerance {
 			continue
 		}
+		// The remedy this used to name was `caffeinate -dimsu`, and it was wrong for
+		// nine milestones: caffeinate holds PreventUserIdleSystemSleep and has no power
+		// over clamshell sleep, which is what discarded both of milestone 14's arms on a
+		// machine at 100% on AC. Corrected on weft's side in milestone 32 and here in
+		// the same breath — this is the message an operator reads at hour three of a
+		// discarded run, and `bench-compare` is one of the arms about to be runnable.
 		outf(w, "\nDISCARD this run: the process did not run for %v of the rung at "+
 			"%.2f/s, so the ladder was measured across a suspension. There is no headline. "+
-			"Re-run it on a machine that stays awake — `caffeinate -dimsu make bench-compare`.\n",
+			"Re-run it on a machine that stays awake — the lid open, because caffeinate does "+
+			"not prevent clamshell sleep.\n",
 			rungs[i].unaccounted.Round(time.Second), rungs[i].rate)
 		return
 	}

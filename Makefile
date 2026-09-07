@@ -250,8 +250,10 @@ recall:
 # the bleve side through `bench-build`; the numbers themselves are produced by a
 # person on a quiet machine and published in docs/PERF.md.
 #
-# Long: the ladder's lowest rung sends 10,000 queries at an eighth of measured
-# throughput, and a p99 needs all 10,000 — see internal/loadgen.Printable.
+# Long: the ladder's lowest rung sends 12,000 queries at an eighth of measured
+# throughput. A p99 needs 10,000 of them, and the other 2,000 are headroom so that a
+# rung which sheds still has a printable tail — see internal/loadgen.Printable and
+# docs/PERF.md section 5.9.
 bench:
 	@if [ ! -d $(EVAL_DATA)/index ]; then \
 		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; \
@@ -259,7 +261,7 @@ bench:
 		go run ./cmd/weft-eval bench -data $(EVAL_DATA) $(BENCHFLAGS); \
 	fi
 
-# Milestone 14. Run this before `bench`, and read two lines off it.
+# Milestone 14. Run this before `bench` — `make bench-preflight && make bench`.
 #
 # Twice the ladder above has been spent on a machine that could not reproduce its own
 # published figures, and both times the finding came after the fact: milestone 11's
@@ -269,7 +271,7 @@ bench:
 # on the void machine, 34.072 ms against a published 32.231. The only cheap signal
 # that separates them is the top rate under load: 1.04x published, 78x void.
 #
-# So: the top rung alone, 10 rotations instead of 200. About a minute.
+# So: the top rung alone, 10 rotations instead of 240. About a minute.
 #
 # PASS: the rung's p50 is at most twice the `unloaded: p50` line this same run
 # printed, and shed is 0. Twice is loadgen.SaturationRate's constant rather than a
@@ -283,15 +285,20 @@ bench:
 # and the memory clause reads the *ladder's* peak (docs/PERF.md section 2.7, D-014).
 # Folded into the ladder, this probe would raise the mark before rung 1 reported.
 #
-# ponytail: a documented step, not an enforced one — the comparison is a person
-# reading two printed lines. The two failures were not a failed comparison, they were
-# a probe nobody ran. If a fourth ladder still comes back void, this becomes a
-# -preflight flag with an exit code (~30 lines in cmd/weft-eval/bench.go).
+# The comparison is the command's own since milestone 32. -preflight exits non-zero
+# when a rung saturates or sheds, so `make bench-preflight && make bench` will not
+# spend the window on a machine that cannot reproduce the published ladder. This was a
+# documented step whose pass line was a person reading two printed lines, and the
+# comment here registered the escalation — "if a fourth ladder still comes back void" —
+# which four of them then did. D-036.
+#
+# A missing index is still a SKIP and still exits 0: not having built the corpus is not
+# a failed probe.
 bench-preflight:
 	@if [ ! -d $(EVAL_DATA)/index ]; then \
 		echo "SKIP: no index at $(EVAL_DATA)/index — run 'make eval-data' first"; \
 	else \
-		go run ./cmd/weft-eval bench -data $(EVAL_DATA) -rates 27.28 -rotations 10; \
+		go run ./cmd/weft-eval bench -data $(EVAL_DATA) -rates 27.28 -rotations 10 -preflight; \
 	fi
 
 # Milestone 27: the same ladder, through a socket.
